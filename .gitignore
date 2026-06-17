@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+planner.db
+*.zip
+*.log
+.pytest_cache/

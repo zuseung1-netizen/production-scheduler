@@ -1,0 +1,2004 @@
+"""
+Gantt Planner Tab — with consolidation support.
+
+Changes:
+ - Checkbox: text starts after checkbox (no overlap)
+ - Utilization bar: 2 rows (capacity util + headcount util)
+ - Due lines: drawn per-SO on relevant rows only, below util bar
+ - Customer name shown in plan card
+ - UTIL_H doubled to accommodate 2 rows
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import date, datetime, timedelta
+from typing import Dict, List, Optional, Set, Tuple
+
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QScrollArea,
+    QLabel, QPushButton, QComboBox, QToolTip, QInputDialog,
+    QMessageBox, QMenu, QDialog, QDialogButtonBox, QTextEdit,
+    QApplication, QDateEdit, QFormLayout, QSpinBox,
+    QTableWidget, QTableWidgetItem, QHeaderView, QFrame
+)
+from PyQt6.QtCore import Qt, QRect, QPoint, pyqtSignal, QTimer
+from PyQt6.QtGui import (
+    QPainter, QColor, QFont, QFontMetrics, QPen, QBrush, QCursor
+)
+
+from data.repositories import (
+    PlanRepo, SORepo, SKURepo, ShiftRepo, RoomRepo,
+    CalendarRepo, ConfigRepo, MaterialDemandRepo
+)
+from core.scheduler import scheduler, sku_to_inner, shift_capacity_inner
+from utils.excel_io import export_gantt_plan
+
+
+# ─── Visual constants ─────────────────────────────────────────────────────────
+PALETTE = [
+    "#2E6FD8", "#D4570A", "#27A060", "#C0392B",
+    "#6655CC", "#D49010", "#1A9E9E", "#8B5E3C",
+    "#3A8FAA", "#8B479B", "#1E7A3C", "#CF4545",
+]
+LOCKED_OVERLAY  = QColor(0,   0,   0,   55)
+LATE_FILL       = QColor(192, 40,  40,  235)
+CONSOL_BORDER   = QColor(255, 205, 0)
+CONFLICT_DOT    = QColor(210, 30,  30)
+CHECK_FILL      = QColor(255, 255, 255, 90)
+GRID_LINE       = QColor(218, 220, 230)   # light, clean
+GRID_WEEKEND    = QColor(245, 240, 240)   # weekend column tint
+DUE_LINE        = QColor(205, 50,  50)
+TODAY_LINE      = QColor(24,  128, 255)
+HEADER_BG       = QColor(38,  68,  128)   # deep navy
+HEADER_FG       = QColor(255, 255, 255)
+HEADER_WEEKEND  = QColor(65,  40,  50)
+UTIL_HIGH       = QColor(190, 40,  40)
+UTIL_MED        = QColor(225, 140, 0)
+UTIL_LOW        = QColor(55,  165, 85)
+UTIL_HC_HIGH    = QColor(170, 35,  35)
+UTIL_HC_MED     = QColor(205, 120, 0)
+UTIL_HC_LOW     = QColor(40,  148, 70)
+FINAL_BADGE_BG  = QColor(240, 125, 0)
+MAT_FILL        = QColor(108, 68,  168, 225)
+CARD_STRIP_BG   = QColor(255, 255, 255, 178)   # top strip backing — white, 30% transparent
+
+ROW_BG_A        = QColor(255, 255, 255)      # alternating row — even
+ROW_BG_B        = QColor(246, 248, 254)      # alternating row — odd
+
+CARD_H     = 84   # fixed height per plan card; rows grow vertically when multi-plan
+DAY_W      = 84
+SHIFT_W    = DAY_W   # shift-view cells stay the same width as day-view cards
+HEADER_H   = 52
+UTIL_ROW_H = 18
+UTIL_H     = UTIL_ROW_H * 2
+Y_LABEL_W  = 165
+SKU_COL_W  = 72
+PROC_COL_W = Y_LABEL_W - SKU_COL_W
+CHECKBOX_S  = 11
+CARD_RADIUS = 6   # card corner radius
+PILL_RADIUS = 3   # top pill radius = CARD_RADIUS - PILL_MARGIN, so corners are concentric
+PILL_MARGIN = 3   # inset of the top pill from the card's own edges
+PILL_H      = 18  # top pill height — checkbox / conflict dot / FINAL all live inside it
+PILL_GAP    = 2   # gap between pill bottom and text zone start
+TEXT_PAD_L  = 6   # text left padding (no longer needs to clear the checkbox horizontally)
+# Card internal zones (sum must leave enough text space)
+CARD_TOP_H = PILL_MARGIN + PILL_H + PILL_GAP   # reserved top space before text starts
+CARD_BOT_H = 12   # bottom strip: lock icon
+
+
+def _color_for_key(key: str) -> QColor:
+    return QColor(PALETTE[abs(hash(key)) % len(PALETTE)])
+
+
+# ─── Consolidation engine ─────────────────────────────────────────────────────
+
+class ConsolidationEngine:
+    @staticmethod
+    def validate(plans: List[Dict]) -> Tuple[bool, str]:
+        if len(plans) < 2:
+            return False, "Select at least 2 plan blocks."
+        skus  = {p["sku_code"]     for p in plans}
+        rooms = {p["room_code"]    for p in plans}
+        procs = {p["process_name"] for p in plans}
+        if len(skus) > 1:
+            return False, f"All selected blocks must share the same SKU.\nFound: {', '.join(skus)}"
+        if len(rooms) > 1:
+            return False, f"All selected blocks must share the same room.\nFound: {', '.join(rooms)}"
+        if len(procs) > 1:
+            return False, f"All selected blocks must share the same process.\nFound: {', '.join(procs)}"
+        return True, "OK"
+
+    @staticmethod
+    def consolidate(plans: List[Dict], shifts: List[Dict]) -> Tuple[bool, str]:
+        ok, msg = ConsolidationEngine.validate(plans)
+        if not ok:
+            return False, msg
+
+        group_id  = str(uuid.uuid4())[:8].upper()
+        sku_code  = plans[0]["sku_code"]
+
+        shift_order = {s["shift_no"]: i for i, s in
+                       enumerate(sorted(shifts, key=lambda s: s["shift_no"]))}
+        plans_sorted = sorted(
+            plans,
+            key=lambda p: (p["plan_date"],
+                           shift_order.get(p["shift_no"], p["shift_no"])))
+
+        from collections import defaultdict
+        slot_groups: Dict[Tuple[str, int], List[Dict]] = defaultdict(list)
+        for p in plans_sorted:
+            slot_groups[(p["plan_date"], p["shift_no"])].append(p)
+
+        merged_slots = []
+        for (d, sno), group in sorted(slot_groups.items()):
+            total_qty = sum(p["qty_planned"] for p in group)
+            so_tags   = list({f"{p['so_number']}/{p['line_item']}" for p in group})
+            if any(p["is_locked"] for p in group):
+                return False, "Cannot consolidate locked plan blocks. Unlock first."
+            anchor = group[0]
+            memo_parts = [f"CONSOL-{group_id}"]
+            if len(so_tags) > 1:
+                memo_parts.append("SOs:" + ",".join(so_tags))
+            merged_slots.append({
+                "anchor_id": anchor["plan_id"],
+                "delete_ids": [p["plan_id"] for p in group[1:]],
+                "plan_date": d, "shift_no": sno,
+                "qty": total_qty,
+                "memo": " | ".join(memo_parts),
+                "is_final_seq": any(p.get("is_final_seq") for p in group),
+            })
+
+        packed = ConsolidationEngine._pack_consecutive(merged_slots, shifts)
+
+        for slot in packed:
+            for did in slot.get("delete_ids", []):
+                PlanRepo.delete(did, reason=f"consolidation-merge-{group_id}")
+            PlanRepo.update(slot["anchor_id"], {
+                "plan_date": slot["plan_date"],
+                "shift_no":  slot["shift_no"],
+                "qty_planned": slot["qty"],
+                "is_consolidated": 1,
+                "consolidation_group": group_id,
+                "is_locked": 1,
+                "memo": slot["memo"],
+            }, reason=f"consolidation-{group_id}")
+
+        return True, (f"Consolidation complete.\n"
+                      f"Group: {group_id}  |  {len(packed)} shift block(s)  |  SKU: {sku_code}")
+
+    @staticmethod
+    def _pack_consecutive(merged_slots, shifts) -> List[Dict]:
+        if not merged_slots:
+            return []
+        shift_seq = sorted(shifts, key=lambda s: s["shift_no"])
+        shift_nos = [s["shift_no"] for s in shift_seq]
+        start_date  = merged_slots[0]["plan_date"]
+        start_shift = merged_slots[0]["shift_no"]
+        cur_date  = datetime.strptime(start_date, "%Y-%m-%d").date()
+        cur_shift_idx = shift_nos.index(start_shift) if start_shift in shift_nos else 0
+        result = []
+        for slot in merged_slots:
+            result.append({**slot,
+                           "plan_date": cur_date.strftime("%Y-%m-%d"),
+                           "shift_no": shift_nos[cur_shift_idx]})
+            cur_shift_idx += 1
+            if cur_shift_idx >= len(shift_nos):
+                cur_shift_idx = 0
+                cur_date += timedelta(days=1)
+        return result
+
+    @staticmethod
+    def break_group(group_id: str) -> Tuple[bool, str]:
+        with_group = [p for p in PlanRepo.all()
+                      if p.get("consolidation_group") == group_id]
+        if not with_group:
+            return False, f"Group {group_id} not found."
+        for p in with_group:
+            PlanRepo.update(p["plan_id"], {
+                "is_consolidated": 0,
+                "consolidation_group": None,
+                "is_locked": 0,
+            }, reason=f"break-consolidation-{group_id}")
+        return True, f"Consolidation group {group_id} broken ({len(with_group)} blocks)."
+
+
+# ─── Frozen date-axis header ──────────────────────────────────────────────────
+
+class GanttHeaderWidget(QWidget):
+    """Fixed header that stays at the top when the Gantt scrolls vertically.
+    Horizontal scroll is synced with the QScrollArea scrollbar so dates pan
+    correctly, while the Y-label corner remains anchored."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(HEADER_H)
+        # Data references — set by GanttTab.refresh()
+        self.shift_view   : bool       = False
+        self.horizon_days : int        = 28
+        self.start_date   : date       = date.today()
+        self._shifts      : list       = []
+        self._scroll_h    : int        = 0    # horizontal scrollbar value
+
+    def sync_from(self, canvas: 'GanttCanvas'):
+        """Copy display parameters from the canvas and repaint."""
+        self.shift_view   = canvas.shift_view
+        self.horizon_days = canvas.horizon_days
+        self.start_date   = canvas.start_date
+        self._shifts      = canvas._shifts
+        self.update()
+
+    def set_scroll_h(self, val: int):
+        self._scroll_h = val
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        vw = self.width()
+
+        bold9 = QFont(); bold9.setBold(True); bold9.setPointSize(9)
+        f8    = QFont(); f8.setPointSize(8)
+
+        # ── Date columns (clipped to right of Y-label, panned by scroll) ──
+        p.save()
+        p.setClipRect(Y_LABEL_W, 0, max(0, vw - Y_LABEL_W), HEADER_H)
+        p.translate(-self._scroll_h, 0)
+
+        # Background
+        p.fillRect(0, 0, Y_LABEL_W + self.horizon_days * self._col_w() + 200,
+                   HEADER_H, HEADER_BG)
+
+        if not self.shift_view:
+            for col in range(self.horizon_days):
+                d  = self.start_date + timedelta(days=col)
+                x  = Y_LABEL_W + col * DAY_W
+                if d.weekday() >= 5:
+                    p.fillRect(x, 0, DAY_W, HEADER_H, HEADER_WEEKEND)
+                p.setPen(QPen(QColor(255, 255, 255, 30)))
+                p.drawLine(x, 4, x, HEADER_H - 4)
+                p.setPen(QPen(HEADER_FG))
+                p.setFont(bold9)
+                p.drawText(QRect(x + 2, 2, DAY_W - 4, HEADER_H // 2 - 1),
+                           Qt.AlignmentFlag.AlignCenter, d.strftime("%m/%d"))
+                p.setFont(f8)
+                p.setPen(QPen(QColor(200, 215, 240)))
+                p.drawText(QRect(x + 2, HEADER_H // 2, DAY_W - 4, HEADER_H // 2 - 2),
+                           Qt.AlignmentFlag.AlignCenter, d.strftime("%a"))
+        else:
+            n = len(self._shifts)
+            if n:
+                for day in range(self.horizon_days):
+                    d  = self.start_date + timedelta(days=day)
+                    x0 = Y_LABEL_W + day * n * SHIFT_W
+                    p.setFont(bold9); p.setPen(QPen(HEADER_FG))
+                    p.drawText(QRect(x0, 2, n * SHIFT_W, HEADER_H // 2 - 2),
+                               Qt.AlignmentFlag.AlignCenter, d.strftime("%m/%d"))
+                    p.setFont(f8)
+                    for si, shift in enumerate(self._shifts):
+                        sx = x0 + si * SHIFT_W
+                        p.setPen(QPen(QColor(255, 255, 255, 30)))
+                        p.drawLine(sx, HEADER_H // 2, sx, HEADER_H - 2)
+                        p.setPen(QPen(QColor(200, 215, 240)))
+                        p.drawText(QRect(sx, HEADER_H // 2, SHIFT_W, HEADER_H // 2),
+                                   Qt.AlignmentFlag.AlignCenter,
+                                   f"S{shift['shift_no']}")
+
+        p.restore()
+
+        # ── Y-label corner (always fixed at x=0) ──
+        p.fillRect(0, 0, Y_LABEL_W, HEADER_H, QColor(50, 82, 148))
+        # Thin separator between corner and date columns
+        p.setPen(QPen(QColor(255, 255, 255, 60)))
+        p.drawLine(Y_LABEL_W, 0, Y_LABEL_W, HEADER_H)
+
+        p.end()
+
+    def _col_w(self) -> int:
+        return SHIFT_W if self.shift_view else DAY_W
+
+
+# ─── Gantt Canvas ─────────────────────────────────────────────────────────────
+
+class GanttCanvas(QWidget):
+    planMoved        = pyqtSignal(int, str, int, str)
+    planSelected     = pyqtSignal(dict)
+    selectionChanged = pyqtSignal(list)
+
+    Y_MODE_ROOM = "room"
+    Y_MODE_SO   = "so"
+    Y_MODE_SKU  = "sku"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self.parent_tab = None
+
+        self.y_mode       = self.Y_MODE_ROOM
+        self.shift_view   = False
+        self.horizon_days = 28
+        self.start_date   : date = date.today()
+
+        self._plans    : List[Dict] = []
+        self._sos      : Dict       = {}
+        self._skus     : Dict       = {}
+        self._shifts   : List[Dict] = []
+        self._rows     : List[str]  = []
+        self._conflicts: List[Dict] = []
+
+        self._checked  : Set[int] = set()
+        self._drag_plan_id  : Optional[int]    = None
+        self._drag_origin   : Optional[QPoint] = None
+        self._drag_offset   : QPoint = QPoint(0, 0)
+        self._drag_rect     : Optional[QRect]  = None
+        self._drag_invalid  : bool             = False
+        self._drag_split    : bool             = False   # Ctrl+drag → split mode
+        # (room_code, process_name) pairs that are valid — populated in load_data
+        self._room_proc_set: set               = set()
+
+        self._cell_map      : Dict[int, QRect] = {}
+        self._check_rects   : Dict[int, QRect] = {}
+        self._check_hit_rects: Dict[int, QRect] = {}
+        self._cap_map     : Dict[Tuple, Tuple] = {}
+        # headcount util: (date_str, shift_no) -> (alloc, crp_total)
+        self._hc_map      : Dict[Tuple, Tuple] = {}
+        # plan_id -> (slot_index, total_in_slot) for vertical stacking
+        self._plan_layout : Dict[int, Tuple[int, int]] = {}
+        # O(1) row lookup built in _build_rows()
+        self._row_index   : Dict[str, int] = {}
+        # SO -> sorted row indices, precomputed in load_data()
+        self._so_rows_cache: Dict[Tuple, List[int]] = {}
+        # Calendar unavailability maps
+        self._closed_map  : Dict[Tuple[int, int], str] = {}          # (ri,col)->status for hatching
+        self._slot_closed : Dict[Tuple[str, str, int], str] = {}     # (room,date,shift)->status for badge
+        # Per-row heights and cumulative Y positions (variable when multi-card slots)
+        self._row_heights  : List[int] = []
+        self._row_y_list   : List[int] = []
+        self._total_body_h : int       = 0
+
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._context_menu)
+
+    # ── Data loading ─────────────────────────────────────────────────────────
+
+    def load_data(self, plans, sos, skus, shifts, conflicts, mat_groups=None):
+        self._plans     = plans
+        self._sos       = {(s["so_number"], s["sku_code"], s["line_item"]): s
+                           for s in sos}
+        self._skus      = {s["sku_code"]: s for s in skus}
+        self._mat_groups: Dict[str, List[Dict]] = mat_groups or {}
+        self._shifts   = sorted(shifts, key=lambda s: s["shift_no"])
+        self._conflicts = conflicts
+        valid_ids = {p["plan_id"] for p in plans}
+        self._checked = self._checked & valid_ids
+        self._room_proc_set = {(r["room_code"], r["process_name"]) for r in RoomRepo.all()}
+        self._build_rows()
+        # Precompute SO -> row indices for O(1) lookup in _draw_due_lines
+        so_rows_tmp: Dict[Tuple, set] = {}
+        for plan in self._plans:
+            if plan.get("entity_type") == "MATERIAL":
+                continue
+            k = (plan["so_number"], plan["sku_code"], plan["line_item"])
+            ri = self._row_index.get(self._plan_row_key(plan))
+            if ri is not None:
+                so_rows_tmp.setdefault(k, set()).add(ri)
+        self._so_rows_cache = {k: sorted(v) for k, v in so_rows_tmp.items()}
+        self._build_cap_map()
+        self._build_layout_and_heights()
+        self._build_hc_map()
+        self._build_closed_map()
+        self._update_size()
+        self.update()
+
+    def _plan_row_key(self, plan: Dict) -> str:
+        """Return the row-index key string for a plan (used by _row_index)."""
+        is_mat = plan.get("entity_type") == "MATERIAL"
+        if self.y_mode == self.Y_MODE_ROOM:
+            return plan["room_code"]
+        elif self.y_mode == self.Y_MODE_SO:
+            return (f"[MAT] {plan['entity_code']}" if is_mat
+                    else f"{plan['so_number']}|{plan['sku_code']}|{plan['line_item']}")
+        else:  # Y_MODE_SKU
+            gk   = f"[MAT] {plan['entity_code']}" if is_mat else plan["sku_code"]
+            seq  = plan.get("process_seq") or 1
+            proc = plan.get("process_name") or ""
+            return f"{gk}|{seq}|{proc}"
+
+    def _build_rows(self):
+        if self.y_mode == self.Y_MODE_ROOM:
+            self._rows = sorted({p["room_code"] for p in self._plans}) or RoomRepo.rooms()
+        elif self.y_mode == self.Y_MODE_SO:
+            rows = set()
+            for p in self._plans:
+                if p.get("entity_type") == "MATERIAL":
+                    rows.add(f"[MAT] {p['entity_code']}")
+                else:
+                    rows.add(f"{p['so_number']}|{p['sku_code']}|{p['line_item']}")
+            self._rows = sorted(rows)
+        else:  # Y_MODE_SKU — one sub-row per (entity, process_seq)
+            seen: Dict[Tuple, str] = {}   # (group_key, seq) -> process_name
+            for p in self._plans:
+                is_mat = p.get("entity_type") == "MATERIAL"
+                gk  = f"[MAT] {p['entity_code']}" if is_mat else p["sku_code"]
+                seq = p.get("process_seq") or 1
+                seen[(gk, seq)] = p.get("process_name") or ""
+            def _row_sort(item):
+                (gk, seq), _ = item
+                return (1 if gk.startswith("[MAT]") else 0, gk, seq)
+            self._rows = [f"{gk}|{seq}|{proc}"
+                          for (gk, seq), proc in sorted(seen.items(), key=_row_sort)]
+        # O(1) lookup dict
+        self._row_index = {r: i for i, r in enumerate(self._rows)}
+
+    def _build_cap_map(self):
+        # Read room/shift data directly from DB so UPH/time edits reflect immediately
+        # without needing to re-run auto_plan.
+        rp_fresh = {(r["room_code"], r["process_name"]): r for r in RoomRepo.all()}
+        sh_fresh = {s["shift_no"]: s for s in ShiftRepo.all()}
+
+        self._cap_map = {}
+        plan_inner: Dict[Tuple, int] = {}
+        for p in self._plans:
+            uom = self._skus.get(p["sku_code"], {}).get("uom", 1) or 1
+            key = (p["plan_date"], p["room_code"], p["process_name"], p["shift_no"])
+            plan_inner[key] = plan_inner.get(key, 0) + sku_to_inner(p["qty_planned"], uom)
+        for key, used in plan_inner.items():
+            d, room, proc, sno = key
+            rp = rp_fresh.get((room, proc))
+            sh = sh_fresh.get(sno)
+            if rp and sh:
+                hc = scheduler.get_slot_hc(d, room, proc, sno)
+                cap = shift_capacity_inner(rp, sh, hc)
+            else:
+                cap = 1.0
+            self._cap_map[key] = (used, max(cap, 1))
+
+    def _build_layout_and_heights(self):
+        """Assign vertical slot index to each plan (for stacking) and compute
+        per-row heights based on the max number of plans in any slot of that row.
+        """
+        from collections import defaultdict
+        # slot key: (plan_date, shift_no, row_key) — defines one visual cell
+        slot_plans: Dict[Tuple, List[int]] = defaultdict(list)
+        for p in self._plans:
+            rk = self._plan_row_key(p)
+            sk = (p["plan_date"], p["shift_no"], rk)
+            slot_plans[sk].append(p["plan_id"])
+
+        # Assign vertical index within each slot (sorted by plan_id for stability)
+        self._plan_layout = {}
+        for sk, pids in slot_plans.items():
+            pids_sorted = sorted(pids)
+            for i, pid in enumerate(pids_sorted):
+                self._plan_layout[pid] = (i, len(pids_sorted))
+
+        # Row heights: max cards-per-slot in each row × CARD_H
+        row_max: Dict[str, int] = {}
+        for (_, _, rk), pids in slot_plans.items():
+            row_max[rk] = max(row_max.get(rk, 1), len(pids))
+
+        self._row_y_list  = []
+        self._row_heights = []
+        y = self._body_top()
+        for rk in self._rows:
+            h = max(1, row_max.get(rk, 1)) * CARD_H
+            self._row_y_list.append(y)
+            self._row_heights.append(h)
+            y += h
+        self._total_body_h = y - self._body_top()
+
+    def _build_hc_map(self):
+        """Build headcount utilisation map: (date_str, shift_no) -> (alloc, crp_total).
+        Denominator is CRP total HC, so ratio = people actually placed / people available.
+        """
+        self._hc_map = {}
+        seen: Set[Tuple] = set()
+        for p in self._plans:
+            key = (p["plan_date"], p["shift_no"])
+            if key in seen:
+                continue
+            seen.add(key)
+            alloc, total = scheduler.get_shift_hc_total(
+                p["plan_date"], p["shift_no"])
+            self._hc_map[key] = (alloc, max(total, 1))
+
+    def _build_closed_map(self):
+        """Build two lookups for Y_MODE_ROOM:
+        _closed_map: (row_idx, col_idx) -> 'closed'|'hold'  — used for grid hatching
+        _slot_closed: (room_code, date_str, shift_no) -> 'closed'|'hold'  — used for per-plan badge
+        In day view the col maps multiple shifts to one column; the slot lookup
+        keeps exact shift granularity so plans on open shifts are not badged.
+        """
+        self._closed_map: Dict[Tuple[int, int], str] = {}
+        self._slot_closed: Dict[Tuple[str, str, int], str] = {}
+        if self.y_mode != self.Y_MODE_ROOM or not self._rows:
+            return
+        d0 = self.start_date.strftime("%Y-%m-%d")
+        d1 = (self.start_date + timedelta(days=self.horizon_days - 1)).strftime("%Y-%m-%d")
+        slots = CalendarRepo.get_unavailable_slots(d0, d1)
+        for s in slots:
+            ri = self._row_index.get(s["room_code"])
+            if ri is None:
+                continue
+            col = self._date_to_col(s["cal_date"], s["shift_no"])
+            if col is None:
+                continue
+            status = "hold" if s["is_hold"] else "closed"
+            # Grid hatching: hold takes priority over closed
+            key = (ri, col)
+            if key not in self._closed_map or status == "hold":
+                self._closed_map[key] = status
+            # Exact-shift badge lookup
+            self._slot_closed[(s["room_code"], s["cal_date"], s["shift_no"])] = status
+
+    # ── Geometry ──────────────────────────────────────────────────────────────
+
+    def _col_count(self):
+        return self.horizon_days * len(self._shifts) if self.shift_view else self.horizon_days
+
+    def _col_w(self):
+        return SHIFT_W if self.shift_view else DAY_W
+
+    def _total_w(self):
+        return Y_LABEL_W + self._col_count() * self._col_w()
+
+    def _total_h(self):
+        return self._body_top() + self._total_body_h + 20
+
+    def _row_at_y(self, y: int) -> int:
+        """Return the row index at pixel y, or -1 if outside all rows."""
+        for ri, (ry, rh) in enumerate(zip(self._row_y_list, self._row_heights)):
+            if ry <= y < ry + rh:
+                return ri
+        return -1
+
+    def _update_size(self):
+        self.setMinimumSize(self._total_w(), max(400, self._total_h()))
+
+    def _body_top(self):
+        """Y pixel where gantt body starts (below header + util bars)."""
+        return HEADER_H + UTIL_H
+
+    def _date_to_col(self, d: str, shift_no: int = 1) -> Optional[int]:
+        try:
+            delta = (datetime.strptime(d, "%Y-%m-%d").date() - self.start_date).days
+        except ValueError:
+            return None
+        if delta < 0 or delta >= self.horizon_days:
+            return None
+        if self.shift_view and self._shifts:
+            idx = next((i for i, s in enumerate(self._shifts)
+                        if s["shift_no"] == shift_no), 0)
+            return delta * len(self._shifts) + idx
+        return delta
+
+    def _col_to_date_shift(self, col: int) -> Tuple[date, int]:
+        if self.shift_view and self._shifts:
+            n = len(self._shifts)
+            d = self.start_date + timedelta(days=col // n)
+            sno = self._shifts[col % n]["shift_no"]
+            return d, sno
+        return self.start_date + timedelta(days=col), (
+            self._shifts[0]["shift_no"] if self._shifts else 1)
+
+    def _row_for_plan(self, plan: Dict) -> Optional[int]:
+        return self._row_index.get(self._plan_row_key(plan))
+
+    def _rows_for_so(self, so_no: str, sku: str, li: str) -> List[int]:
+        """Return all row indices where this SO has plans."""
+        rows = set()
+        for p in self._plans:
+            if p["so_number"] == so_no and p["sku_code"] == sku and p["line_item"] == li:
+                ri = self._row_for_plan(p)
+                if ri is not None:
+                    rows.add(ri)
+        return sorted(rows)
+
+    def _plan_rect(self, plan: Dict) -> Optional[QRect]:
+        col = self._date_to_col(plan["plan_date"], plan["shift_no"])
+        row = self._row_for_plan(plan)
+        if col is None or row is None or row >= len(self._row_y_list):
+            return None
+        slot_idx = self._plan_layout.get(plan["plan_id"], (0, 1))[0]
+        col_w = self._col_w()
+        x = Y_LABEL_W + col * col_w + 1
+        w = col_w - 2
+        y = self._row_y_list[row] + slot_idx * CARD_H + 2
+        return QRect(x, y, w, CARD_H - 4)
+
+    def _checkbox_rect(self, plan_rect: QRect) -> QRect:
+        pill_x = plan_rect.x() + PILL_MARGIN
+        pill_y = plan_rect.y() + PILL_MARGIN
+        return QRect(pill_x + 4, pill_y + (PILL_H - CHECKBOX_S) // 2,
+                     CHECKBOX_S, CHECKBOX_S)
+
+    # ── Painting ──────────────────────────────────────────────────────────────
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._draw_grid(p)
+        self._draw_header(p)
+        self._draw_util_bars(p)
+        self._draw_y_labels(p)
+        self._draw_due_lines(p)
+        self._draw_today_line(p)
+        self._draw_plans(p)
+        if self._drag_rect:
+            self._draw_drag_ghost(p)
+        p.end()
+
+    def _draw_grid(self, p: QPainter):
+        w, h = self._total_w(), self._total_h()
+        # Alternating row backgrounds (variable height)
+        for ri in range(len(self._rows)):
+            y  = self._row_y_list[ri]
+            rh = self._row_heights[ri]
+            bg = ROW_BG_A if ri % 2 == 0 else ROW_BG_B
+            p.fillRect(Y_LABEL_W, y, w - Y_LABEL_W, rh, bg)
+        # Weekend column tint
+        if not self.shift_view:
+            for col in range(self.horizon_days):
+                d = self.start_date + timedelta(days=col)
+                if d.weekday() >= 5:
+                    x = Y_LABEL_W + col * DAY_W
+                    p.fillRect(x, self._body_top(), DAY_W, h - self._body_top(),
+                               GRID_WEEKEND)
+        # Unavailable cells: closed=gray hatch, hold=orange hatch
+        if self._closed_map:
+            cw = self._col_w()
+            bt = self._body_top()
+            for (ri, col), status in self._closed_map.items():
+                if ri >= len(self._row_y_list):
+                    continue
+                cy  = self._row_y_list[ri]
+                crh = self._row_heights[ri]
+                cx  = Y_LABEL_W + col * cw
+                if status == "hold":
+                    base  = QColor(255, 160, 40, 55)
+                    hatch = QColor(210, 120, 20, 110)
+                else:
+                    base  = QColor(160, 160, 165, 60)
+                    hatch = QColor(120, 120, 128, 120)
+                p.fillRect(cx, cy, cw, crh, base)
+                old_pen = p.pen()
+                p.setPen(QPen(hatch, 1))
+                step = 8
+                x0, y0, x1, y1 = cx, cy, cx + cw, cy + crh
+                # diagonal lines top-left → bottom-right
+                diag_range = range(-(crh), cw, step)
+                for offset in diag_range:
+                    ax = x0 + offset
+                    p.drawLine(max(ax, x0), y0 if ax >= x0 else y0 + (x0 - ax),
+                               min(ax + crh, x1), y0 + crh if ax + crh <= x1 else y1 - ((ax + crh) - x1))
+                p.setPen(old_pen)
+        # Grid lines
+        p.setPen(QPen(GRID_LINE, 1))
+        for col in range(self._col_count() + 1):
+            x = Y_LABEL_W + col * self._col_w()
+            p.drawLine(x, HEADER_H, x, h)
+        for ri in range(len(self._rows)):
+            y = self._row_y_list[ri]
+            p.drawLine(0, y, w, y)
+        y_end = self._body_top() + self._total_body_h
+        p.drawLine(0, y_end, w, y_end)
+
+    def _draw_header(self, p: QPainter):
+        # Header background only — date text is rendered by GanttHeaderWidget
+        # (the fixed overlay above the scroll area) so it stays frozen on scroll.
+        p.fillRect(0, 0, self._total_w(), HEADER_H, HEADER_BG)
+        p.fillRect(0, 0, Y_LABEL_W, HEADER_H, QColor(50, 82, 148))
+
+    def _draw_util_bars(self, p: QPainter):
+        """Draw two util rows: row1=capacity%, row2=headcount%."""
+        f7 = QFont("Arial", 7)
+        p.setFont(f7)
+
+        # ── Row 1: Capacity utilisation ──
+        y0 = HEADER_H
+        col_cap: Dict[int, Tuple[float, float]] = {}
+        for (ds, room, proc, sno), (used, cap) in self._cap_map.items():
+            col = self._date_to_col(ds, sno)
+            if col is None:
+                continue
+            cu, cc = col_cap.get(col, (0.0, 0.0))
+            col_cap[col] = (cu + used, cc + cap)
+
+        for col, (used, cap) in col_cap.items():
+            ratio = (used / cap) if cap > 0 else 0
+            x     = Y_LABEL_W + col * self._col_w()
+            color = UTIL_HIGH if ratio > 0.9 else UTIL_MED if ratio > 0.6 else UTIL_LOW
+            fill  = min(ratio, 1.0)
+            p.fillRect(x+1, y0, int((self._col_w()-2)*fill), UTIL_ROW_H-1, color)
+            p.setPen(QPen(GRID_LINE))
+            p.drawRect(x+1, y0, self._col_w()-2, UTIL_ROW_H-1)
+            if ratio > 0.05:
+                label = f"{int(ratio*100)}%" if ratio <= 1.5 else ">150%"
+                # Text is centered in the cell; use dark ink when bar doesn't cover center
+                text_color = Qt.GlobalColor.white if fill >= 0.5 else QColor(30, 30, 60)
+                p.setPen(QPen(text_color))
+                p.drawText(QRect(x+1, y0, self._col_w()-2, UTIL_ROW_H),
+                           Qt.AlignmentFlag.AlignCenter, label)
+
+        # ── Row 2: Headcount utilisation (alloc / CRP total) ──
+        y1 = HEADER_H + UTIL_ROW_H
+        col_hc: Dict[int, Tuple[int, int]] = {}
+        for (ds, sno), (alloc, total) in self._hc_map.items():
+            col = self._date_to_col(ds, sno)
+            if col is None:
+                continue
+            ca, ct = col_hc.get(col, (0, 0))
+            col_hc[col] = (ca + alloc, ct + total)
+
+        for col, (alloc, total) in col_hc.items():
+            ratio = (alloc / total) if total > 0 else 0
+            x     = Y_LABEL_W + col * self._col_w()
+            color = UTIL_HC_HIGH if ratio > 0.9 else UTIL_HC_MED if ratio > 0.6 else UTIL_HC_LOW
+            fill  = min(ratio, 1.0)
+            p.fillRect(x+1, y1, int((self._col_w()-2)*fill), UTIL_ROW_H-1, color)
+            p.setPen(QPen(GRID_LINE))
+            p.drawRect(x+1, y1, self._col_w()-2, UTIL_ROW_H-1)
+            if ratio > 0.05:
+                label = f"{int(ratio*100)}%" if ratio <= 1.5 else ">150%"
+                text_color = Qt.GlobalColor.white if fill >= 0.5 else QColor(30, 30, 60)
+                p.setPen(QPen(text_color))
+                p.drawText(QRect(x+1, y1, self._col_w()-2, UTIL_ROW_H),
+                           Qt.AlignmentFlag.AlignCenter, label)
+
+        # Row labels on Y-label side
+        p.setPen(QPen(QColor(80, 80, 80)))
+        p.setFont(QFont("Arial", 6))
+        p.drawText(QRect(0, y0, Y_LABEL_W-2, UTIL_ROW_H),
+                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                   "Cap% ")
+        p.drawText(QRect(0, y1, Y_LABEL_W-2, UTIL_ROW_H),
+                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                   "HC% ")
+
+    def _draw_y_labels(self, p: QPainter):
+        p.fillRect(0, self._body_top(), Y_LABEL_W, self._total_body_h,
+                   QColor(245, 245, 250))
+        if self.y_mode == self.Y_MODE_SKU:
+            self._draw_y_labels_sku(p)
+            return
+        f9 = QFont("Arial", 9); p.setFont(f9)
+        for ri, label in enumerate(self._rows):
+            y  = self._row_y_list[ri]
+            rh = self._row_heights[ri]
+            bg = ROW_BG_A if ri % 2 == 0 else ROW_BG_B
+            p.fillRect(0, y, Y_LABEL_W, rh, bg)
+            p.setPen(QPen(GRID_LINE)); p.drawLine(0, y, Y_LABEL_W, y)
+            p.setPen(QPen(QColor(35, 40, 65)))
+            p.drawText(QRect(8, y + 4, Y_LABEL_W - 12, rh - 8),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                       label.replace("|", " / "))
+
+    def _draw_y_labels_sku(self, p: QPainter):
+        """Y_MODE_SKU: left=SKU code spanning all its process rows, right=process per row."""
+        fb = QFont("Arial", 9); fb.setBold(True)
+        f8 = QFont("Arial", 8)
+
+        grp_bgs   = [QColor(228, 237, 255), QColor(225, 244, 228)]
+        sep_group = QColor(185, 190, 208)   # subtle gray — replaces sky-blue thick line
+        sep_row   = QColor(215, 218, 230)   # even lighter for inner row dividers
+
+        # Pre-compute groups: [(gk, [row_keys])]
+        groups: List[Tuple[str, List[str]]] = []
+        for row_key in self._rows:
+            gk = row_key.split("|", 1)[0]
+            if not groups or groups[-1][0] != gk:
+                groups.append((gk, []))
+            groups[-1][1].append(row_key)
+
+        for gi, (gk, rows) in enumerate(groups):
+            bg = grp_bgs[gi % len(grp_bgs)]
+            first_ri = self._row_index[rows[0]]
+            y_top    = self._row_y_list[first_ri]
+            grp_h    = sum(self._row_heights[self._row_index[rk]] for rk in rows)
+
+            # ── Left strip: SKU code spanning full group height ──
+            p.fillRect(0, y_top, SKU_COL_W, grp_h, bg)
+            p.setFont(fb)
+            p.setPen(QPen(QColor(25, 45, 100)))
+            p.drawText(QRect(4, y_top + 4, SKU_COL_W - 8, grp_h - 8),
+                       Qt.AlignmentFlag.AlignCenter |
+                       Qt.TextFlag.TextWordWrap, gk)
+
+            # ── Right strip: one row per process ──
+            for row_key in rows:
+                parts = row_key.split("|", 2)
+                seq   = parts[1] if len(parts) > 1 else "1"
+                proc  = parts[2] if len(parts) > 2 else ""
+                ri    = self._row_index[row_key]
+                y     = self._row_y_list[ri]
+                rh    = self._row_heights[ri]
+
+                p.fillRect(SKU_COL_W, y, PROC_COL_W, rh, bg)
+                p.setFont(f8)
+                p.setPen(QPen(QColor(48, 52, 72)))
+                p.drawText(QRect(SKU_COL_W + 6, y + 4, PROC_COL_W - 8, rh - 8),
+                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                           f"{seq}. {proc}")
+
+                # Dotted thin row separator within same group
+                if row_key != rows[0]:
+                    p.setPen(QPen(sep_row, 1, Qt.PenStyle.DotLine))
+                    p.drawLine(SKU_COL_W, y, Y_LABEL_W, y)
+
+            # 1px solid group separator
+            p.setPen(QPen(sep_group, 1))
+            p.drawLine(0, y_top, Y_LABEL_W, y_top)
+
+        # Bottom border
+        y_end = self._body_top() + self._total_body_h
+        p.setPen(QPen(sep_group, 1))
+        p.drawLine(0, y_end, Y_LABEL_W, y_end)
+
+        # Vertical column divider
+        p.setPen(QPen(QColor(195, 198, 215), 1))
+        p.drawLine(SKU_COL_W, self._body_top(), SKU_COL_W, y_end)
+
+    def _draw_due_lines(self, p: QPainter):
+        """
+        Draw due-date lines only across the rows where the SO has plans.
+        Lines start at body_top (below util bars) and span only relevant rows.
+        """
+        pen = QPen(DUE_LINE, 1, Qt.PenStyle.DashLine)
+        f7  = QFont("Arial", 7)
+        p.setFont(f7)
+
+        for (so_no, sku, li), so in self._sos.items():
+            col = self._date_to_col(so["due_date"])
+            if col is None:
+                continue
+            rows = self._so_rows_cache.get((so_no, sku, li))
+            if not rows:
+                continue
+
+            x = Y_LABEL_W + col * self._col_w() + self._col_w() // 2
+
+            for ri in rows:
+                y_top = self._row_y_list[ri]
+                y_bot = y_top + self._row_heights[ri]
+                p.setPen(pen)
+                p.drawLine(x, y_top, x, y_bot)
+
+            # Label at top of first row
+            top_row = rows[0]
+            y_label = self._row_y_list[top_row] + 3
+            p.setPen(QPen(DUE_LINE))
+            label = so.get("customer_name") or so_no
+            p.drawText(x + 2, y_label + 8, label[:12])
+
+    def _draw_today_line(self, p: QPainter):
+        col = self._date_to_col(date.today().strftime("%Y-%m-%d"))
+        if col is None:
+            return
+        x = Y_LABEL_W + col * self._col_w()
+        p.setPen(QPen(TODAY_LINE, 3))
+        # Today line also starts at body_top
+        p.drawLine(x, self._body_top(), x, self._total_h())
+
+    def _draw_plans(self, p: QPainter):
+        self._cell_map.clear()
+        self._check_rects.clear()
+        self._check_hit_rects.clear()
+        conflict_slots = {
+            (c["plan_date"], c["room_code"], c["process_name"], c["shift_no"])
+            for c in self._conflicts
+        }
+        fm  = QFont("Arial", 8)
+        fsm = QFont("Arial", 7)
+        consol_groups: Dict[str, List[QRect]] = {}
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        for plan in self._plans:
+            rect = self._plan_rect(plan)
+            if not rect:
+                continue
+            self._cell_map[plan["plan_id"]]       = rect
+            cb_vis = self._checkbox_rect(rect)
+            self._check_rects[plan["plan_id"]]    = cb_vis
+            # 20×20 hit area centered on visual checkbox — easier to click
+            cx = cb_vis.x() + cb_vis.width() // 2
+            cy = cb_vis.y() + cb_vis.height() // 2
+            self._check_hit_rects[plan["plan_id"]] = QRect(cx - 10, cy - 10, 20, 20)
+
+            is_mat  = plan.get("entity_type") == "MATERIAL"
+            is_final = bool(plan.get("is_final_seq"))
+            so = self._sos.get((plan["so_number"], plan["sku_code"],
+                                plan["line_item"]))
+            is_late = (so and
+                       datetime.strptime(so["due_date"], "%Y-%m-%d").date() < date.today()
+                       and plan.get("qty_produced", 0) < plan["qty_planned"])
+            base_color = (MAT_FILL if is_mat
+                          else LATE_FILL if is_late
+                          else _color_for_key(plan["sku_code"]))
+
+            # ── Card fill — rounded rect ──────────────────────────────────
+            p.setBrush(QBrush(base_color))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawRoundedRect(rect, CARD_RADIUS, CARD_RADIUS)
+
+            if plan["is_locked"]:
+                p.setBrush(QBrush(LOCKED_OVERLAY))
+                p.drawRoundedRect(rect, CARD_RADIUS, CARD_RADIUS)
+            if plan["plan_id"] in self._checked:
+                p.setBrush(QBrush(CHECK_FILL))
+                p.drawRoundedRect(rect, CARD_RADIUS, CARD_RADIUS)
+
+            # ── TOP PILL: one wide rounded pill (inset, not edge-to-edge) ──
+            # holding the checkbox · conflict dot · FINAL badge. Its radius
+            # (PILL_RADIUS = CARD_RADIUS - PILL_MARGIN) keeps it concentric
+            # with the card's own rounded corners.
+            pill = QRect(rect.x() + PILL_MARGIN, rect.y() + PILL_MARGIN,
+                        rect.width() - PILL_MARGIN * 2, PILL_H)
+            p.setBrush(QBrush(CARD_STRIP_BG))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawRoundedRect(pill, PILL_RADIUS, PILL_RADIUS)
+
+            cb = self._check_rects[plan["plan_id"]]
+            # Checkbox — dark-on-white now that the pill behind it is white
+            p.setPen(QPen(QColor(40, 40, 40, 220), 1))
+            p.setBrush(QBrush(QColor(40, 40, 40, 220)
+                               if plan["plan_id"] in self._checked
+                               else QColor(0, 0, 0, 18)))
+            p.drawRect(cb)
+            if plan["plan_id"] in self._checked:
+                p.setPen(QPen(Qt.GlobalColor.white, 2))
+                p.drawLine(cb.x()+2, cb.y()+6, cb.x()+4, cb.y()+9)
+                p.drawLine(cb.x()+4, cb.y()+9, cb.x()+9, cb.y()+3)
+
+            # Conflict dot — right of checkbox, inside the pill
+            if (plan["plan_date"], plan["room_code"],
+                    plan["process_name"], plan["shift_no"]) in conflict_slots:
+                p.setBrush(QBrush(CONFLICT_DOT))
+                p.setPen(Qt.PenStyle.NoPen)
+                dot_y = pill.y() + (PILL_H - 8) // 2
+                p.drawEllipse(cb.right() + 3, dot_y, 8, 8)
+
+            # FINAL badge — nested inside the same pill, right side.
+            # Radius 1 keeps it concentric with PILL_RADIUS(3) at its 2px inset.
+            if is_final:
+                bw, bh = 34, PILL_H - 4
+                badge = QRect(pill.right() - bw - 2, pill.y() + 2, bw, bh)
+                p.setBrush(QBrush(FINAL_BADGE_BG))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.drawRoundedRect(badge, 1, 1)
+                p.setPen(QPen(Qt.GlobalColor.white))
+                p.setFont(fsm)
+                p.drawText(badge, Qt.AlignmentFlag.AlignCenter, "FINAL")
+
+            # CLOSED / HOLD badge — use exact (room, date, shift) lookup so plans
+            # on open shifts are not incorrectly badged in day view.
+            _cell_status = self._slot_closed.get(
+                (plan["room_code"], plan["plan_date"], plan["shift_no"]))
+            if _cell_status:
+                _badge_label = "⚠HOLD" if _cell_status == "hold" else "⚠CLOSED"
+                _badge_color = QColor(220, 100, 0) if _cell_status == "hold" else QColor(180, 30, 30)
+                bw2, bh2 = 46, PILL_H - 4
+                # Anchor: right of pill, shift left if FINAL badge is also present
+                _right_offset = (34 + 4) if is_final else 2
+                badge2 = QRect(pill.right() - bw2 - _right_offset,
+                               pill.y() + 2, bw2, bh2)
+                p.setBrush(QBrush(_badge_color))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.drawRoundedRect(badge2, 1, 1)
+                p.setPen(QPen(Qt.GlobalColor.white))
+                p.setFont(QFont("Arial", 6, QFont.Weight.Bold))
+                p.drawText(badge2, Qt.AlignmentFlag.AlignCenter, _badge_label)
+
+            # ── TEXT ZONE (CARD_TOP_H → height - CARD_BOT_H) ─────────────
+            # SKU / SO / Due each get their own line (no longer crammed
+            # together); Qty is last, paired with Due since both are short,
+            # fixed-format strings that are never at risk of eliding away.
+            p.setPen(QPen(Qt.GlobalColor.white))
+            p.setFont(fm)
+            # Bottom inset is a small fixed pad, NOT the full CARD_BOT_H —
+            # CARD_BOT_H only reserves room for the lock icon corner accent
+            # (drawn after, on top), it shouldn't also shrink the zone text
+            # centers in, or text ends up looking top-heavy instead of
+            # centered in the space below the pill.
+            text_rect = rect.adjusted(TEXT_PAD_L, CARD_TOP_H, -3, -4)
+
+            # Due gets its own line too — pairing it with Qty on one line
+            # elided away the date itself on narrower cards (same failure
+            # mode Qty hit before), so every field stays on a separate line.
+            due = so["due_date"] if so else None
+            due_line = f"Due {due[5:]}" if due else None
+            qty_line = f"Qty {plan['qty_planned']}"
+            if is_mat:
+                lines = [plan["entity_code"], qty_line]
+            else:
+                if self.y_mode == self.Y_MODE_SKU:
+                    lines = [f"SO:{plan['so_number']}"]
+                elif self.y_mode == self.Y_MODE_ROOM:
+                    lines = [plan["sku_code"], f"SO:{plan['so_number']}"]
+                else:  # Y_MODE_SO
+                    lines = []
+                if due_line:
+                    lines.append(due_line)
+                lines.append(qty_line)
+
+            fmw = QFontMetrics(fm)
+            elided = [fmw.elidedText(ln, Qt.TextElideMode.ElideRight,
+                                     text_rect.width()) for ln in lines]
+            p.drawText(text_rect,
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                       "\n".join(elided))
+
+            # ── BOTTOM STRIP (height - CARD_BOT_H → height): lock icon ──
+            # Over-capacity badge removed — the conflict dot in the top
+            # pill already flags this same condition.
+            # Lock icon — bottom-right
+            if plan["is_locked"]:
+                p.setPen(QPen(QColor(255, 255, 255, 200)))
+                p.setFont(fsm)
+                bot = QRect(rect.x() + 2, rect.bottom() - CARD_BOT_H,
+                            rect.width() - 4, CARD_BOT_H)
+                p.drawText(bot,
+                           Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                           "🔒")
+
+            # ── Card border — subtle white outline ────────────────────────
+            p.setPen(QPen(QColor(255, 255, 255, 100), 1))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(rect, CARD_RADIUS, CARD_RADIUS)
+
+            if plan.get("consolidation_group"):
+                consol_groups.setdefault(
+                    plan["consolidation_group"], []).append(rect)
+
+        # Consolidated group gold border
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        for grp_id, rects in consol_groups.items():
+            p.setPen(QPen(CONSOL_BORDER, 2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            for r in rects:
+                p.drawRoundedRect(r.adjusted(-1, -1, 1, 1), 5, 5)
+
+    def _draw_drag_ghost(self, p: QPainter):
+        if self._drag_invalid:
+            p.fillRect(self._drag_rect, QColor(220, 50, 50, 150))
+            p.setPen(QPen(QColor(180, 0, 0), 2, Qt.PenStyle.DashLine))
+            p.drawRect(self._drag_rect)
+            p.setPen(QPen(Qt.GlobalColor.white))
+            p.setFont(QFont("Arial", 8, QFont.Weight.Bold))
+            p.drawText(self._drag_rect, Qt.AlignmentFlag.AlignCenter, "✕ Not supported")
+        elif self._drag_split:
+            p.fillRect(self._drag_rect, QColor(34, 197, 94, 150))
+            p.setPen(QPen(QColor(20, 140, 60), 2, Qt.PenStyle.DashLine))
+            p.drawRect(self._drag_rect)
+            p.setPen(QPen(Qt.GlobalColor.white))
+            p.setFont(QFont("Arial", 8, QFont.Weight.Bold))
+            p.drawText(self._drag_rect, Qt.AlignmentFlag.AlignCenter, "✂ Split")
+        else:
+            p.fillRect(self._drag_rect, QColor(100, 149, 237, 140))
+            p.setPen(QPen(QColor(30, 80, 200), 2, Qt.PenStyle.DashLine))
+            p.drawRect(self._drag_rect)
+
+    # ── Mouse events ──────────────────────────────────────────────────────────
+
+    def mousePressEvent(self, event):
+        pos = event.pos()
+        if event.button() == Qt.MouseButton.LeftButton:
+            for pid, hit_rect in self._check_hit_rects.items():
+                if hit_rect.contains(pos):
+                    self._toggle_check(pid)
+                    return
+            plan = self._plan_at(pos)
+            if plan:
+                self._drag_plan_id = plan["plan_id"]
+                self._drag_origin  = pos
+                self._drag_split   = bool(
+                    event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                rect = self._cell_map.get(plan["plan_id"])
+                if rect:
+                    self._drag_offset = pos - rect.topLeft()
+                self.planSelected.emit(plan)
+
+    def mouseMoveEvent(self, event):
+        pos = event.pos()
+        if self._drag_plan_id and self._drag_origin:
+            if (pos - self._drag_origin).manhattanLength() > 6:
+                plan = next((p for p in self._plans
+                             if p["plan_id"] == self._drag_plan_id), None)
+                if plan:
+                    rect = self._cell_map.get(plan["plan_id"])
+                    if rect:
+                        self._drag_rect = QRect(pos - self._drag_offset, rect.size())
+                        if self.y_mode == self.Y_MODE_ROOM:
+                            row = self._row_at_y(pos.y())
+                            if 0 <= row < len(self._rows):
+                                target_room = self._rows[row]
+                                proc = plan.get("process_name") or ""
+                                self._drag_invalid = (target_room, proc) not in self._room_proc_set
+                            else:
+                                self._drag_invalid = False
+                        else:
+                            self._drag_invalid = False
+                        self.update()
+        plan = self._plan_at(pos)
+        if plan:
+            is_mat = plan.get("entity_type") == "MATERIAL"
+            if is_mat:
+                gid     = plan.get("material_group_id")
+                members = self._mat_groups.get(gid, []) if gid else []
+                demand_lines = "\n".join(
+                    f"  {m['so_number']} / {m['sku_code']} / {m['line_item']}"
+                    f"  qty:{m['qty_required']}  due:{m['due_date']}"
+                    for m in members) or "  (no demand group)"
+                tip = (f"[MATERIAL PLAN]\n"
+                       f"Material: {plan['entity_code']}\n"
+                       f"Process: {plan['process_name']}  "
+                       f"Room: {plan['room_code']}  Shift: {plan['shift_no']}\n"
+                       f"Date: {plan['plan_date']}  "
+                       f"Planned: {plan['qty_planned']}  Produced: {plan['qty_produced']}\n"
+                       f"{'🔒 LOCKED' if plan['is_locked'] else 'unlocked'}\n"
+                       f"─── Demand Group ({len(members)} SOs) ───\n"
+                       f"{demand_lines}")
+            else:
+                so  = self._sos.get((plan["so_number"], plan["sku_code"],
+                                      plan["line_item"]), {})
+                grp = plan.get("consolidation_group") or "-"
+                customer = so.get("customer_name") or ""
+                tip = (f"SO: {plan['so_number']}  SKU: {plan['sku_code']}  "
+                       f"Line: {plan['line_item']}\n"
+                       f"Customer: {customer}\n"
+                       f"Room: {plan['room_code']}  Process: {plan['process_name']}\n"
+                       f"Date: {plan['plan_date']}  Shift: {plan['shift_no']}\n"
+                       f"Planned: {plan['qty_planned']}  Produced: {plan['qty_produced']}\n"
+                       f"Due: {so.get('due_date','')}  "
+                       f"{'🔒 LOCKED' if plan['is_locked'] else 'unlocked'}\n"
+                       f"Consol group: {grp}  "
+                       f"{'⭐ FINAL' if plan.get('is_final_seq') else ''}")
+            QToolTip.showText(QCursor.pos(), tip, self)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._drag_plan_id:
+            if self._drag_rect:
+                if self._drag_invalid:
+                    QMessageBox.warning(
+                        self, "Invalid Move",
+                        f"This room does not support the plan's process.\n"
+                        f"Cannot move here.")
+                else:
+                    center = self._drag_rect.center()
+                    col    = (center.x() - Y_LABEL_W) // self._col_w()
+                    if 0 <= col < self._col_count():
+                        new_date, new_shift = self._col_to_date_shift(col)
+                        plan = next((p for p in self._plans
+                                     if p["plan_id"] == self._drag_plan_id), None)
+                        if plan and not plan["is_locked"]:
+                            new_room = plan["room_code"]
+                            if self.y_mode == self.Y_MODE_ROOM:
+                                row = self._row_at_y(center.y())
+                                if 0 <= row < len(self._rows):
+                                    new_room = self._rows[row]
+                            date_changed = (new_date.strftime("%Y-%m-%d") != plan["plan_date"]
+                                            or new_shift != plan["shift_no"])
+                            room_changed = (new_room != plan["room_code"])
+                            if self._drag_split:
+                                self._do_split_drop(plan, new_date, new_shift, new_room)
+                            elif date_changed or room_changed:
+                                reason, ok = QInputDialog.getText(
+                                    self, "Move Reason",
+                                    f"Reason for moving plan #{self._drag_plan_id}?")
+                                if ok:
+                                    fields: Dict = {
+                                        "plan_date": new_date.strftime("%Y-%m-%d"),
+                                        "shift_no":  new_shift,
+                                    }
+                                    if room_changed:
+                                        fields["room_code"] = new_room
+                                    PlanRepo.update(self._drag_plan_id, fields,
+                                                    reason=reason)
+                                    self.planMoved.emit(
+                                        self._drag_plan_id,
+                                        plan["plan_date"],
+                                        plan["shift_no"],
+                                        reason)
+                        elif plan and plan["is_locked"]:
+                            QMessageBox.information(
+                                self, "Locked",
+                                "This plan is locked. Unlock it first.")
+            self._drag_plan_id = None
+            self._drag_rect    = None
+            self._drag_invalid = False
+            self._drag_split   = False
+            self.update()
+
+    def _do_split_drop(self, plan: Dict, new_date, new_shift: int, new_room: str):
+        orig_qty = plan["qty_planned"]
+        if orig_qty <= 1:
+            QMessageBox.warning(self, "Cannot Split",
+                                "Plan quantity is 1 — nothing to split.")
+            return
+        split_qty, ok = QInputDialog.getInt(
+            self, "Split Quantity",
+            f"Qty to split off (original: {orig_qty}):",
+            value=orig_qty // 2, min=1, max=orig_qty - 1)
+        if not ok:
+            return
+        # Reduce original
+        PlanRepo.update(plan["plan_id"],
+                        {"qty_planned": orig_qty - split_qty},
+                        reason=f"split {split_qty} off to {new_date} S{new_shift}")
+        # Create new plan at drop location (copy of original minus a few fields)
+        new_plan = {k: plan[k] for k in plan if k not in
+                    ("plan_id", "qty_planned", "qty_produced",
+                     "plan_date", "shift_no", "room_code",
+                     "created_at", "updated_at",
+                     "is_locked", "is_consolidated", "consolidation_group",
+                     "memo")}
+        new_plan["qty_planned"]  = split_qty
+        new_plan["qty_produced"] = 0
+        new_plan["plan_date"]    = new_date.strftime("%Y-%m-%d")
+        new_plan["shift_no"]     = new_shift
+        new_plan["room_code"]    = new_room
+        new_plan["is_locked"]    = 0
+        new_plan["is_consolidated"] = 0
+        new_plan["consolidation_group"] = None
+        new_plan["memo"]         = f"Split from plan #{plan['plan_id']}"
+        PlanRepo.insert(new_plan)
+        if self.parent_tab:
+            self.parent_tab.refresh()
+
+    def _toggle_check(self, plan_id: int):
+        if plan_id in self._checked:
+            self._checked.discard(plan_id)
+        else:
+            self._checked.add(plan_id)
+        self.selectionChanged.emit(list(self._checked))
+        self.update()
+
+    def _plan_at(self, pos: QPoint) -> Optional[Dict]:
+        for plan in self._plans:
+            rect = self._cell_map.get(plan["plan_id"])
+            if rect and rect.contains(pos):
+                return plan
+        return None
+
+    # ── Context menu ──────────────────────────────────────────────────────────
+
+    def _context_menu(self, pos: QPoint):
+        plan = self._plan_at(pos)
+        menu = QMenu(self)
+        if plan:
+            pid    = plan["plan_id"]
+            locked = plan["is_locked"]
+            grp    = plan.get("consolidation_group")
+            menu.addAction("🔓 Unlock" if locked else "🔒 Lock",
+                           lambda: self._toggle_lock(pid))
+            menu.addAction("✂ Split",     lambda: self._split_plan(plan))
+            menu.addAction("⬅ Pull Out", lambda: self._pull_out(plan))
+            if grp:
+                menu.addAction(f"🔗 Break Consolidation ({grp})",
+                               lambda: self._break_consol(grp))
+            menu.addSeparator()
+            menu.addAction("📝 Edit Memo",  lambda: self._edit_memo(plan))
+            menu.addAction("🗑 Delete Plan", lambda: self._delete_plan(pid))
+        else:
+            col = (pos.x() - Y_LABEL_W) // self._col_w()
+            row = self._row_at_y(pos.y())
+            if (self.y_mode == self.Y_MODE_ROOM
+                    and 0 <= col < self._col_count()
+                    and 0 <= row < len(self._rows)):
+                d, sno = self._col_to_date_shift(col)
+                room   = self._rows[row]
+                menu.addAction("➕ Add Plan",
+                               lambda: self._add_plan(
+                                   d.strftime("%Y-%m-%d"), sno, room))
+                menu.addSeparator()
+            menu.addAction("🚫 Add Hard Block",
+                           lambda: self._add_hard_block(col, row))
+        menu.exec(QCursor.pos())
+
+    def _toggle_lock(self, plan_id):
+        plan = PlanRepo.get(plan_id)
+        if plan:
+            PlanRepo.lock(plan_id, not plan["is_locked"])
+            if self.parent_tab: self.parent_tab.refresh()
+
+    def _split_plan(self, plan):
+        qty = plan["qty_planned"]
+        if qty < 2:
+            QMessageBox.information(self, "Split", "Qty too small."); return
+        split_qty, ok = QInputDialog.getInt(
+            self, "Split", f"First half qty (total {qty}):", qty//2, 1, qty-1)
+        if not ok: return
+        PlanRepo.update(plan["plan_id"], {"qty_planned": split_qty}, reason="split")
+        # Remainder stays in the same slot — planner drags it to the desired position
+        new_plan = {**plan, "qty_planned": qty - split_qty,
+                    "is_locked": 0, "memo": "split-remainder",
+                    "is_consolidated": 0, "consolidation_group": None}
+        for k in ("plan_id", "created_at", "updated_at"): new_plan.pop(k, None)
+        PlanRepo.insert(new_plan)
+        if self.parent_tab: self.parent_tab.refresh()
+
+    def _pull_out(self, plan):
+        d      = datetime.strptime(plan["plan_date"], "%Y-%m-%d").date()
+        next_d = (d + timedelta(days=1)).strftime("%Y-%m-%d")
+        existing = [p for p in PlanRepo.for_so(
+                        plan["so_number"], plan["sku_code"], plan["line_item"])
+                    if p["plan_date"] == next_d
+                    and p["room_code"] == plan["room_code"]
+                    and p["process_name"] == plan["process_name"]
+                    and p["shift_no"] == 1]
+        if existing:
+            PlanRepo.update(existing[0]["plan_id"],
+                            {"qty_planned": existing[0]["qty_planned"] + plan["qty_planned"]},
+                            reason="pull_out_merge")
+        else:
+            np = {**plan, "plan_date": next_d, "shift_no": 1,
+                  "is_locked": 0, "memo": "pull-out",
+                  "is_consolidated": 0, "consolidation_group": None}
+            for k in ("plan_id", "created_at", "updated_at"): np.pop(k, None)
+            PlanRepo.insert(np)
+        PlanRepo.delete(plan["plan_id"], reason="pull_out")
+        if self.parent_tab: self.parent_tab.refresh()
+
+    def _break_consol(self, group_id):
+        ok, msg = ConsolidationEngine.break_group(group_id)
+        QMessageBox.information(self, "Break Consolidation", msg)
+        if ok and self.parent_tab: self.parent_tab.refresh()
+
+    def _edit_memo(self, plan):
+        text, ok = QInputDialog.getText(
+            self, "Memo", "Memo:", text=plan.get("memo", ""))
+        if ok:
+            PlanRepo.update(plan["plan_id"], {"memo": text})
+            if self.parent_tab: self.parent_tab.refresh()
+
+    def _delete_plan(self, plan_id):
+        reason, ok = QInputDialog.getText(self, "Delete Plan", "Reason:")
+        if ok:
+            PlanRepo.delete(plan_id, reason=reason)
+            if self.parent_tab: self.parent_tab.refresh()
+
+    def _add_plan(self, plan_date: str, shift_no: int, room_code: str):
+        dlg = AddPlanDialog(plan_date, shift_no, room_code, self)
+        if dlg.exec():
+            if self.parent_tab: self.parent_tab.refresh()
+
+    def _add_hard_block(self, col, row):
+        if 0 <= col < self._col_count() and 0 <= row < len(self._rows):
+            d, sno = self._col_to_date_shift(col)
+            if self.y_mode == self.Y_MODE_ROOM:
+                room = self._rows[row]
+                CalendarRepo.set_slot(
+                    d.strftime("%Y-%m-%d"), sno, room, is_open=1, is_hold=1)
+                if self.parent_tab: self.parent_tab.refresh()
+
+    def checked_plans(self) -> List[Dict]:
+        return [p for p in self._plans if p["plan_id"] in self._checked]
+
+    def clear_checks(self):
+        self._checked.clear()
+        self.selectionChanged.emit([])
+        self.update()
+
+
+# ─── Priority Conflict Dialog ─────────────────────────────────────────────────
+
+class PriorityConflictDialog(QDialog):
+    """Shows OPEN SOs without a priority so the planner can assign them before re-planning."""
+
+    def __init__(self, failed_so: str, failed_sku: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Priority Assignment Required")
+        self.setMinimumWidth(640)
+
+        layout = QVBoxLayout(self)
+
+        # Header message
+        msg = QLabel(
+            f"<b>{failed_so} / {failed_sku}</b> could not be scheduled — capacity exceeded.\n\n"
+            "The orders below have no priority set, so scheduling order is ambiguous.\n"
+            "Assign priorities, then click <b>Save &amp; Re-Plan</b>.\n"
+            "<i>(Lower number = higher priority.)</i>"
+        )
+        msg.setWordWrap(True)
+        msg.setStyleSheet("padding:8px; background:#fff8e1; border:1px solid #f59e0b; border-radius:4px;")
+        layout.addWidget(msg)
+
+        # Table
+        self._sos = [s for s in SORepo.all()
+                     if s.get("status") == "OPEN" and not s.get("priority")]
+        self.table = QTableWidget(len(self._sos), 5)
+        self.table.setHorizontalHeaderLabels(["SO Number", "SKU", "Customer", "Due Date", "Priority"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+
+        self._spinboxes: list[tuple[dict, QSpinBox]] = []
+        for i, so in enumerate(self._sos):
+            self.table.setItem(i, 0, QTableWidgetItem(so["so_number"]))
+            self.table.setItem(i, 1, QTableWidgetItem(so.get("sku_code", "")))
+            self.table.setItem(i, 2, QTableWidgetItem(so.get("customer_name") or ""))
+            self.table.setItem(i, 3, QTableWidgetItem(so.get("due_date") or ""))
+            spin = QSpinBox()
+            spin.setRange(1, 9999)
+            spin.setValue(so.get("priority") or 0)
+            spin.setSpecialValueText("—")
+            self.table.setCellWidget(i, 4, spin)
+            self._spinboxes.append((so, spin))
+
+        layout.addWidget(self.table)
+
+        if not self._sos:
+            msg.setText(
+                f"<b>{failed_so} / {failed_sku}</b> could not be scheduled — capacity exceeded.\n\n"
+                "All OPEN SOs already have priorities set.\n"
+                "Try extending the planning horizon or reviewing CRP capacity."
+            )
+
+        # Buttons
+        btns = QDialogButtonBox()
+        self._btn_save = btns.addButton("Save && Re-Plan", QDialogButtonBox.ButtonRole.AcceptRole)
+        self._btn_save.setEnabled(bool(self._sos))
+        btns.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def save_priorities(self):
+        for so, spin in self._spinboxes:
+            pri = spin.value()
+            if pri == 0:
+                continue
+            updated = dict(so)
+            updated["priority"] = pri
+            SORepo.upsert(updated)
+
+
+# ─── Gantt Tab ────────────────────────────────────────────────────────────────
+
+class GanttTab(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.main_window = parent
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+
+        bar = QHBoxLayout()
+        bar.addWidget(QLabel("Y-axis:"))
+        self.y_combo = QComboBox()
+        self.y_combo.addItems(["Production Room", "SO / SKU / Line", "SKU"])
+        self.y_combo.currentIndexChanged.connect(self._on_y_changed)
+        bar.addWidget(self.y_combo)
+
+        self.shift_toggle = QPushButton("Expand Shifts")
+        self.shift_toggle.setCheckable(True)
+        self.shift_toggle.toggled.connect(self._on_shift_toggle)
+        bar.addWidget(self.shift_toggle)
+
+        bar.addWidget(QLabel("Start:"))
+        from PyQt6.QtCore import QDate
+        self.date_edit = QDateEdit(QDate.currentDate())
+        self.date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.date_edit.dateChanged.connect(lambda: self.refresh())
+        bar.addWidget(self.date_edit)
+        bar.addStretch()
+
+        btn_autoplan = QPushButton("▶ Auto Plan")
+        btn_autoplan.clicked.connect(self.run_auto_plan)
+        bar.addWidget(btn_autoplan)
+
+        btn_pull = QPushButton("⬅ Pull Forward")
+        btn_pull.clicked.connect(self.run_pull_forward)
+        bar.addWidget(btn_pull)
+
+        self.btn_consol = QPushButton("🔗 Consolidate Checked")
+        self.btn_consol.setEnabled(False)
+        self.btn_consol.clicked.connect(self._consolidate)
+        bar.addWidget(self.btn_consol)
+
+        self.btn_clear = QPushButton("✖ Clear Checks")
+        self.btn_clear.setEnabled(False)
+        self.btn_clear.clicked.connect(self._clear_checks)
+        bar.addWidget(self.btn_clear)
+
+        self.check_label = QLabel("0 checked")
+        self.check_label.setStyleSheet("color:#555; font-size:11px;")
+        bar.addWidget(self.check_label)
+
+        btn_export = QPushButton("📥 Export")
+        btn_export.setToolTip("Export current plan as normalized Excel")
+        btn_export.clicked.connect(self._export_plan)
+        bar.addWidget(btn_export)
+
+        self.btn_unplanned = QPushButton("📦 Unplanned Orders")
+        self.btn_unplanned.setCheckable(True)
+        self.btn_unplanned.setToolTip(
+            "Show OPEN SOs that still have unplanned remaining quantity")
+        self.btn_unplanned.toggled.connect(self._on_toggle_unplanned)
+        bar.addWidget(self.btn_unplanned)
+
+        layout.addLayout(bar)
+
+        # ── Frozen date-axis header (sits above the scroll area) ──────────────
+        self.gantt_header = GanttHeaderWidget(self)
+        layout.addWidget(self.gantt_header)
+
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(False)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+
+        self.canvas = GanttCanvas(self)
+        self.canvas.parent_tab = self
+        self.canvas.planMoved.connect(self._on_plan_moved)
+        self.canvas.planSelected.connect(self._on_plan_selected)
+        self.canvas.selectionChanged.connect(self._on_selection_changed)
+        self.scroll.setWidget(self.canvas)
+
+        # Sync header horizontal position with scrollbar
+        self.scroll.horizontalScrollBar().valueChanged.connect(
+            self.gantt_header.set_scroll_h)
+
+        body.addWidget(self.scroll, stretch=1)
+
+        self.unplanned_panel = self._build_unplanned_panel()
+        self.unplanned_panel.setVisible(False)
+        body.addWidget(self.unplanned_panel)
+
+        layout.addLayout(body, stretch=1)
+
+        self.detail_label = QLabel("Click a plan block to see details.")
+        self.detail_label.setStyleSheet(
+            "background:#f5f5f5; padding:4px; border-top:1px solid #ccc;")
+        self.detail_label.setWordWrap(True)
+        self.detail_label.setMaximumHeight(60)
+        layout.addWidget(self.detail_label)
+
+        self.refresh()
+
+    def _build_unplanned_panel(self) -> QWidget:
+        panel = QFrame()
+        panel.setFixedWidth(340)
+        panel.setFrameShape(QFrame.Shape.StyledPanel)
+        panel.setStyleSheet("background:#fafafa; border-left:1px solid #ccc;")
+        pl = QVBoxLayout(panel)
+        pl.setContentsMargins(6, 6, 6, 6)
+        pl.setSpacing(4)
+
+        head = QHBoxLayout()
+        title = QLabel("📦 Unplanned Orders")
+        title.setStyleSheet("font-weight:bold;")
+        head.addWidget(title)
+        head.addStretch()
+        btn_close = QPushButton("✕")
+        btn_close.setFixedWidth(24)
+        btn_close.setToolTip("Close")
+        btn_close.clicked.connect(self._close_unplanned_panel)
+        head.addWidget(btn_close)
+        pl.addLayout(head)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("background:transparent;")
+
+        self._unplanned_inner = QWidget()
+        self._unplanned_inner.setStyleSheet("background:transparent;")
+        self.unplanned_card_layout = QVBoxLayout(self._unplanned_inner)
+        self.unplanned_card_layout.setContentsMargins(0, 2, 0, 2)
+        self.unplanned_card_layout.setSpacing(6)
+        self.unplanned_card_layout.addStretch()
+        scroll.setWidget(self._unplanned_inner)
+        pl.addWidget(scroll)
+
+        self.unplanned_count_label = QLabel("0 unplanned order(s)")
+        self.unplanned_count_label.setStyleSheet("color:#555; font-size:11px;")
+        pl.addWidget(self.unplanned_count_label)
+
+        return panel
+
+    def _on_toggle_unplanned(self, checked: bool):
+        self.unplanned_panel.setVisible(checked)
+        if checked:
+            self._refresh_unplanned_panel()
+
+    def _close_unplanned_panel(self):
+        self.btn_unplanned.setChecked(False)
+
+    def _refresh_unplanned_panel(self):
+        # Clear existing cards (keep the trailing stretch)
+        layout = self.unplanned_card_layout
+        while layout.count() > 1:
+            item = layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        rows = SORepo.unplanned()
+        today_str = date.today().strftime("%Y-%m-%d")
+
+        # Group step-level rows by order line
+        from collections import OrderedDict
+        groups: OrderedDict[tuple, list] = OrderedDict()
+        for r in rows:
+            key = (r["so_number"], r["sku_code"], r["line_item"])
+            groups.setdefault(key, []).append(r)
+
+        for (so_number, sku_code, line_item), steps in groups.items():
+            rep = steps[0]  # representative row for SO-level fields
+            card = self._make_unplanned_card(rep, steps, today_str)
+            layout.insertWidget(layout.count() - 1, card)
+
+        n_orders = len(groups)
+        n_steps  = len(rows)
+        self.unplanned_count_label.setText(
+            f"{n_orders} unplanned order(s)  ·  {n_steps} step(s)")
+
+    def _make_unplanned_card(self, rep: dict, steps: list, today_str: str) -> QFrame:
+        so_number   = rep["so_number"]
+        sku_code    = rep["sku_code"]
+        line_item   = rep["line_item"]
+        customer    = rep.get("customer_name") or ""
+        due_date    = rep.get("due_date") or ""
+        priority    = rep.get("priority")
+        is_late     = bool(due_date and due_date < today_str)
+        n_steps     = len(steps)
+        remaining   = max(s.get("remaining_qty", 0) for s in steps)
+
+        card = QFrame()
+        card.setFrameShape(QFrame.Shape.StyledPanel)
+        border_color = "#ef4444" if is_late else "#d1d5db"
+        card.setStyleSheet(
+            f"QFrame{{background:white; border:1px solid {border_color};"
+            f" border-radius:6px; padding:0px;}}"
+        )
+
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(10, 8, 10, 8)
+        cl.setSpacing(3)
+
+        # Row 1: SO · SKU/Line  +  Plan button
+        row1 = QHBoxLayout()
+        row1.setSpacing(6)
+        lbl_so = QLabel(f"<b>{so_number}</b>  ·  {sku_code} / {line_item}")
+        lbl_so.setStyleSheet("font-size:12px;")
+        row1.addWidget(lbl_so, stretch=1)
+
+        btn = QPushButton("▶ Plan")
+        btn.setFixedHeight(24)
+        btn.setFixedWidth(64)
+        btn.setStyleSheet(
+            "QPushButton{background:#2563eb;color:white;border-radius:4px;"
+            "font-size:11px; border:none;}"
+            "QPushButton:hover{background:#1d4ed8;}"
+            "QPushButton:pressed{background:#1e40af;}"
+        )
+        btn.clicked.connect(lambda _c, rd=dict(rep): self._force_plan_row(rd))
+        row1.addWidget(btn)
+        cl.addLayout(row1)
+
+        # Row 2: Customer · Due date
+        due_color = "#ef4444" if is_late else "#6b7280"
+        due_text  = f"Due: {due_date}" if due_date else "Due: —"
+        cust_text = customer if customer else "—"
+        lbl_meta = QLabel(f"{cust_text}  ·  <span style='color:{due_color};'>{due_text}</span>")
+        lbl_meta.setStyleSheet("font-size:11px; color:#6b7280;")
+        cl.addWidget(lbl_meta)
+
+        # Row 3: Priority · Remaining · steps unplanned
+        pri_text  = f"Pri: {priority}" if priority else "Pri: —"
+        step_parts = []
+        for s in steps:
+            seq  = s.get("process_seq")
+            name = s.get("process_name") or ""
+            tag  = f"[{seq}] {name}" if seq is not None else name
+            step_parts.append(tag)
+        steps_text = "  ·  ".join(step_parts) if step_parts else "(no routing)"
+        lbl_steps = QLabel(
+            f"<span style='color:#9ca3af;'>{pri_text}  ·  Rem: {remaining}</span>"
+            f"<br><span style='color:#b45309; font-size:10px;'>{steps_text}</span>"
+        )
+        lbl_steps.setStyleSheet("font-size:11px;")
+        lbl_steps.setWordWrap(True)
+        cl.addWidget(lbl_steps)
+
+        return card
+
+    def _force_plan_row(self, row_data: dict):
+        d0, d1 = self._date_range()
+        so_number = row_data["so_number"]
+        sku_code  = row_data["sku_code"]
+        line_item = row_data["line_item"]
+        try:
+            report = scheduler.force_plan_so(so_number, sku_code, line_item, d0, d1)
+        except Exception as e:
+            QMessageBox.warning(self, "Force Plan Error", str(e))
+            return
+
+        planned = report.get("planned", 0)
+        late    = report.get("late", [])
+        errors  = report.get("routing_errors", [])
+
+        if planned > 0:
+            self.refresh()
+            msg = f"Force-planned {so_number} / {sku_code} / {line_item}: {planned} slot(s)"
+            if self.main_window:
+                self.main_window.notify(msg)
+                self.main_window._check_conflicts_silent()
+        elif errors:
+            QMessageBox.warning(self, "Force Plan Failed",
+                                "\n".join(e.get("error", str(e)) for e in errors))
+        elif late:
+            reason = late[0].get("reason", "window_closed")
+            if reason == "capacity_exceeded":
+                dlg = PriorityConflictDialog(so_number, sku_code, self)
+                if dlg.exec() == QDialog.DialogCode.Accepted and dlg._sos:
+                    dlg.save_priorities()
+                    try:
+                        report2 = scheduler.force_plan_so(so_number, sku_code, line_item, d0, d1)
+                    except Exception as e:
+                        QMessageBox.warning(self, "Force Plan Error", str(e))
+                        return
+                    if report2.get("planned", 0) > 0:
+                        self.refresh()
+                        msg = (f"Force-planned {so_number} / {sku_code} / {line_item}: "
+                               f"{report2['planned']} slot(s)")
+                        if self.main_window:
+                            self.main_window.notify(msg)
+                            self.main_window._check_conflicts_silent()
+                    else:
+                        QMessageBox.warning(self, "Force Plan Failed",
+                                            "Re-planned after saving priorities but capacity is still insufficient.\n"
+                                            "Check the planning horizon or CRP capacity settings.")
+            else:
+                QMessageBox.warning(self, "Force Plan Failed",
+                                    f"Could not place plan: {reason}\n\n"
+                                    "Check CRP capacity and calendar setup.")
+        else:
+            QMessageBox.information(self, "Force Plan",
+                                    "Nothing to plan (already fully planned or no capacity).")
+
+    def _date_range(self) -> Tuple[str, str]:
+        from PyQt6.QtCore import QDate
+        d0 = self.date_edit.date().toPyDate()
+        try:
+            weeks = int(ConfigRepo.get("plan_horizon_weeks", "4"))
+        except Exception:
+            weeks = 4
+        d1 = d0 + timedelta(weeks=weeks)
+        return d0.strftime("%Y-%m-%d"), d1.strftime("%Y-%m-%d")
+
+    def refresh(self):
+        d0, d1   = self._date_range()
+        plans    = PlanRepo.all(d0, d1)
+        sos      = SORepo.all()
+        skus     = SKURepo.all()
+        shifts   = ShiftRepo.all()
+        conflicts = scheduler.detect_conflicts(d0, d1)
+
+        # Build material demand group map in one bulk query
+        group_ids = list({p["material_group_id"] for p in plans
+                          if p.get("material_group_id")})
+        mat_groups = MaterialDemandRepo.for_groups_bulk(group_ids)
+
+        self.canvas.start_date   = datetime.strptime(d0, "%Y-%m-%d").date()
+        self.canvas.horizon_days = (
+            datetime.strptime(d1, "%Y-%m-%d").date() -
+            datetime.strptime(d0, "%Y-%m-%d").date()).days
+        self.canvas.load_data(plans, sos, skus, shifts, conflicts, mat_groups)
+
+        # Sync frozen header with canvas data
+        self.gantt_header.sync_from(self.canvas)
+
+        if self.btn_unplanned.isChecked():
+            self._refresh_unplanned_panel()
+
+    def run_auto_plan(self):
+        d0, d1 = self._date_range()
+        try:
+            scheduler._reload_masters()
+            report = scheduler.auto_plan(d0, d1)
+            self.refresh()
+            msg = (f"Auto-plan: {report['planned']} slots, "
+                   f"{len(report['late'])} late, "
+                   f"{len(report.get('routing_errors', []))} routing errors.")
+            if self.main_window:
+                self.main_window.notify(msg)
+                self.main_window._check_conflicts_silent()
+        except Exception as e:
+            QMessageBox.warning(self, "Auto Plan Error", str(e))
+
+    def run_pull_forward(self):
+        d0, d1 = self._date_range()
+        try:
+            result = scheduler.pull_forward(d0, d1)
+            self.refresh()
+            if self.main_window:
+                self.main_window.notify(f"Pull forward: {result['moved']} plans moved.")
+        except Exception as e:
+            QMessageBox.warning(self, "Pull Forward Error", str(e))
+
+    def run_clear_plan(self):
+        reply = QMessageBox.question(
+            self, "Clear Plan",
+            "Delete ALL production plans (SKU + MATERIAL)?\n"
+            "This cannot be undone. Run Re-Plan / Auto Plan afterward "
+            "to regenerate from scratch.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        n = PlanRepo.delete_all(reason="manual_clear_plan")
+        self.refresh()
+        if self.main_window:
+            self.main_window.notify(f"Cleared {n} plan(s).")
+            self.main_window._check_conflicts_silent()
+
+    def _consolidate(self):
+        checked = self.canvas.checked_plans()
+        if not checked:
+            QMessageBox.information(self, "Consolidate",
+                "No plans checked. Click the ☑ checkbox on plan blocks first.")
+            return
+        shifts = ShiftRepo.all()
+        ok, msg = ConsolidationEngine.consolidate(checked, shifts)
+        QMessageBox.information(self, "Consolidate", msg)
+        if ok:
+            self.canvas.clear_checks()
+            self.refresh()
+            if self.main_window:
+                self.main_window.notify(msg.split("\n")[0])
+
+    def _clear_checks(self):
+        self.canvas.clear_checks()
+
+    def _on_plan_moved(self, plan_id, old_date, old_shift, reason):
+        self.refresh()
+        if self.main_window:
+            self.main_window.notify(f"Plan #{plan_id} moved. Reason: {reason}")
+            self.main_window._check_conflicts_silent()
+
+    def _on_plan_selected(self, plan: Dict):
+        so  = SORepo.get(plan["so_number"], plan["sku_code"], plan["line_item"])
+        due = so["due_date"] if so else "N/A"
+        customer = so.get("customer_name", "") if so else ""
+        grp = plan.get("consolidation_group") or "-"
+        self.detail_label.setText(
+            f"Plan #{plan['plan_id']}  |  SO:{plan['so_number']}  "
+            f"SKU:{plan['sku_code']}  Line:{plan['line_item']}  "
+            f"{'| Customer:'+customer if customer else ''}  |  "
+            f"Room:{plan['room_code']}  Process:{plan['process_name']}  |  "
+            f"Date:{plan['plan_date']} S{plan['shift_no']}  |  "
+            f"Qty:{plan['qty_planned']}  Due:{due}  |  "
+            f"{'🔒 LOCKED' if plan['is_locked'] else 'unlocked'}  "
+            f"{'⭐FINAL' if plan.get('is_final_seq') else ''}  Grp:{grp}")
+
+    def _on_selection_changed(self, checked_ids: list):
+        n = len(checked_ids)
+        self.check_label.setText(f"{n} checked")
+        self.btn_consol.setEnabled(n >= 2)
+        self.btn_clear.setEnabled(n > 0)
+
+    def _export_plan(self):
+        from PyQt6.QtWidgets import QFileDialog
+        d0, d1 = self._date_range()
+        default_name = f"GanttPlan_{d0}_{d1}.xlsx"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Gantt Plan", default_name,
+            "Excel Files (*.xlsx)")
+        if not path:
+            return
+        ok, msg = export_gantt_plan(
+            self.canvas._plans,
+            self.canvas._sos,
+            self.canvas._mat_groups,
+            path)
+        if ok:
+            QMessageBox.information(self, "Export", msg)
+            if self.main_window:
+                self.main_window.notify(msg)
+        else:
+            QMessageBox.warning(self, "Export Failed", msg)
+
+    def _on_y_changed(self, idx: int):
+        modes = [GanttCanvas.Y_MODE_ROOM, GanttCanvas.Y_MODE_SO, GanttCanvas.Y_MODE_SKU]
+        self.canvas.y_mode = modes[idx]
+        self.refresh()
+
+    def _on_shift_toggle(self, checked: bool):
+        self.canvas.shift_view = checked
+        self.refresh()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Add Plan Dialog
+# ════════════════════════════════════════════════════════════════════════════
+
+class AddPlanDialog(QDialog):
+    """수동으로 플랜 슬롯에 계획을 추가하는 다이얼로그."""
+
+    def __init__(self, plan_date: str, shift_no: int, room_code: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add Plan")
+        self.setMinimumWidth(460)
+        self._date  = plan_date
+        self._shift = shift_no
+        self._room  = room_code
+        self._build_ui()
+
+    def _build_ui(self):
+        from data.repositories import ProcessRoutingRepo
+        layout = QFormLayout(self)
+        layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        layout.addRow("Date:",  QLabel(self._date))
+        layout.addRow("Shift:", QLabel(f"Shift {self._shift}"))
+        layout.addRow("Room:",  QLabel(self._room))
+
+        # Process — from room's available processes
+        self._proc_combo = QComboBox()
+        for rp in RoomRepo.processes_for_room(self._room):
+            self._proc_combo.addItem(rp["process_name"], rp)
+        layout.addRow("Process:", self._proc_combo)
+
+        # SO + Line Item
+        self._so_combo = QComboBox()
+        self._so_combo.setMinimumWidth(280)
+        self._sos = SORepo.all(status="OPEN")
+        for so in self._sos:
+            label = (f"{so['so_number']}  {so['sku_code']}  "
+                     f"Line {so['line_item']}"
+                     + (f"  [{so['customer_name']}]" if so.get("customer_name") else ""))
+            self._so_combo.addItem(label, so)
+        layout.addRow("SO / SKU / Line:", self._so_combo)
+
+        # Qty
+        self._qty_spin = QSpinBox()
+        self._qty_spin.setRange(1, 9_999_999)
+        self._qty_spin.setValue(100)
+        layout.addRow("Qty:", self._qty_spin)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self._save)
+        btns.rejected.connect(self.reject)
+        layout.addRow(btns)
+
+    def _save(self):
+        from data.repositories import ProcessRoutingRepo
+        so = self._so_combo.currentData()
+        rp = self._proc_combo.currentData()
+        if not so or not rp:
+            QMessageBox.warning(self, "Add Plan", "SO 또는 공정을 선택하세요.")
+            return
+        proc_name = rp["process_name"]
+        steps = ProcessRoutingRepo.for_entity("SKU", so["sku_code"])
+        step = next((s for s in steps if s["process_name"] == proc_name), None)
+        seq      = step["process_seq"]   if step else 1
+        is_final = (1 if step and step.get("is_final_seq") else 0)
+
+        PlanRepo.insert({
+            "entity_type":  "SKU",
+            "entity_code":  so["sku_code"],
+            "so_number":    so["so_number"],
+            "sku_code":     so["sku_code"],
+            "line_item":    so["line_item"],
+            "process_name": proc_name,
+            "process_seq":  seq,
+            "is_final_seq": is_final,
+            "room_code":    self._room,
+            "plan_date":    self._date,
+            "shift_no":     self._shift,
+            "qty_planned":  self._qty_spin.value(),
+            "memo":         "manual",
+        })
+        self.accept()

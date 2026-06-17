@@ -1,0 +1,174 @@
+================================================================================
+Production Planner — 개발 노트 (요구사항 / 피드백 / 변경사항)
+최종 업데이트: 2026-06-16
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+[1] 프로젝트 기술 스택 요약
+────────────────────────────────────────────────────────────────────────────────
+- Python 3.x + PyQt6 (GUI)
+- SQLite (planner.db) — Repository 패턴
+- openpyxl (CRP Excel 읽기/쓰기, 간트 export)
+- 실행: python main.py
+- 의존성: pip install PyQt6 openpyxl
+
+핵심 파일:
+  main.py                  진입점 (init_db() 최상단 필수)
+  data/database.py         스키마 + init_db() + 마이그레이션
+  data/repositories.py     모든 DB 접근 (Repository 패턴)
+  core/scheduler.py        스케줄링 엔진 (Lazy Proxy)
+  ui/gantt_tab.py          간트 차트 (GanttCanvas)
+  ui/master_tab.py         마스터 관리 탭
+  ui/so_tab.py             SO 관리 탭
+  ui/remaining_tabs.py     CRP/Actuals/Alerts/Dashboard/ReleaseReport/Inventory
+  utils/excel_io.py        Excel import/export
+
+────────────────────────────────────────────────────────────────────────────────
+[2] 이번 세션 변경사항 상세
+────────────────────────────────────────────────────────────────────────────────
+
+▶ A. 전공정→후공정 Shift Gap 세부 조정 (완료)
+
+  문제: 기존에는 전공정 배치 상한선을 "shift 인덱스 -1"로만 계산했음.
+        시간 단위 제어 시도했으나 플래너가 시간 단위로 컨트롤 불가능 → Shift 단위로 변경.
+
+  구현:
+  - process_routing 테이블에 min_gap_shifts INTEGER DEFAULT 0 컬럼 추가
+  - database.py init_db()에 ALTER TABLE 자동 마이그레이션 포함
+  - scheduler.py: _find_pre_cutoff(post_date, post_shift, min_gap_shifts)
+      → (1 + min_gap_shifts)번 shift 인덱스를 뒤로 이동
+      → min_gap_shifts=0 : 인접 shift OK (기존 동작 동일)
+      → min_gap_shifts=1 : 중간에 1 shift 공백
+      → min_gap_shifts=2 : 2 shift 공백 (2-shift 운영 기준 ≈ 1일)
+  - _plan_so(), _place_material_plans() 에서 steps[si+1]["min_gap_shifts"] 읽어 사용
+  - Excel 04_Process_Routing.xlsx: MinGapShifts 9번째 컬럼 추가
+      기존 8컬럼 파일은 하위 호환 (기본값 0으로 처리)
+  - UI ProcessRoutingWidget: "Min Gap (shifts)" 컬럼
+  - ProcessRoutingEditDialog: QSpinBox(0~30, suffix=" shift(s)") 추가
+
+  핵심 코드 (scheduler.py):
+      def _find_pre_cutoff(self, post_date_str, post_shift_no, min_gap_shifts):
+          sns = sorted(s["shift_no"] for s in self.shifts)
+          d, sno = _date(post_date_str), post_shift_no
+          for _ in range(1 + min_gap_shifts):
+              idx = sns.index(sno) if sno in sns else 0
+              if idx > 0: sno = sns[idx - 1]
+              else:       d -= timedelta(days=1); sno = sns[-1]
+          return d, sno
+
+────────────────────────────────────────────────────────────────────────────────
+
+▶ B. 간트 카드 레이아웃 변경: 가변 폭 → 고정 폭 + 수직 스태킹 (완료)
+
+  문제: 카드 폭을 물량/캐파에 비례해서 가변으로 하니 가시성이 떨어짐.
+        같은 셀에 여러 계획이 있을 때 카드가 너무 작아짐.
+
+  요구사항:
+  - 카드 폭: 컬럼 전체 폭으로 고정 (qty 비례 제거)
+  - 같은 셀(날짜+Shift+행)에 복수 계획 → 수직으로 쌓기
+  - 행 높이: 해당 행의 슬롯 중 카드 수 최대값 × CARD_H 로 자동 확장
+
+  구현:
+  - 상수: ROW_H=56 → CARD_H=44 (고정 카드 높이)
+  - _build_layout_and_heights() — _build_plan_layout() 대체
+      · slot key = (plan_date, shift_no, row_key)
+      · 같은 슬롯 내 plan_id 오름차순 정렬 후 slot_index 부여
+      · plan_layout: {plan_id: (slot_index, total_in_slot)}
+      · row_heights: 각 행의 최대 카드 수 × CARD_H
+      · row_y_list:  각 행의 누적 Y 좌표
+      · total_body_h: 전체 바디 높이
+  - _plan_rect(): x=col_x+1, w=col_w-2(고정), y=row_y+slot_idx×CARD_H+2, h=CARD_H-4
+  - _total_h(): body_top + total_body_h + 20
+  - _row_at_y(y): context menu용 행 탐지 (가변 높이 지원)
+  - 오버플로우 뱃지: 폭 비율 계산 제거 → _cap_map 직접 비교
+      cap_i > 1 and used_i > cap_i 일 때만 "+N%" 빨간 뱃지
+
+  영향 받은 메서드:
+    _draw_grid, _draw_y_labels, _draw_y_labels_sku,
+    _draw_due_lines, _draw_plans (overflow badge),
+    _context_menu (row hit test)
+
+────────────────────────────────────────────────────────────────────────────────
+[3] 피드백 & 설계 결정 기록 (향후 개발 시 반드시 참고)
+────────────────────────────────────────────────────────────────────────────────
+
+F-01. Gap 단위는 Shift 또는 Day 단위만 허용
+      → 시간(hour) 단위는 플래너가 현장에서 컨트롤 불가능
+      → min_gap_shifts (정수, Shift 단위) 사용
+      → 2-shift 운영 시 gap=2 ≈ 1일
+
+F-02. 간트 카드는 고정 폭 + 수직 스태킹
+      → 카드 폭을 물량에 비례하면 카드가 너무 작아져 가시성 저하
+      → 항상 컬럼 전체 폭을 사용
+      → 복수 계획은 수직으로 쌓고 행 높이가 자동 확장됨
+
+F-03. 앱 실행/캡처는 요청당 한 번만 수행
+      → 불필요한 반복 실행 금지
+
+────────────────────────────────────────────────────────────────────────────────
+[4] 캐파 초과(+N%) 뱃지 표시 조건 설명
+────────────────────────────────────────────────────────────────────────────────
+
+간트 카드 우측 중앙에 빨간 "+N%" 뱃지가 표시되는 경우:
+
+  1. CRP 미설정 (가장 흔한 원인)
+     - CRP HC=0 → cap=0 → max(cap,1)=1 fallback → 어떤 계획도 초과로 표시
+     - 해결: Masters > App Config > CRP Excel Path 설정 후 Refresh
+
+  2. 드래그 이동
+     - 수동 드래그 시 캐파 체크 없음 → 초과 슬롯에 배치 가능
+
+  3. 계획 생성 후 마스터 변경
+     - 계획 후 UPPH/HC/Shift시간 줄이면 기존 계획이 소급 초과로 표시
+
+  4. 콘솔리데이션
+     - 여러 슬롯 계획을 하나로 합칠 때 캐파 초과 가능
+
+  자동 배정(auto_plan)은 캐파 초과 계획을 만들 수 없음
+  (qty_this = min(step_rem, avail_sku) 로 항상 잔여 캐파 이하만 배정)
+
+────────────────────────────────────────────────────────────────────────────────
+[5] TODO (미완료)
+────────────────────────────────────────────────────────────────────────────────
+
+[ ] PyInstaller EXE 빌드
+    - pyinstaller --onefile --windowed --name ProductionPlanner main.py
+    - openpyxl 데이터 파일 포함 옵션 추가 필요
+    - --add-data 옵션으로 openpyxl 템플릿 포함
+
+────────────────────────────────────────────────────────────────────────────────
+[6] 완료된 주요 기능 목록 (이전 세션 포함)
+────────────────────────────────────────────────────────────────────────────────
+
+[x] SO 분할 뷰 (SplitSODialog) — SO 탭 우클릭 → ✂ Split
+[x] Excel 업로드 SO 변경 미리보기 (SOUploadPreviewDialog)
+[x] 콘솔리데이션 체크박스 UI (히트 영역 20×20px)
+[x] 생산실별 인력 자동배정 UI (HCDemandDialog, CRP Excel write)
+[x] 리플래닝 리포트 상세화 (ReplanReportDialog 3탭)
+[x] 3Shift 운영 캘린더 UI (CalendarWidget)
+[x] 탭 분리 기능 (DetachedWindow, Ctrl+N, 10초 자동 새로고침)
+[x] 간트 비주얼 리디자인 (모던 팔레트, 카드 3존, Y_MODE_SKU 분할 Y축)
+[x] 간트 Excel export (export_gantt_plan)
+[x] 전공정→후공정 Shift Gap (min_gap_shifts, _find_pre_cutoff)
+[x] 간트 카드 고정 폭 + 수직 스태킹 (CARD_H=44, _build_layout_and_heights)
+[x] customer_name SO 테이블 + 간트 카드 표시
+[x] SKU 마스터 인라인 편집 (노란→초록 배경 피드백)
+[x] Cap%/HC% Utilization 바 2줄
+[x] AUTO 공정 HC=0 버그 수정
+
+────────────────────────────────────────────────────────────────────────────────
+[7] DB 마이그레이션 규칙
+────────────────────────────────────────────────────────────────────────────────
+
+컬럼 추가 시 init_db() 내부에 PRAGMA + ALTER TABLE 패턴 사용:
+  cols = [r[1] for r in c.execute("PRAGMA table_info(테이블명)").fetchall()]
+  if "새컬럼" not in cols:
+      c.execute("ALTER TABLE 테이블명 ADD COLUMN 새컬럼 타입 DEFAULT 값")
+
+컬럼 삭제는 SQLite 3.35+ 필요:
+  try:
+      c.execute("ALTER TABLE 테이블명 DROP COLUMN 구컬럼")
+  except Exception:
+      pass  # 구버전 SQLite — 컬럼이 남아있어도 코드에서 무시
+
+================================================================================
