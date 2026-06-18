@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(run)",
+      "PowerShell(Start-Sleep -Seconds 3; Add-Type -AssemblyName System.Windows.Forms; $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $bmp = New-Object System.Drawing.Bitmap $screen.Width, $screen.Height; $g = [System.Drawing.Graphics]::FromImage\\($bmp\\); $g.CopyFromScreen\\($screen.Location, [System.Drawing.Point]::Empty, $screen.Size\\); $bmp.Save\\(\"C:\\\\Temp\\\\screenshot1.png\"\\); Write-Output \"Screenshot saved\")",
+      "PowerShell(Get-Process *)",
+      "PowerShell(Set-Location *)",
+      "PowerShell(python -c \"from PIL import Image; print\\('PIL OK'\\)\" 2>&1)",
+      "PowerShell(Start-Process python -ArgumentList \"C:\\\\temp\\\\capture_sku.py\" -Wait -NoNewWindow)",
+      "PowerShell(Start-Process python -ArgumentList \"C:\\\\temp\\\\grab_app.py\" -Wait -NoNewWindow; Start-Sleep -Milliseconds 200)",
+      "WebSearch",
+      "PowerShell(Start-Sleep -Seconds 4; python C:\\\\temp\\\\grab_app.py)",
+      "PowerShell(python C:\\\\temp\\\\grab_app.py)",
+      "PowerShell(Start-Process python -ArgumentList \"main.py\" -WorkingDirectory \"C:\\\\production scheduler\"; Start-Sleep -Seconds 4; python C:\\\\temp\\\\grab_app.py)",
+      "PowerShell(cd \"C:\\\\production scheduler\" && python main.py 2>&1 &)",
+      "PowerShell(pip install *)",
+      "PowerShell(Add-Type -AssemblyName System.Drawing; $img = [System.Drawing.Image]::FromFile\\(\"C:\\\\production scheduler\\\\_shot_1_initial.png\"\\); \"$\\($img.Width\\) x $\\($img.Height\\)\"; $img.Dispose\\(\\))",
+      "PowerShell(Stop-Process *)",
+      "PowerShell(cd \"C:\\\\production scheduler\"; $env:PYTHONIOENCODING=\"utf-8\"; python _verify_gui2.py)",
+      "PowerShell(cd \"C:\\\\production scheduler\"; $env:PYTHONIOENCODING=\"utf-8\"; python _dump_ctrls.py)",
+      "PowerShell(cd \"C:\\\\production scheduler\"; $env:PYTHONIOENCODING=\"utf-8\"; python _verify_gui3.py)",
+      "PowerShell(cd \"C:\\\\production scheduler\"; $env:PYTHONIOENCODING=\"utf-8\"; python _verify_dedup.py)",
+      "PowerShell(cd \"C:\\\\production scheduler\"; $env:PYTHONIOENCODING=\"utf-8\"; python _verify_gui.py)",
+      "PowerShell(cd \"C:\\\\production scheduler\"; $env:PYTHONIOENCODING=\"utf-8\"; python _verify_detach.py)",
+      "PowerShell(cd \"C:\\\\production scheduler\"; $env:PYTHONIOENCODING=\"utf-8\"; python _verify_redock.py)",
+      "PowerShell(Select-String *)",
+      "PowerShell(winget install *)"
+    ]
+  }
+}

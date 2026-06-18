@@ -71,9 +71,38 @@ SHIFT_W    = DAY_W   # shift-view cells stay the same width as day-view cards
 HEADER_H   = 52
 UTIL_ROW_H = 18
 UTIL_H     = UTIL_ROW_H * 2
-Y_LABEL_W  = 165
+Y_LABEL_W  = 165   # legacy default — canvas uses _y_label_w property
+DIM_COL_W  = 110   # width of each Y-axis depth column
 SKU_COL_W  = 72
 PROC_COL_W = Y_LABEL_W - SKU_COL_W
+
+# ─── Y-axis dimension helpers ──────────────────────────────────────────────────
+# Available dim names (shown in toolbar dropdowns)
+Y_DIM_OPTIONS = ["—", "SO", "Line", "SKU", "Room", "Process", "Seq"]
+
+def _dim_key(dim: str, plan: dict) -> str:
+    """Return the sort-key value for a plan along one Y-axis dimension."""
+    et = plan.get("entity_type", "SKU")
+    if dim == "SO":
+        return plan.get("so_number") or ("[MAT]" if et == "MATERIAL" else "—")
+    if dim == "Line":
+        return plan.get("line_item") or "—"
+    if dim == "SKU":
+        return (f"[MAT]{plan.get('entity_code','')}"
+                if et == "MATERIAL" else (plan.get("sku_code") or "—"))
+    if dim == "Room":
+        return plan.get("room_code") or "—"
+    if dim == "Process":
+        return plan.get("process_name") or "—"
+    if dim == "Seq":
+        return f"{int(plan.get('process_seq') or 1):03d}"
+    return "—"
+
+def _dim_label(dim: str, key_val: str) -> str:
+    """Human-readable label from the stored key value."""
+    if dim == "Seq":
+        return str(int(key_val)) if key_val.isdigit() else key_val
+    return key_val
 CHECKBOX_S  = 11
 CARD_RADIUS = 6   # card corner radius
 PILL_RADIUS = 3   # top pill radius = CARD_RADIUS - PILL_MARGIN, so corners are concentric
@@ -218,6 +247,7 @@ class GanttHeaderWidget(QWidget):
         self.start_date   : date       = date.today()
         self._shifts      : list       = []
         self._scroll_h    : int        = 0    # horizontal scrollbar value
+        self._y_label_w   : int        = Y_LABEL_W
 
     def sync_from(self, canvas: 'GanttCanvas'):
         """Copy display parameters from the canvas and repaint."""
@@ -225,6 +255,7 @@ class GanttHeaderWidget(QWidget):
         self.horizon_days = canvas.horizon_days
         self.start_date   = canvas.start_date
         self._shifts      = canvas._shifts
+        self._y_label_w   = canvas._y_label_w
         self.update()
 
     def set_scroll_h(self, val: int):
@@ -239,19 +270,21 @@ class GanttHeaderWidget(QWidget):
         bold9 = QFont(); bold9.setBold(True); bold9.setPointSize(9)
         f8    = QFont(); f8.setPointSize(8)
 
+        yw = self._y_label_w
+
         # ── Date columns (clipped to right of Y-label, panned by scroll) ──
         p.save()
-        p.setClipRect(Y_LABEL_W, 0, max(0, vw - Y_LABEL_W), HEADER_H)
+        p.setClipRect(yw, 0, max(0, vw - yw), HEADER_H)
         p.translate(-self._scroll_h, 0)
 
         # Background
-        p.fillRect(0, 0, Y_LABEL_W + self.horizon_days * self._col_w() + 200,
+        p.fillRect(0, 0, yw + self.horizon_days * self._col_w() + 200,
                    HEADER_H, HEADER_BG)
 
         if not self.shift_view:
             for col in range(self.horizon_days):
                 d  = self.start_date + timedelta(days=col)
-                x  = Y_LABEL_W + col * DAY_W
+                x  = yw + col * DAY_W
                 if d.weekday() >= 5:
                     p.fillRect(x, 0, DAY_W, HEADER_H, HEADER_WEEKEND)
                 p.setPen(QPen(QColor(255, 255, 255, 30)))
@@ -269,7 +302,7 @@ class GanttHeaderWidget(QWidget):
             if n:
                 for day in range(self.horizon_days):
                     d  = self.start_date + timedelta(days=day)
-                    x0 = Y_LABEL_W + day * n * SHIFT_W
+                    x0 = yw + day * n * SHIFT_W
                     p.setFont(bold9); p.setPen(QPen(HEADER_FG))
                     p.drawText(QRect(x0, 2, n * SHIFT_W, HEADER_H // 2 - 2),
                                Qt.AlignmentFlag.AlignCenter, d.strftime("%m/%d"))
@@ -286,10 +319,10 @@ class GanttHeaderWidget(QWidget):
         p.restore()
 
         # ── Y-label corner (always fixed at x=0) ──
-        p.fillRect(0, 0, Y_LABEL_W, HEADER_H, QColor(50, 82, 148))
+        p.fillRect(0, 0, yw, HEADER_H, QColor(50, 82, 148))
         # Thin separator between corner and date columns
         p.setPen(QPen(QColor(255, 255, 255, 60)))
-        p.drawLine(Y_LABEL_W, 0, Y_LABEL_W, HEADER_H)
+        p.drawLine(yw, 0, yw, HEADER_H)
 
         p.end()
 
@@ -304,16 +337,22 @@ class GanttCanvas(QWidget):
     planSelected     = pyqtSignal(dict)
     selectionChanged = pyqtSignal(list)
 
+    # Legacy mode constants kept for any external references
     Y_MODE_ROOM = "room"
     Y_MODE_SO   = "so"
     Y_MODE_SKU  = "sku"
+
+    @property
+    def _y_label_w(self) -> int:
+        return max(1, len(self.y_dims)) * DIM_COL_W
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMouseTracking(True)
         self.parent_tab = None
 
-        self.y_mode       = self.Y_MODE_ROOM
+        # y_dims: ordered list of dimension names, e.g. ["Room"] or ["SKU", "Process"]
+        self.y_dims: List[str] = ["Room"]
         self.shift_view   = False
         self.horizon_days = 28
         self.start_date   : date = date.today()
@@ -390,42 +429,15 @@ class GanttCanvas(QWidget):
         self.update()
 
     def _plan_row_key(self, plan: Dict) -> str:
-        """Return the row-index key string for a plan (used by _row_index)."""
-        is_mat = plan.get("entity_type") == "MATERIAL"
-        if self.y_mode == self.Y_MODE_ROOM:
-            return plan["room_code"]
-        elif self.y_mode == self.Y_MODE_SO:
-            return (f"[MAT] {plan['entity_code']}" if is_mat
-                    else f"{plan['so_number']}|{plan['sku_code']}|{plan['line_item']}")
-        else:  # Y_MODE_SKU
-            gk   = f"[MAT] {plan['entity_code']}" if is_mat else plan["sku_code"]
-            seq  = plan.get("process_seq") or 1
-            proc = plan.get("process_name") or ""
-            return f"{gk}|{seq}|{proc}"
+        """Return the pipe-joined row key for a plan based on current y_dims."""
+        return "|".join(_dim_key(d, plan) for d in self.y_dims)
 
     def _build_rows(self):
-        if self.y_mode == self.Y_MODE_ROOM:
-            self._rows = sorted({p["room_code"] for p in self._plans}) or RoomRepo.rooms()
-        elif self.y_mode == self.Y_MODE_SO:
-            rows = set()
-            for p in self._plans:
-                if p.get("entity_type") == "MATERIAL":
-                    rows.add(f"[MAT] {p['entity_code']}")
-                else:
-                    rows.add(f"{p['so_number']}|{p['sku_code']}|{p['line_item']}")
-            self._rows = sorted(rows)
-        else:  # Y_MODE_SKU — one sub-row per (entity, process_seq)
-            seen: Dict[Tuple, str] = {}   # (group_key, seq) -> process_name
-            for p in self._plans:
-                is_mat = p.get("entity_type") == "MATERIAL"
-                gk  = f"[MAT] {p['entity_code']}" if is_mat else p["sku_code"]
-                seq = p.get("process_seq") or 1
-                seen[(gk, seq)] = p.get("process_name") or ""
-            def _row_sort(item):
-                (gk, seq), _ = item
-                return (1 if gk.startswith("[MAT]") else 0, gk, seq)
-            self._rows = [f"{gk}|{seq}|{proc}"
-                          for (gk, seq), proc in sorted(seen.items(), key=_row_sort)]
+        keys = {self._plan_row_key(p) for p in self._plans}
+        # When single Room dim and no plans, show all configured rooms
+        if self.y_dims == ["Room"] and not keys:
+            keys = {r for r in RoomRepo.rooms()}
+        self._rows = sorted(keys)
         # O(1) lookup dict
         self._row_index = {r: i for i, r in enumerate(self._rows)}
 
@@ -510,25 +522,27 @@ class GanttCanvas(QWidget):
         """
         self._closed_map: Dict[Tuple[int, int], str] = {}
         self._slot_closed: Dict[Tuple[str, str, int], str] = {}
-        if self.y_mode != self.Y_MODE_ROOM or not self._rows:
+        if "Room" not in self.y_dims or not self._rows:
             return
+        room_dim_idx = self.y_dims.index("Room")
         d0 = self.start_date.strftime("%Y-%m-%d")
         d1 = (self.start_date + timedelta(days=self.horizon_days - 1)).strftime("%Y-%m-%d")
         slots = CalendarRepo.get_unavailable_slots(d0, d1)
         for s in slots:
-            ri = self._row_index.get(s["room_code"])
-            if ri is None:
-                continue
-            col = self._date_to_col(s["cal_date"], s["shift_no"])
-            if col is None:
-                continue
-            status = "hold" if s["is_hold"] else "closed"
-            # Grid hatching: hold takes priority over closed
-            key = (ri, col)
-            if key not in self._closed_map or status == "hold":
-                self._closed_map[key] = status
-            # Exact-shift badge lookup
-            self._slot_closed[(s["room_code"], s["cal_date"], s["shift_no"])] = status
+            room = s["room_code"]
+            # Find all rows that include this room at the Room dimension
+            for rk, ri in self._row_index.items():
+                parts = rk.split("|")
+                if len(parts) > room_dim_idx and parts[room_dim_idx] == room:
+                    col = self._date_to_col(s["cal_date"], s["shift_no"])
+                    if col is None:
+                        continue
+                    status = "hold" if s["is_hold"] else "closed"
+                    key = (ri, col)
+                    if key not in self._closed_map or status == "hold":
+                        self._closed_map[key] = status
+            self._slot_closed[(room, s["cal_date"], s["shift_no"])] = (
+                "hold" if s["is_hold"] else "closed")
 
     # ── Geometry ──────────────────────────────────────────────────────────────
 
@@ -539,7 +553,7 @@ class GanttCanvas(QWidget):
         return SHIFT_W if self.shift_view else DAY_W
 
     def _total_w(self):
-        return Y_LABEL_W + self._col_count() * self._col_w()
+        return self._y_label_w + self._col_count() * self._col_w()
 
     def _total_h(self):
         return self._body_top() + self._total_body_h + 20
@@ -600,7 +614,7 @@ class GanttCanvas(QWidget):
             return None
         slot_idx = self._plan_layout.get(plan["plan_id"], (0, 1))[0]
         col_w = self._col_w()
-        x = Y_LABEL_W + col * col_w + 1
+        x = self._y_label_w + col * col_w + 1
         w = col_w - 2
         y = self._row_y_list[row] + slot_idx * CARD_H + 2
         return QRect(x, y, w, CARD_H - 4)
@@ -628,19 +642,20 @@ class GanttCanvas(QWidget):
         p.end()
 
     def _draw_grid(self, p: QPainter):
+        yw = self._y_label_w
         w, h = self._total_w(), self._total_h()
         # Alternating row backgrounds (variable height)
         for ri in range(len(self._rows)):
             y  = self._row_y_list[ri]
             rh = self._row_heights[ri]
             bg = ROW_BG_A if ri % 2 == 0 else ROW_BG_B
-            p.fillRect(Y_LABEL_W, y, w - Y_LABEL_W, rh, bg)
+            p.fillRect(yw, y, w - yw, rh, bg)
         # Weekend column tint
         if not self.shift_view:
             for col in range(self.horizon_days):
                 d = self.start_date + timedelta(days=col)
                 if d.weekday() >= 5:
-                    x = Y_LABEL_W + col * DAY_W
+                    x = yw + col * DAY_W
                     p.fillRect(x, self._body_top(), DAY_W, h - self._body_top(),
                                GRID_WEEKEND)
         # Unavailable cells: closed=gray hatch, hold=orange hatch
@@ -652,7 +667,7 @@ class GanttCanvas(QWidget):
                     continue
                 cy  = self._row_y_list[ri]
                 crh = self._row_heights[ri]
-                cx  = Y_LABEL_W + col * cw
+                cx  = yw + col * cw
                 if status == "hold":
                     base  = QColor(255, 160, 40, 55)
                     hatch = QColor(210, 120, 20, 110)
@@ -686,7 +701,7 @@ class GanttCanvas(QWidget):
         # Header background only — date text is rendered by GanttHeaderWidget
         # (the fixed overlay above the scroll area) so it stays frozen on scroll.
         p.fillRect(0, 0, self._total_w(), HEADER_H, HEADER_BG)
-        p.fillRect(0, 0, Y_LABEL_W, HEADER_H, QColor(50, 82, 148))
+        p.fillRect(0, 0, self._y_label_w, HEADER_H, QColor(50, 82, 148))
 
     def _draw_util_bars(self, p: QPainter):
         """Draw two util rows: row1=capacity%, row2=headcount%."""
@@ -703,9 +718,10 @@ class GanttCanvas(QWidget):
             cu, cc = col_cap.get(col, (0.0, 0.0))
             col_cap[col] = (cu + used, cc + cap)
 
+        yw = self._y_label_w
         for col, (used, cap) in col_cap.items():
             ratio = (used / cap) if cap > 0 else 0
-            x     = Y_LABEL_W + col * self._col_w()
+            x     = yw + col * self._col_w()
             color = UTIL_HIGH if ratio > 0.9 else UTIL_MED if ratio > 0.6 else UTIL_LOW
             fill  = min(ratio, 1.0)
             p.fillRect(x+1, y0, int((self._col_w()-2)*fill), UTIL_ROW_H-1, color)
@@ -713,7 +729,6 @@ class GanttCanvas(QWidget):
             p.drawRect(x+1, y0, self._col_w()-2, UTIL_ROW_H-1)
             if ratio > 0.05:
                 label = f"{int(ratio*100)}%" if ratio <= 1.5 else ">150%"
-                # Text is centered in the cell; use dark ink when bar doesn't cover center
                 text_color = Qt.GlobalColor.white if fill >= 0.5 else QColor(30, 30, 60)
                 p.setPen(QPen(text_color))
                 p.drawText(QRect(x+1, y0, self._col_w()-2, UTIL_ROW_H),
@@ -731,7 +746,7 @@ class GanttCanvas(QWidget):
 
         for col, (alloc, total) in col_hc.items():
             ratio = (alloc / total) if total > 0 else 0
-            x     = Y_LABEL_W + col * self._col_w()
+            x     = yw + col * self._col_w()
             color = UTIL_HC_HIGH if ratio > 0.9 else UTIL_HC_MED if ratio > 0.6 else UTIL_HC_LOW
             fill  = min(ratio, 1.0)
             p.fillRect(x+1, y1, int((self._col_w()-2)*fill), UTIL_ROW_H-1, color)
@@ -747,95 +762,104 @@ class GanttCanvas(QWidget):
         # Row labels on Y-label side
         p.setPen(QPen(QColor(80, 80, 80)))
         p.setFont(QFont("Arial", 6))
-        p.drawText(QRect(0, y0, Y_LABEL_W-2, UTIL_ROW_H),
+        p.drawText(QRect(0, y0, yw - 2, UTIL_ROW_H),
                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                    "Cap% ")
-        p.drawText(QRect(0, y1, Y_LABEL_W-2, UTIL_ROW_H),
+        p.drawText(QRect(0, y1, yw - 2, UTIL_ROW_H),
                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                    "HC% ")
 
     def _draw_y_labels(self, p: QPainter):
-        p.fillRect(0, self._body_top(), Y_LABEL_W, self._total_body_h,
-                   QColor(245, 245, 250))
-        if self.y_mode == self.Y_MODE_SKU:
-            self._draw_y_labels_sku(p)
-            return
-        f9 = QFont("Arial", 9); p.setFont(f9)
-        for ri, label in enumerate(self._rows):
-            y  = self._row_y_list[ri]
-            rh = self._row_heights[ri]
-            bg = ROW_BG_A if ri % 2 == 0 else ROW_BG_B
-            p.fillRect(0, y, Y_LABEL_W, rh, bg)
-            p.setPen(QPen(GRID_LINE)); p.drawLine(0, y, Y_LABEL_W, y)
-            p.setPen(QPen(QColor(35, 40, 65)))
-            p.drawText(QRect(8, y + 4, Y_LABEL_W - 12, rh - 8),
-                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                       label.replace("|", " / "))
+        """Draw Y-axis labels with N-depth spanning columns."""
+        yw    = self._y_label_w
+        ndims = len(self.y_dims)
+        cw    = yw // ndims if ndims else yw   # width per dim column
 
-    def _draw_y_labels_sku(self, p: QPainter):
-        """Y_MODE_SKU: left=SKU code spanning all its process rows, right=process per row."""
+        sep_group = QColor(185, 190, 208)
+        sep_inner = QColor(215, 218, 230)
+        grp_bgs   = [QColor(228, 237, 255), QColor(225, 244, 228)]
+        fg_bold   = QColor(25, 45, 100)
+        fg_normal = QColor(48, 52, 72)
+
+        p.fillRect(0, self._body_top(), yw, self._total_body_h, QColor(245, 245, 250))
+
+        if ndims == 1:
+            # Simple flat list — no spanning needed
+            f9 = QFont("Arial", 9)
+            p.setFont(f9)
+            for ri, rk in enumerate(self._rows):
+                y  = self._row_y_list[ri]
+                rh = self._row_heights[ri]
+                bg = grp_bgs[ri % len(grp_bgs)]
+                p.fillRect(0, y, yw, rh, bg)
+                p.setPen(QPen(sep_inner))
+                p.drawLine(0, y, yw, y)
+                p.setPen(QPen(fg_normal))
+                label = _dim_label(self.y_dims[0], rk.split("|")[0])
+                p.drawText(QRect(6, y + 4, yw - 10, rh - 8),
+                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                           label)
+            y_end = self._body_top() + self._total_body_h
+            p.setPen(QPen(sep_group, 1))
+            p.drawLine(0, y_end, yw, y_end)
+            p.drawLine(yw - 1, self._body_top(), yw - 1, y_end)
+            return
+
+        # Multi-depth: for each depth d draw spanning group labels
         fb = QFont("Arial", 9); fb.setBold(True)
         f8 = QFont("Arial", 8)
 
-        grp_bgs   = [QColor(228, 237, 255), QColor(225, 244, 228)]
-        sep_group = QColor(185, 190, 208)   # subtle gray — replaces sky-blue thick line
-        sep_row   = QColor(215, 218, 230)   # even lighter for inner row dividers
+        for d in range(ndims):
+            x_col   = d * cw
+            is_last = (d == ndims - 1)
+            p.setFont(f8 if is_last else fb)
 
-        # Pre-compute groups: [(gk, [row_keys])]
-        groups: List[Tuple[str, List[str]]] = []
-        for row_key in self._rows:
-            gk = row_key.split("|", 1)[0]
-            if not groups or groups[-1][0] != gk:
-                groups.append((gk, []))
-            groups[-1][1].append(row_key)
+            # Group consecutive rows sharing the same prefix up to depth d
+            groups: List[Tuple[tuple, List[int]]] = []
+            for ri, rk in enumerate(self._rows):
+                parts  = rk.split("|")
+                prefix = tuple(parts[:d + 1])
+                if not groups or groups[-1][0] != prefix:
+                    groups.append((prefix, []))
+                groups[-1][1].append(ri)
 
-        for gi, (gk, rows) in enumerate(groups):
-            bg = grp_bgs[gi % len(grp_bgs)]
-            first_ri = self._row_index[rows[0]]
-            y_top    = self._row_y_list[first_ri]
-            grp_h    = sum(self._row_heights[self._row_index[rk]] for rk in rows)
+            for gi, (prefix, row_idxs) in enumerate(groups):
+                bg    = grp_bgs[gi % len(grp_bgs)]
+                y_top = self._row_y_list[row_idxs[0]]
+                grp_h = sum(self._row_heights[ri] for ri in row_idxs)
 
-            # ── Left strip: SKU code spanning full group height ──
-            p.fillRect(0, y_top, SKU_COL_W, grp_h, bg)
-            p.setFont(fb)
-            p.setPen(QPen(QColor(25, 45, 100)))
-            p.drawText(QRect(4, y_top + 4, SKU_COL_W - 8, grp_h - 8),
-                       Qt.AlignmentFlag.AlignCenter |
-                       Qt.TextFlag.TextWordWrap, gk)
+                p.fillRect(x_col, y_top, cw, grp_h, bg)
 
-            # ── Right strip: one row per process ──
-            for row_key in rows:
-                parts = row_key.split("|", 2)
-                seq   = parts[1] if len(parts) > 1 else "1"
-                proc  = parts[2] if len(parts) > 2 else ""
-                ri    = self._row_index[row_key]
-                y     = self._row_y_list[ri]
-                rh    = self._row_heights[ri]
+                label = _dim_label(self.y_dims[d], prefix[d])
+                p.setPen(QPen(fg_bold if not is_last else fg_normal))
+                align = (Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap
+                         if not is_last
+                         else Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                p.drawText(QRect(x_col + 5, y_top + 4, cw - 8, grp_h - 8), align, label)
 
-                p.fillRect(SKU_COL_W, y, PROC_COL_W, rh, bg)
-                p.setFont(f8)
-                p.setPen(QPen(QColor(48, 52, 72)))
-                p.drawText(QRect(SKU_COL_W + 6, y + 4, PROC_COL_W - 8, rh - 8),
-                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                           f"{seq}. {proc}")
+                # Top border for this group
+                pen_style = sep_group if not is_last else sep_inner
+                p.setPen(QPen(pen_style, 1))
+                p.drawLine(x_col, y_top, x_col + cw, y_top)
 
-                # Dotted thin row separator within same group
-                if row_key != rows[0]:
-                    p.setPen(QPen(sep_row, 1, Qt.PenStyle.DotLine))
-                    p.drawLine(SKU_COL_W, y, Y_LABEL_W, y)
+                # Dotted separators within the last depth
+                if is_last:
+                    for ri in row_idxs[1:]:
+                        y = self._row_y_list[ri]
+                        p.setPen(QPen(sep_inner, 1, Qt.PenStyle.DotLine))
+                        p.drawLine(x_col, y, x_col + cw, y)
 
-            # 1px solid group separator
-            p.setPen(QPen(sep_group, 1))
-            p.drawLine(0, y_top, Y_LABEL_W, y_top)
-
-        # Bottom border
+        # Bottom border across full width
         y_end = self._body_top() + self._total_body_h
         p.setPen(QPen(sep_group, 1))
-        p.drawLine(0, y_end, Y_LABEL_W, y_end)
+        p.drawLine(0, y_end, yw, y_end)
 
-        # Vertical column divider
+        # Vertical column dividers
         p.setPen(QPen(QColor(195, 198, 215), 1))
-        p.drawLine(SKU_COL_W, self._body_top(), SKU_COL_W, y_end)
+        for d in range(1, ndims):
+            x = d * cw
+            p.drawLine(x, self._body_top(), x, y_end)
+        p.drawLine(yw - 1, self._body_top(), yw - 1, y_end)
 
     def _draw_due_lines(self, p: QPainter):
         """
@@ -854,7 +878,7 @@ class GanttCanvas(QWidget):
             if not rows:
                 continue
 
-            x = Y_LABEL_W + col * self._col_w() + self._col_w() // 2
+            x = self._y_label_w + col * self._col_w() + self._col_w() // 2
 
             for ri in rows:
                 y_top = self._row_y_list[ri]
@@ -873,7 +897,7 @@ class GanttCanvas(QWidget):
         col = self._date_to_col(date.today().strftime("%Y-%m-%d"))
         if col is None:
             return
-        x = Y_LABEL_W + col * self._col_w()
+        x = self._y_label_w + col * self._col_w()
         p.setPen(QPen(TODAY_LINE, 3))
         # Today line also starts at body_top
         p.drawLine(x, self._body_top(), x, self._total_h())
@@ -1009,12 +1033,13 @@ class GanttCanvas(QWidget):
             if is_mat:
                 lines = [plan["entity_code"], qty_line]
             else:
-                if self.y_mode == self.Y_MODE_SKU:
-                    lines = [f"SO:{plan['so_number']}"]
-                elif self.y_mode == self.Y_MODE_ROOM:
-                    lines = [plan["sku_code"], f"SO:{plan['so_number']}"]
-                else:  # Y_MODE_SO
-                    lines = []
+                # Show contextually-useful fields based on what's already on Y-axis
+                shown = set(self.y_dims)
+                lines = []
+                if "SKU" not in shown:
+                    lines.append(plan["sku_code"])
+                if "SO" not in shown:
+                    lines.append(f"SO:{plan['so_number']}")
                 if due_line:
                     lines.append(due_line)
                 lines.append(qty_line)
@@ -1106,12 +1131,15 @@ class GanttCanvas(QWidget):
                     rect = self._cell_map.get(plan["plan_id"])
                     if rect:
                         self._drag_rect = QRect(pos - self._drag_offset, rect.size())
-                        if self.y_mode == self.Y_MODE_ROOM:
+                        if "Room" in self.y_dims:
                             row = self._row_at_y(pos.y())
                             if 0 <= row < len(self._rows):
-                                target_room = self._rows[row]
+                                rk = self._rows[row]
+                                room_idx = self.y_dims.index("Room")
+                                parts = rk.split("|")
+                                target_room = parts[room_idx] if room_idx < len(parts) else ""
                                 proc = plan.get("process_name") or ""
-                                self._drag_invalid = (target_room, proc) not in self._room_proc_set
+                                self._drag_invalid = bool(target_room) and (target_room, proc) not in self._room_proc_set
                             else:
                                 self._drag_invalid = False
                         else:
@@ -1170,10 +1198,14 @@ class GanttCanvas(QWidget):
                                      if p["plan_id"] == self._drag_plan_id), None)
                         if plan and not plan["is_locked"]:
                             new_room = plan["room_code"]
-                            if self.y_mode == self.Y_MODE_ROOM:
+                            if "Room" in self.y_dims:
                                 row = self._row_at_y(center.y())
                                 if 0 <= row < len(self._rows):
-                                    new_room = self._rows[row]
+                                    rk = self._rows[row]
+                                    room_idx = self.y_dims.index("Room")
+                                    parts = rk.split("|")
+                                    if room_idx < len(parts):
+                                        new_room = parts[room_idx]
                             date_changed = (new_date.strftime("%Y-%m-%d") != plan["plan_date"]
                                             or new_shift != plan["shift_no"])
                             room_changed = (new_room != plan["room_code"])
@@ -1278,16 +1310,20 @@ class GanttCanvas(QWidget):
             menu.addAction("📝 Edit Memo",  lambda: self._edit_memo(plan))
             menu.addAction("🗑 Delete Plan", lambda: self._delete_plan(pid))
         else:
-            col = (pos.x() - Y_LABEL_W) // self._col_w()
+            col = (pos.x() - self._y_label_w) // self._col_w()
             row = self._row_at_y(pos.y())
-            if (self.y_mode == self.Y_MODE_ROOM
+            if ("Room" in self.y_dims
                     and 0 <= col < self._col_count()
                     and 0 <= row < len(self._rows)):
                 d, sno = self._col_to_date_shift(col)
-                room   = self._rows[row]
-                menu.addAction("➕ Add Plan",
-                               lambda: self._add_plan(
-                                   d.strftime("%Y-%m-%d"), sno, room))
+                rk = self._rows[row]
+                room_idx = self.y_dims.index("Room")
+                parts = rk.split("|")
+                room = parts[room_idx] if room_idx < len(parts) else ""
+                if room:
+                    menu.addAction("➕ Add Plan",
+                                   lambda: self._add_plan(
+                                       d.strftime("%Y-%m-%d"), sno, room))
                 menu.addSeparator()
             menu.addAction("🚫 Add Hard Block",
                            lambda: self._add_hard_block(col, row))
@@ -1363,8 +1399,13 @@ class GanttCanvas(QWidget):
     def _add_hard_block(self, col, row):
         if 0 <= col < self._col_count() and 0 <= row < len(self._rows):
             d, sno = self._col_to_date_shift(col)
-            if self.y_mode == self.Y_MODE_ROOM:
-                room = self._rows[row]
+            if "Room" in self.y_dims:
+                rk = self._rows[row]
+                room_idx = self.y_dims.index("Room")
+                parts = rk.split("|")
+                room = parts[room_idx] if room_idx < len(parts) else ""
+                if not room:
+                    return
                 CalendarRepo.set_slot(
                     d.strftime("%Y-%m-%d"), sno, room, is_open=1, is_hold=1)
                 if self.parent_tab: self.parent_tab.refresh()
@@ -1470,10 +1511,16 @@ class GanttTab(QWidget):
 
         bar = QHBoxLayout()
         bar.addWidget(QLabel("Y-axis:"))
-        self.y_combo = QComboBox()
-        self.y_combo.addItems(["Production Room", "SO / SKU / Line", "SKU"])
-        self.y_combo.currentIndexChanged.connect(self._on_y_changed)
-        bar.addWidget(self.y_combo)
+        self._dim_combos: List[QComboBox] = []
+        defaults = ["Room", "Process", "—", "—"]
+        for i, default_dim in enumerate(defaults):
+            cb = QComboBox()
+            cb.addItems(Y_DIM_OPTIONS)
+            cb.setCurrentText(default_dim)
+            cb.currentTextChanged.connect(self._on_dim_changed)
+            cb.setToolTip(f"Y-axis depth {i+1}")
+            bar.addWidget(cb)
+            self._dim_combos.append(cb)
 
         self.shift_toggle = QPushButton("Expand Shifts")
         self.shift_toggle.setCheckable(True)
@@ -1909,9 +1956,11 @@ class GanttTab(QWidget):
         else:
             QMessageBox.warning(self, "Export Failed", msg)
 
-    def _on_y_changed(self, idx: int):
-        modes = [GanttCanvas.Y_MODE_ROOM, GanttCanvas.Y_MODE_SO, GanttCanvas.Y_MODE_SKU]
-        self.canvas.y_mode = modes[idx]
+    def _on_dim_changed(self):
+        dims = [cb.currentText() for cb in self._dim_combos if cb.currentText() != "—"]
+        if not dims:
+            dims = ["Room"]
+        self.canvas.y_dims = dims
         self.refresh()
 
     def _on_shift_toggle(self, checked: bool):
