@@ -19,12 +19,12 @@ New Window:
 """
 import sys
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QTabWidget, QWidget,
-    QVBoxLayout, QStatusBar, QToolBar, QLabel, QMessageBox,
-    QTabBar, QMenu
+    QApplication, QMainWindow, QTabWidget, QStackedWidget, QWidget,
+    QVBoxLayout, QHBoxLayout, QStatusBar, QToolBar, QLabel,
+    QMessageBox, QTabBar, QMenu, QPushButton, QScrollArea, QFrame
 )
 from PyQt6.QtCore import Qt, QTimer, QPoint, QFileSystemWatcher
-from PyQt6.QtGui import QAction, QFont, QKeySequence, QShortcut
+from PyQt6.QtGui import QAction, QFont, QKeySequence, QShortcut, QColor
 
 from data.database import init_db
 from data.crp_excel import crp_manager
@@ -39,7 +39,149 @@ from ui.dashboard_tab import DashboardTab
 from ui.remaining_tabs import InventoryTab, ReleaseReportTab
 
 
-# ─── Detached full window ────────────────────────────────────────────────────
+# ─── Left navigation sidebar ─────────────────────────────────────────────────
+
+_RAIL_CSS = """
+QWidget#rail { background: #16213d; }
+QPushButton#rail-item {
+    background: transparent; color: #aab4d6;
+    border: none; border-left: 3px solid transparent;
+    text-align: left; padding: 8px 18px 8px 15px;
+    font-size: 12.5px; font-family: "Segoe UI";
+}
+QPushButton#rail-item:hover { background: rgba(255,255,255,15); color: #d0d8f0; }
+QPushButton#rail-item:checked {
+    background: #22305a; color: #ffffff;
+    border-left-color: #4f8df0; font-weight: 600;
+}
+QLabel#rail-group {
+    color: #6b7aa3; font-size: 10px; font-weight: bold;
+    background: transparent; padding: 10px 18px 3px 18px;
+    font-family: "Segoe UI"; letter-spacing: 0.08em;
+}
+"""
+
+class NavSidebar(QWidget):
+    tabRequested = QTimer  # placeholder; real signal below
+
+    from PyQt6.QtCore import pyqtSignal as _sig
+    tabRequested = _sig(int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("rail")
+        self.setFixedWidth(210)
+        self.setStyleSheet(_RAIL_CSS)
+        self._buttons: list = []
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # Brand strip
+        brand = QLabel("  📅  Production Planner")
+        brand.setFixedHeight(52)
+        brand.setStyleSheet(
+            "background:#16213d; color:#ffffff; font-size:13.5px; font-weight:700;"
+            "padding-left:16px; border-bottom:1px solid rgba(255,255,255,0.08);"
+        )
+        outer.addWidget(brand)
+
+        self._item_layout = QVBoxLayout()
+        self._item_layout.setContentsMargins(0, 6, 0, 6)
+        self._item_layout.setSpacing(0)
+        outer.addLayout(self._item_layout)
+        outer.addStretch()
+
+    def add_group(self, label: str):
+        lbl = QLabel(label.upper())
+        lbl.setObjectName("rail-group")
+        self._item_layout.addWidget(lbl)
+
+    def add_item(self, icon: str, label: str, tab_idx: int) -> QPushButton:
+        btn = QPushButton(f"  {icon}  {label}")
+        btn.setObjectName("rail-item")
+        btn.setFixedHeight(38)
+        btn.setCheckable(True)
+        btn.setProperty("tab_idx", tab_idx)
+        btn.clicked.connect(lambda _=False, i=tab_idx: self._clicked(i))
+        self._buttons.append(btn)
+        self._item_layout.addWidget(btn)
+        return btn
+
+    def _clicked(self, idx: int):
+        self.set_current(idx)
+        self.tabRequested.emit(idx)
+
+    def set_current(self, idx: int):
+        for btn in self._buttons:
+            btn.setChecked(btn.property("tab_idx") == idx)
+
+    def update_badge(self, tab_idx: int, text: str):
+        """Update the button text for a given tab (e.g., add conflict count)."""
+        for btn in self._buttons:
+            if btn.property("tab_idx") == tab_idx:
+                base = btn.text().split("  (")[0]
+                btn.setText(f"{base}  ({text})" if text else base)
+                break
+
+
+class _TabbedStack:
+    """QTabWidget-compatible proxy backed by QStackedWidget."""
+
+    def __init__(self, stack: QStackedWidget):
+        self._stack   = stack
+        self._widgets: list = []
+        self._titles:  list = []
+        self.currentChanged = stack.currentChanged   # expose signal directly
+
+    def addTab(self, widget: QWidget, title: str):
+        self._widgets.append(widget)
+        self._titles.append(title)
+        self._stack.addWidget(widget)
+
+    def insertTab(self, idx: int, widget: QWidget, title: str):
+        self._widgets.insert(idx, widget)
+        self._titles.insert(idx, title)
+        self._stack.insertWidget(idx, widget)
+
+    def removeTab(self, idx: int):
+        if 0 <= idx < len(self._widgets):
+            self._stack.removeWidget(self._widgets[idx])
+            del self._widgets[idx]
+            del self._titles[idx]
+
+    def currentWidget(self) -> QWidget:
+        return self._stack.currentWidget()
+
+    def widget(self, idx: int) -> QWidget:
+        return self._widgets[idx] if 0 <= idx < len(self._widgets) else None
+
+    def currentIndex(self) -> int:
+        return self._stack.currentIndex()
+
+    def setCurrentWidget(self, w: QWidget):
+        self._stack.setCurrentWidget(w)
+
+    def setCurrentIndex(self, idx: int):
+        self._stack.setCurrentIndex(idx)
+
+    def count(self) -> int:
+        return len(self._widgets)
+
+    def indexOf(self, w: QWidget) -> int:
+        try:
+            return self._widgets.index(w)
+        except ValueError:
+            return -1
+
+    # no-ops for backward compatibility
+    def setDocumentMode(self, _): pass
+    def setTabBar(self, _):       pass
+    def setTabText(self, idx: int, text: str): pass
+
+
+# ─── Detached full window ─────────────────────────────────────────────────────
 
 class DetachedWindow(QMainWindow):
     """
@@ -162,7 +304,7 @@ class DetachedWindow(QMainWindow):
 
     def _check_conflicts(self):
         self._check_conflicts_silent()
-        self.tabs.setCurrentWidget(self.alerts_tab)
+        self._on_sidebar_nav(5)
         self.alerts_tab.refresh()
 
     def _check_conflicts_silent(self):
@@ -226,7 +368,6 @@ class MainWindow(QMainWindow):
         self._detached_windows: set = set()
         self._init_db()
         self._build_ui()
-        self._build_toolbar()
         self._build_statusbar()
         self._start_conflict_timer()
         self._setup_shortcuts()
@@ -239,13 +380,10 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "DB Error", str(e))
 
     def _build_ui(self):
-        self.tabs = QTabWidget()
-        self.tabs.setDocumentMode(True)
+        # App-wide background
+        self.setStyleSheet("QMainWindow { background: #eef0f3; }")
 
-        # Replace default tab bar with right-click-aware one
-        custom_bar = RightClickTabBar(self, self.tabs)
-        self.tabs.setTabBar(custom_bar)
-
+        # ── Tab widgets ───────────────────────────────────────────────────────
         self.gantt_tab       = GanttTab(self)
         self.so_tab          = SOTab(self)
         self.master_tab      = MasterTab(self)
@@ -256,22 +394,53 @@ class MainWindow(QMainWindow):
         self.inventory_tab   = InventoryTab(self)
         self.release_tab     = ReleaseReportTab(self)
 
+        # ── Stack widget (content area) ───────────────────────────────────────
+        self._stack = QStackedWidget()
+        self.tabs = _TabbedStack(self._stack)   # backward-compat proxy
+
         self._tab_defs = [
-            (self.gantt_tab,     "📅  Gantt Planner"),
-            (self.so_tab,        "📋  Sales Orders"),
-            (self.master_tab,    "🗂  Masters"),
-            (self.crp_tab,       "👥  CRP"),
-            (self.actuals_tab,   "✅  Actuals"),
-            (self.alerts_tab,    "⚠️  Alerts"),
-            (self.dashboard_tab, "📊  Dashboard"),
-            (self.inventory_tab, "📦  Inventory"),
-            (self.release_tab,   "🚀  Release Report"),
+            (self.gantt_tab,     "📅  Gantt Planner",  0),
+            (self.so_tab,        "📋  Sales Orders",   1),
+            (self.master_tab,    "🗂  Masters",         2),
+            (self.crp_tab,       "👥  CRP",             3),
+            (self.actuals_tab,   "✅  Actuals",         4),
+            (self.alerts_tab,    "⚠️  Alerts",          5),
+            (self.dashboard_tab, "📊  Dashboard",       6),
+            (self.inventory_tab, "📦  Inventory",       7),
+            (self.release_tab,   "🚀  Release Report",  8),
         ]
-        for widget, title in self._tab_defs:
+        for widget, title, _ in self._tab_defs:
             self.tabs.addTab(widget, title)
 
-        self.tabs.currentChanged.connect(self._on_tab_changed)
-        self.setCentralWidget(self.tabs)
+        # ── Sidebar ───────────────────────────────────────────────────────────
+        self._sidebar = NavSidebar(self)
+        self._sidebar.add_group("Plan")
+        self._sidebar.add_item("📅", "Gantt Planner",  0)
+        self._sidebar.add_item("📋", "Sales Orders",   1)
+        self._sidebar.add_item("🚀", "Release Report", 8)
+        self._sidebar.add_group("Capacity")
+        self._sidebar.add_item("👥", "CRP",            3)
+        self._sidebar.add_item("📦", "Inventory",      7)
+        self._sidebar.add_group("Track")
+        self._sidebar.add_item("✅", "Actuals",        4)
+        self._sidebar.add_item("⚠️", "Alerts",         5)
+        self._sidebar.add_item("📊", "Dashboard",      6)
+        self._sidebar.add_group("Setup")
+        self._sidebar.add_item("🗂", "Masters",        2)
+
+        self._sidebar.set_current(0)
+        self._sidebar.tabRequested.connect(self._on_sidebar_nav)
+
+        # ── Layout: sidebar + stack ───────────────────────────────────────────
+        body = QWidget()
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+        body_layout.addWidget(self._sidebar)
+        body_layout.addWidget(self._stack, stretch=1)
+        self.setCentralWidget(body)
+
+        self._stack.currentChanged.connect(self._on_tab_changed)
 
     def _build_toolbar(self):
         tb = QToolBar("Main Toolbar")
@@ -318,13 +487,21 @@ class MainWindow(QMainWindow):
 
     def _build_statusbar(self):
         self.status = QStatusBar()
+        self.status.setFixedHeight(22)
+        self.status.setStyleSheet(
+            "QStatusBar { background:#f0f2f7; border-top:1px solid #e2e4ea;"
+            " font-size:10.5px; color:#6b7280; }"
+            "QStatusBar::item { border:none; }"
+        )
         self.setStatusBar(self.status)
         self.conflict_label = QLabel("  ✅ No conflicts")
-        self.conflict_label.setStyleSheet("color: green;")
+        self.conflict_label.setStyleSheet(
+            "color:#1d8a4a; font-size:10.5px; font-weight:600;")
         self.status.addPermanentWidget(self.conflict_label)
 
         # Detached windows count indicator
         self.detached_label = QLabel()
+        self.detached_label.setStyleSheet("font-size:10.5px;")
         self.status.addPermanentWidget(self.detached_label)
 
     def _setup_shortcuts(self):
@@ -337,6 +514,10 @@ class MainWindow(QMainWindow):
         self._conflict_timer.start(30_000)
 
     # ── New window / detach ──────────────────────────────────────────────────
+
+    def _on_sidebar_nav(self, idx: int):
+        self._stack.setCurrentIndex(idx)
+        self._sidebar.set_current(idx)
 
     def _detach_current_tab(self):
         self._open_new_window(self.tabs.currentIndex())
@@ -362,6 +543,7 @@ class MainWindow(QMainWindow):
     # ── Tab / refresh ────────────────────────────────────────────────────────
 
     def _on_tab_changed(self, idx: int):
+        self._sidebar.set_current(idx)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         self.status.showMessage("Loading…")
         QApplication.processEvents()
@@ -416,13 +598,7 @@ class MainWindow(QMainWindow):
 
     def _check_conflicts(self):
         self._check_conflicts_silent()
-        # alerts_tab may be detached — try to find it
-        for i in range(self.tabs.count()):
-            if self.tabs.widget(i) is self.alerts_tab:
-                self.tabs.setCurrentIndex(i)
-                self.alerts_tab.refresh()
-                return
-        # If detached, just refresh it in its window
+        self._on_sidebar_nav(5)
         self.alerts_tab.refresh()
 
     def _check_conflicts_silent(self):
@@ -438,17 +614,13 @@ class MainWindow(QMainWindow):
                 self.conflict_label.setText(
                     f"  ⚠  {n} conflict{'s' if n>1 else ''}")
                 self.conflict_label.setStyleSheet(
-                    "color: red; font-weight: bold;")
-                # Update alerts tab text if still docked
-                for i in range(self.tabs.count()):
-                    if self.tabs.widget(i) is self.alerts_tab:
-                        self.tabs.setTabText(i, f"⚠️  Alerts ({n})")
+                    "color:#c2342f; font-weight:600; font-size:10.5px;")
+                self._sidebar.update_badge(5, str(n))
             else:
                 self.conflict_label.setText("  ✅ No conflicts")
-                self.conflict_label.setStyleSheet("color: green;")
-                for i in range(self.tabs.count()):
-                    if self.tabs.widget(i) is self.alerts_tab:
-                        self.tabs.setTabText(i, "⚠️  Alerts")
+                self.conflict_label.setStyleSheet(
+                    "color:#1d8a4a; font-weight:600; font-size:10.5px;")
+                self._sidebar.update_badge(5, "")
         except Exception:
             pass
 

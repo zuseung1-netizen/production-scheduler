@@ -19,11 +19,12 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QComboBox, QToolTip, QInputDialog,
     QMessageBox, QMenu, QDialog, QDialogButtonBox, QTextEdit,
     QApplication, QDateEdit, QFormLayout, QSpinBox,
-    QTableWidget, QTableWidgetItem, QHeaderView, QFrame
+    QTableWidget, QTableWidgetItem, QHeaderView, QFrame,
+    QLineEdit, QButtonGroup
 )
-from PyQt6.QtCore import Qt, QRect, QPoint, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, pyqtSignal, QTimer
 from PyQt6.QtGui import (
-    QPainter, QColor, QFont, QFontMetrics, QPen, QBrush, QCursor
+    QPainter, QPainterPath, QColor, QFont, QFontMetrics, QPen, QBrush, QCursor
 )
 
 from data.repositories import (
@@ -40,38 +41,43 @@ PALETTE = [
     "#6655CC", "#D49010", "#1A9E9E", "#8B5E3C",
     "#3A8FAA", "#8B479B", "#1E7A3C", "#CF4545",
 ]
-LOCKED_OVERLAY  = QColor(0,   0,   0,   55)
-LATE_FILL       = QColor(192, 40,  40,  235)
 CONSOL_BORDER   = QColor(255, 205, 0)
 CONFLICT_DOT    = QColor(210, 30,  30)
-CHECK_FILL      = QColor(255, 255, 255, 90)
-GRID_LINE       = QColor(218, 220, 230)   # light, clean
-GRID_WEEKEND    = QColor(245, 240, 240)   # weekend column tint
+GRID_LINE       = QColor(218, 220, 230)
+GRID_WEEKEND    = QColor(245, 240, 240)
 DUE_LINE        = QColor(205, 50,  50)
 TODAY_LINE      = QColor(24,  128, 255)
-HEADER_BG       = QColor(38,  68,  128)   # deep navy
+HEADER_BG       = QColor(38,  68,  128)
 HEADER_FG       = QColor(255, 255, 255)
 HEADER_WEEKEND  = QColor(65,  40,  50)
 UTIL_HIGH       = QColor(190, 40,  40)
 UTIL_MED        = QColor(225, 140, 0)
 UTIL_LOW        = QColor(55,  165, 85)
-UTIL_HC_HIGH    = QColor(170, 35,  35)
-UTIL_HC_MED     = QColor(205, 120, 0)
-UTIL_HC_LOW     = QColor(40,  148, 70)
-FINAL_BADGE_BG  = QColor(240, 125, 0)
-MAT_FILL        = QColor(108, 68,  168, 225)
-CARD_STRIP_BG   = QColor(255, 255, 255, 178)   # top strip backing — white, 30% transparent
+MAT_ACCENT      = QColor(108, 68,  168)   # material plan accent
+LATE_ACCENT     = QColor(192, 40,  40)    # late plan accent
 
-ROW_BG_A        = QColor(255, 255, 255)      # alternating row — even
-ROW_BG_B        = QColor(246, 248, 254)      # alternating row — odd
+ROW_BG_A        = QColor(255, 255, 255)
+ROW_BG_B        = QColor(246, 248, 254)
 
-CARD_H     = 84   # fixed height per plan card; rows grow vertically when multi-plan
+# ── New card design (white card + coloured left strip) ────────────────────────
+CARD_BG         = QColor(255, 255, 255)
+CARD_BORDER_CLR = QColor(225, 228, 236)
+CARD_TEXT_L1    = QColor(22,  33,  61)
+CARD_TEXT_L2    = QColor(58,  66,  85)
+CARD_TEXT_L3    = QColor(139, 147, 168)
+DUE_TAG_BG      = QColor(254, 243, 224)
+DUE_TAG_FG      = QColor(185, 118, 10)
+DUE_TAG_LATE_BG = QColor(251, 231, 231)
+DUE_TAG_LATE_FG = QColor(194, 52,  47)
+CHECK_FILL      = QColor(63,  124, 196, 30)
+
+CARD_H     = 68   # card slot height (was 84)
 DAY_W      = 84
-SHIFT_W    = DAY_W   # shift-view cells stay the same width as day-view cards
+SHIFT_W    = DAY_W
 HEADER_H   = 52
 UTIL_ROW_H = 18
-UTIL_H     = UTIL_ROW_H * 2
-DIM_COL_W  = 110   # width of each Y-axis depth column
+UTIL_H     = UTIL_ROW_H   # single cap-row (was × 2)
+DIM_COL_W  = 110
 SKU_COL_W  = 72
 Y_LABEL_W  = DIM_COL_W  # kept for any external references; canvas uses _y_label_w property
 
@@ -102,16 +108,14 @@ def _dim_label(dim: str, key_val: str) -> str:
     if dim == "Seq":
         return str(int(key_val)) if key_val.isdigit() else key_val
     return key_val
-CHECKBOX_S  = 11
-CARD_RADIUS = 6   # card corner radius
-PILL_RADIUS = 3   # top pill radius = CARD_RADIUS - PILL_MARGIN, so corners are concentric
-PILL_MARGIN = 3   # inset of the top pill from the card's own edges
-PILL_H      = 18  # top pill height — checkbox / conflict dot / FINAL all live inside it
-PILL_GAP    = 2   # gap between pill bottom and text zone start
-TEXT_PAD_L  = 6   # text left padding (no longer needs to clear the checkbox horizontally)
-# Card internal zones (sum must leave enough text space)
-CARD_TOP_H = PILL_MARGIN + PILL_H + PILL_GAP   # reserved top space before text starts
-CARD_BOT_H = 12   # bottom strip: lock icon
+CHECKBOX_S  = 9    # checkbox visual size
+CARD_RADIUS = 5
+PILL_MARGIN = 3    # top padding before pill row
+PILL_H      = 14   # pill row height (checkbox / conflict / badges)
+PILL_GAP    = 2    # gap after pill row before text
+TEXT_PAD_L  = 8    # left text offset (4px border + 4px gap)
+CARD_TOP_H  = PILL_MARGIN + PILL_H + PILL_GAP  # = 19px, y-offset where l1 starts
+CARD_BOT_H  = 0
 
 
 def _color_for_key(key: str) -> QColor:
@@ -362,6 +366,7 @@ class GanttCanvas(QWidget):
         self._shifts   : List[Dict] = []
         self._rows     : List[str]  = []
         self._conflicts: List[Dict] = []
+        self._search_filter: str    = ""
 
         self._checked  : Set[int] = set()
         self._drag_plan_id  : Optional[int]    = None
@@ -425,6 +430,10 @@ class GanttCanvas(QWidget):
         self._build_hc_map()
         self._build_closed_map()
         self._update_size()
+        self.update()
+
+    def set_search_filter(self, text: str):
+        self._search_filter = text
         self.update()
 
     def _plan_row_key(self, plan: Dict) -> str:
@@ -619,9 +628,9 @@ class GanttCanvas(QWidget):
         return QRect(x, y, w, CARD_H - 4)
 
     def _checkbox_rect(self, plan_rect: QRect) -> QRect:
-        pill_x = plan_rect.x() + PILL_MARGIN
         pill_y = plan_rect.y() + PILL_MARGIN
-        return QRect(pill_x + 4, pill_y + (PILL_H - CHECKBOX_S) // 2,
+        return QRect(plan_rect.x() + 8,
+                     pill_y + (PILL_H - CHECKBOX_S) // 2,
                      CHECKBOX_S, CHECKBOX_S)
 
     # ── Painting ──────────────────────────────────────────────────────────────
@@ -703,12 +712,14 @@ class GanttCanvas(QWidget):
         p.fillRect(0, 0, self._y_label_w, HEADER_H, QColor(50, 82, 148))
 
     def _draw_util_bars(self, p: QPainter):
-        """Draw two util rows: row1=capacity%, row2=headcount%."""
-        f7 = QFont("Arial", 7)
-        p.setFont(f7)
-
-        # ── Row 1: Capacity utilisation ──
+        """Draw single capacity-utilisation row below the date header."""
         y0 = HEADER_H
+        yw = self._y_label_w
+
+        # Background strip
+        p.fillRect(yw, y0, self._col_count() * self._col_w(), UTIL_ROW_H,
+                   QColor(30, 58, 110))
+
         col_cap: Dict[int, Tuple[float, float]] = {}
         for (ds, room, proc, sno), (used, cap) in self._cap_map.items():
             col = self._date_to_col(ds, sno)
@@ -717,56 +728,20 @@ class GanttCanvas(QWidget):
             cu, cc = col_cap.get(col, (0.0, 0.0))
             col_cap[col] = (cu + used, cc + cap)
 
-        yw = self._y_label_w
+        f7 = QFont("Segoe UI", 7)
+        p.setFont(f7)
         for col, (used, cap) in col_cap.items():
             ratio = (used / cap) if cap > 0 else 0
             x     = yw + col * self._col_w()
             color = UTIL_HIGH if ratio > 0.9 else UTIL_MED if ratio > 0.6 else UTIL_LOW
             fill  = min(ratio, 1.0)
-            p.fillRect(x+1, y0, int((self._col_w()-2)*fill), UTIL_ROW_H-1, color)
-            p.setPen(QPen(GRID_LINE))
-            p.drawRect(x+1, y0, self._col_w()-2, UTIL_ROW_H-1)
-            if ratio > 0.05:
-                label = f"{int(ratio*100)}%" if ratio <= 1.5 else ">150%"
-                text_color = Qt.GlobalColor.white if fill >= 0.5 else QColor(30, 30, 60)
-                p.setPen(QPen(text_color))
+            bar_h = UTIL_ROW_H - 2
+            p.fillRect(x + 1, y0 + 1, int((self._col_w() - 2) * fill), bar_h, color)
+            if ratio > 0.9:
+                label = f"{int(ratio*100)}%"
+                p.setPen(QPen(Qt.GlobalColor.white))
                 p.drawText(QRect(x+1, y0, self._col_w()-2, UTIL_ROW_H),
                            Qt.AlignmentFlag.AlignCenter, label)
-
-        # ── Row 2: Headcount utilisation (alloc / CRP total) ──
-        y1 = HEADER_H + UTIL_ROW_H
-        col_hc: Dict[int, Tuple[int, int]] = {}
-        for (ds, sno), (alloc, total) in self._hc_map.items():
-            col = self._date_to_col(ds, sno)
-            if col is None:
-                continue
-            ca, ct = col_hc.get(col, (0, 0))
-            col_hc[col] = (ca + alloc, ct + total)
-
-        for col, (alloc, total) in col_hc.items():
-            ratio = (alloc / total) if total > 0 else 0
-            x     = yw + col * self._col_w()
-            color = UTIL_HC_HIGH if ratio > 0.9 else UTIL_HC_MED if ratio > 0.6 else UTIL_HC_LOW
-            fill  = min(ratio, 1.0)
-            p.fillRect(x+1, y1, int((self._col_w()-2)*fill), UTIL_ROW_H-1, color)
-            p.setPen(QPen(GRID_LINE))
-            p.drawRect(x+1, y1, self._col_w()-2, UTIL_ROW_H-1)
-            if ratio > 0.05:
-                label = f"{int(ratio*100)}%" if ratio <= 1.5 else ">150%"
-                text_color = Qt.GlobalColor.white if fill >= 0.5 else QColor(30, 30, 60)
-                p.setPen(QPen(text_color))
-                p.drawText(QRect(x+1, y1, self._col_w()-2, UTIL_ROW_H),
-                           Qt.AlignmentFlag.AlignCenter, label)
-
-        # Row labels on Y-label side
-        p.setPen(QPen(QColor(80, 80, 80)))
-        p.setFont(QFont("Arial", 6))
-        p.drawText(QRect(0, y0, yw - 2, UTIL_ROW_H),
-                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                   "Cap% ")
-        p.drawText(QRect(0, y1, yw - 2, UTIL_ROW_H),
-                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                   "HC% ")
 
     def _draw_y_labels(self, p: QPainter):
         """Draw Y-axis labels with N-depth spanning columns."""
@@ -909,170 +884,184 @@ class GanttCanvas(QWidget):
             (c["plan_date"], c["room_code"], c["process_name"], c["shift_no"])
             for c in self._conflicts
         }
-        fm  = QFont("Arial", 8)
-        fsm = QFont("Arial", 7)
         consol_groups: Dict[str, List[QRect]] = {}
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        f_l1 = QFont("Segoe UI", 9, QFont.Weight.Bold)
+        f_l2 = QFont("Segoe UI", 8)
+        f_l2.setWeight(QFont.Weight.Medium)
+        f_l3 = QFont("Segoe UI", 7)
+        f_tag = QFont("Segoe UI", 7, QFont.Weight.Bold)
+        f_lock = QFont("Segoe UI", 7)
 
         for plan in self._plans:
             rect = self._plan_rect(plan)
             if not rect:
                 continue
-            self._cell_map[plan["plan_id"]]       = rect
+            self._cell_map[plan["plan_id"]] = rect
             cb_vis = self._checkbox_rect(rect)
-            self._check_rects[plan["plan_id"]]    = cb_vis
-            # 20×20 hit area centered on visual checkbox — easier to click
+            self._check_rects[plan["plan_id"]] = cb_vis
             cx = cb_vis.x() + cb_vis.width() // 2
             cy = cb_vis.y() + cb_vis.height() // 2
             self._check_hit_rects[plan["plan_id"]] = QRect(cx - 10, cy - 10, 20, 20)
 
-            is_mat  = plan.get("entity_type") == "MATERIAL"
-            is_final = bool(plan.get("is_final_seq"))
-            so = self._sos.get((plan["so_number"], plan["sku_code"],
-                                plan["line_item"]))
+            # Search filter: dim non-matching plans
+            if self._search_filter:
+                haystack = " ".join(filter(None, [
+                    plan.get("so_number", ""), plan.get("sku_code", ""),
+                    plan.get("entity_code", ""), plan.get("room_code", ""),
+                    plan.get("process_name", ""),
+                    (self._sos.get((plan["so_number"], plan["sku_code"],
+                                    plan["line_item"])) or {}).get("customer_name", ""),
+                ])).lower()
+                if self._search_filter not in haystack:
+                    p.setOpacity(0.15)
+                else:
+                    p.setOpacity(1.0)
+            else:
+                p.setOpacity(1.0)
+
+            is_mat = plan.get("entity_type") == "MATERIAL"
+            so = self._sos.get((plan["so_number"], plan["sku_code"], plan["line_item"]))
             is_late = (so and
                        datetime.strptime(so["due_date"], "%Y-%m-%d").date() < date.today()
                        and plan.get("qty_produced", 0) < plan["qty_planned"])
-            base_color = (MAT_FILL if is_mat
-                          else LATE_FILL if is_late
-                          else _color_for_key(plan["sku_code"]))
+            accent = (MAT_ACCENT if is_mat
+                      else LATE_ACCENT if is_late
+                      else _color_for_key(plan["sku_code"]))
 
-            # ── Card fill — rounded rect ──────────────────────────────────
-            p.setBrush(QBrush(base_color))
+            # ── White card background ─────────────────────────────────────────
+            card_path = QPainterPath()
+            card_path.addRoundedRect(QRectF(rect), CARD_RADIUS, CARD_RADIUS)
+            p.setBrush(QBrush(CARD_BG))
             p.setPen(Qt.PenStyle.NoPen)
-            p.drawRoundedRect(rect, CARD_RADIUS, CARD_RADIUS)
+            p.drawPath(card_path)
 
-            if plan["is_locked"]:
-                p.setBrush(QBrush(LOCKED_OVERLAY))
-                p.drawRoundedRect(rect, CARD_RADIUS, CARD_RADIUS)
+            # ── Left accent strip (4 px, clipped to card shape) ──────────────
+            p.setClipPath(card_path)
+            p.setBrush(QBrush(accent))
+            p.drawRect(QRect(rect.x(), rect.y(), 4, rect.height()))
+            p.setClipping(False)
+
+            # ── Checked tint ──────────────────────────────────────────────────
             if plan["plan_id"] in self._checked:
                 p.setBrush(QBrush(CHECK_FILL))
+                p.setPen(Qt.PenStyle.NoPen)
                 p.drawRoundedRect(rect, CARD_RADIUS, CARD_RADIUS)
 
-            # ── TOP PILL: one wide rounded pill (inset, not edge-to-edge) ──
-            # holding the checkbox · conflict dot · FINAL badge. Its radius
-            # (PILL_RADIUS = CARD_RADIUS - PILL_MARGIN) keeps it concentric
-            # with the card's own rounded corners.
-            pill = QRect(rect.x() + PILL_MARGIN, rect.y() + PILL_MARGIN,
-                        rect.width() - PILL_MARGIN * 2, PILL_H)
-            p.setBrush(QBrush(CARD_STRIP_BG))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.drawRoundedRect(pill, PILL_RADIUS, PILL_RADIUS)
+            # ── Card border ───────────────────────────────────────────────────
+            if plan["is_locked"]:
+                p.setPen(QPen(QColor(170, 178, 200), 1.5, Qt.PenStyle.DashLine))
+            else:
+                p.setPen(QPen(CARD_BORDER_CLR, 1))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(rect, CARD_RADIUS, CARD_RADIUS)
 
-            cb = self._check_rects[plan["plan_id"]]
-            # Checkbox — dark-on-white now that the pill behind it is white
-            p.setPen(QPen(QColor(40, 40, 40, 220), 1))
-            p.setBrush(QBrush(QColor(40, 40, 40, 220)
+            # ── PILL ROW (top PILL_H px) ──────────────────────────────────────
+            pill_y = rect.y() + PILL_MARGIN
+            cb = cb_vis
+
+            # Checkbox
+            p.setPen(QPen(QColor(180, 185, 200), 1))
+            p.setBrush(QBrush(QColor(40, 40, 40, 210)
                                if plan["plan_id"] in self._checked
-                               else QColor(0, 0, 0, 18)))
-            p.drawRect(cb)
+                               else Qt.GlobalColor.white))
+            p.drawRoundedRect(cb, 2, 2)
             if plan["plan_id"] in self._checked:
-                p.setPen(QPen(Qt.GlobalColor.white, 2))
-                p.drawLine(cb.x()+2, cb.y()+6, cb.x()+4, cb.y()+9)
-                p.drawLine(cb.x()+4, cb.y()+9, cb.x()+9, cb.y()+3)
+                p.setPen(QPen(Qt.GlobalColor.white, 1.5))
+                p.drawLine(cb.x()+1, cb.y()+4, cb.x()+3, cb.y()+7)
+                p.drawLine(cb.x()+3, cb.y()+7, cb.x()+7, cb.y()+2)
 
-            # Conflict dot — right of checkbox, inside the pill
+            # Conflict dot
             if (plan["plan_date"], plan["room_code"],
                     plan["process_name"], plan["shift_no"]) in conflict_slots:
                 p.setBrush(QBrush(CONFLICT_DOT))
                 p.setPen(Qt.PenStyle.NoPen)
-                dot_y = pill.y() + (PILL_H - 8) // 2
-                p.drawEllipse(cb.right() + 3, dot_y, 8, 8)
+                p.drawEllipse(cb.right() + 3,
+                              pill_y + (PILL_H - 7) // 2, 7, 7)
 
-            # FINAL badge — nested inside the same pill, right side.
-            # Radius 1 keeps it concentric with PILL_RADIUS(3) at its 2px inset.
-            if is_final:
-                bw, bh = 34, PILL_H - 4
-                badge = QRect(pill.right() - bw - 2, pill.y() + 2, bw, bh)
-                p.setBrush(QBrush(FINAL_BADGE_BG))
-                p.setPen(Qt.PenStyle.NoPen)
-                p.drawRoundedRect(badge, 1, 1)
-                p.setPen(QPen(Qt.GlobalColor.white))
-                p.setFont(fsm)
-                p.drawText(badge, Qt.AlignmentFlag.AlignCenter, "FINAL")
+            # Lock icon (pill-row right side)
+            lock_right = rect.right() - 3
+            if plan["is_locked"]:
+                p.setPen(QPen(QColor(160, 168, 190)))
+                p.setFont(f_lock)
+                lk_r = QRect(rect.right() - 13, pill_y + (PILL_H - 10) // 2, 11, 10)
+                p.drawText(lk_r, Qt.AlignmentFlag.AlignCenter, "🔒")
+                lock_right = lk_r.x() - 2
 
-            # CLOSED / HOLD badge — use exact (room, date, shift) lookup so plans
-            # on open shifts are not incorrectly badged in day view.
+            # CLOSED / HOLD badge (right of pill row, before lock)
             _cell_status = self._slot_closed.get(
                 (plan["room_code"], plan["plan_date"], plan["shift_no"]))
             if _cell_status:
-                _badge_label = "⚠HOLD" if _cell_status == "hold" else "⚠CLOSED"
-                _badge_color = QColor(220, 100, 0) if _cell_status == "hold" else QColor(180, 30, 30)
-                bw2, bh2 = 46, PILL_H - 4
-                # Anchor: right of pill, shift left if FINAL badge is also present
-                _right_offset = (34 + 4) if is_final else 2
-                badge2 = QRect(pill.right() - bw2 - _right_offset,
-                               pill.y() + 2, bw2, bh2)
-                p.setBrush(QBrush(_badge_color))
+                _lbl   = "⚠HOLD" if _cell_status == "hold" else "⚠CLOSED"
+                _clr   = QColor(220, 100, 0) if _cell_status == "hold" else QColor(180, 30, 30)
+                _bw    = 44
+                _bh    = PILL_H - 4
+                _br    = QRect(lock_right - _bw, pill_y + 2, _bw, _bh)
+                p.setBrush(QBrush(_clr))
                 p.setPen(Qt.PenStyle.NoPen)
-                p.drawRoundedRect(badge2, 1, 1)
+                p.drawRoundedRect(_br, 2, 2)
                 p.setPen(QPen(Qt.GlobalColor.white))
-                p.setFont(QFont("Arial", 6, QFont.Weight.Bold))
-                p.drawText(badge2, Qt.AlignmentFlag.AlignCenter, _badge_label)
+                p.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
+                p.drawText(_br, Qt.AlignmentFlag.AlignCenter, _lbl)
 
-            # ── TEXT ZONE (CARD_TOP_H → height - CARD_BOT_H) ─────────────
-            # SKU / SO / Due each get their own line (no longer crammed
-            # together); Qty is last, paired with Due since both are short,
-            # fixed-format strings that are never at risk of eliding away.
-            p.setPen(QPen(Qt.GlobalColor.white))
-            p.setFont(fm)
-            # Bottom inset is a small fixed pad, NOT the full CARD_BOT_H —
-            # CARD_BOT_H only reserves room for the lock icon corner accent
-            # (drawn after, on top), it shouldn't also shrink the zone text
-            # centers in, or text ends up looking top-heavy instead of
-            # centered in the space below the pill.
-            text_rect = rect.adjusted(TEXT_PAD_L, CARD_TOP_H, -3, -4)
-
-            # Due gets its own line too — pairing it with Qty on one line
-            # elided away the date itself on narrower cards (same failure
-            # mode Qty hit before), so every field stays on a separate line.
+            # Due-date badge (amber/red pill, show when within 7 days of due)
             due = so["due_date"] if so else None
-            due_line = f"Due {due[5:]}" if due else None
-            qty_line = f"Qty {plan['qty_planned']}"
-            if is_mat:
-                lines = [plan["entity_code"], qty_line]
-            else:
-                # Show contextually-useful fields based on what's already on Y-axis
-                shown = set(self.y_dims)
-                lines = []
-                if "SKU" not in shown:
-                    lines.append(plan["sku_code"])
-                if "SO" not in shown:
-                    lines.append(f"SO:{plan['so_number']}")
-                if due_line:
-                    lines.append(due_line)
-                lines.append(qty_line)
+            if due:
+                due_dt  = datetime.strptime(due, "%Y-%m-%d").date()
+                days_to = (due_dt - date.today()).days
+                if days_to <= 7:
+                    due_str = f"{due_dt.month}.{due_dt.day}"
+                    tag_bg  = DUE_TAG_LATE_BG if days_to < 0 else DUE_TAG_BG
+                    tag_fg  = DUE_TAG_LATE_FG if days_to < 0 else DUE_TAG_FG
+                    fw = QFontMetrics(f_tag).horizontalAdvance(due_str) + 8
+                    fh = 12
+                    tx = lock_right - fw - (2 if not plan["is_locked"] else 0)
+                    ty_tag = pill_y + (PILL_H - fh) // 2
+                    tr = QRect(tx, ty_tag, fw, fh)
+                    p.setBrush(QBrush(tag_bg))
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.drawRoundedRect(tr, 3, 3)
+                    p.setPen(QPen(tag_fg))
+                    p.setFont(f_tag)
+                    p.drawText(tr, Qt.AlignmentFlag.AlignCenter, due_str)
 
-            fmw = QFontMetrics(fm)
-            elided = [fmw.elidedText(ln, Qt.TextElideMode.ElideRight,
-                                     text_rect.width()) for ln in lines]
-            p.drawText(text_rect,
-                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                       "\n".join(elided))
+            # ── TEXT ZONE ─────────────────────────────────────────────────────
+            tx  = rect.x() + TEXT_PAD_L
+            tw  = rect.width() - TEXT_PAD_L - 3
+            ty  = rect.y() + CARD_TOP_H   # = rect.y() + 19
 
-            # ── BOTTOM STRIP (height - CARD_BOT_H → height): lock icon ──
-            # Over-capacity badge removed — the conflict dot in the top
-            # pill already flags this same condition.
-            # Lock icon — bottom-right
-            if plan["is_locked"]:
-                p.setPen(QPen(QColor(255, 255, 255, 200)))
-                p.setFont(fsm)
-                bot = QRect(rect.x() + 2, rect.bottom() - CARD_BOT_H,
-                            rect.width() - 4, CARD_BOT_H)
-                p.drawText(bot,
-                           Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                           "🔒")
+            code = plan["entity_code"] if is_mat else plan["sku_code"]
+            p.setPen(QPen(CARD_TEXT_L1))
+            p.setFont(f_l1)
+            p.drawText(QRect(tx, ty, tw, 13),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                       QFontMetrics(f_l1).elidedText(
+                           code, Qt.TextElideMode.ElideRight, tw))
 
-            # ── Card border — subtle white outline ────────────────────────
-            p.setPen(QPen(QColor(255, 255, 255, 100), 1))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRoundedRect(rect, CARD_RADIUS, CARD_RADIUS)
+            qty_str = str(plan["qty_planned"])
+            p.setPen(QPen(CARD_TEXT_L2))
+            p.setFont(f_l2)
+            p.drawText(QRect(tx, ty + 14, tw, 11),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                       qty_str)
+
+            if not is_mat and plan.get("so_number"):
+                so_str = plan["so_number"]
+                p.setPen(QPen(CARD_TEXT_L3))
+                p.setFont(f_l3)
+                p.drawText(QRect(tx, ty + 25, tw, 10),
+                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                           QFontMetrics(f_l3).elidedText(
+                               so_str, Qt.TextElideMode.ElideRight, tw))
 
             if plan.get("consolidation_group"):
-                consol_groups.setdefault(
-                    plan["consolidation_group"], []).append(rect)
+                consol_groups.setdefault(plan["consolidation_group"], []).append(rect)
 
-        # Consolidated group gold border
+        # Reset opacity before drawing consolidation overlays
+        p.setOpacity(1.0)
+
+        # Consolidation gold border
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         for grp_id, rects in consol_groups.items():
             p.setPen(QPen(CONSOL_BORDER, 2))
@@ -1506,71 +1495,13 @@ class GanttTab(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        bar = QHBoxLayout()
-        bar.addWidget(QLabel("Y-axis:"))
-        self._dim_combos: List[QComboBox] = []
-        defaults = ["Room", "Process", "—", "—"]
-        for i, default_dim in enumerate(defaults):
-            cb = QComboBox()
-            cb.addItems(Y_DIM_OPTIONS)
-            cb.setCurrentText(default_dim)
-            cb.currentTextChanged.connect(self._on_dim_changed)
-            cb.setToolTip(f"Y-axis depth {i+1}")
-            bar.addWidget(cb)
-            self._dim_combos.append(cb)
+        layout.addWidget(self._build_topbar())
+        layout.addWidget(self._build_viewbar())
 
-        self.shift_toggle = QPushButton("Expand Shifts")
-        self.shift_toggle.setCheckable(True)
-        self.shift_toggle.toggled.connect(self._on_shift_toggle)
-        bar.addWidget(self.shift_toggle)
-
-        bar.addWidget(QLabel("Start:"))
-        from PyQt6.QtCore import QDate
-        self.date_edit = QDateEdit(QDate.currentDate())
-        self.date_edit.setDisplayFormat("yyyy-MM-dd")
-        self.date_edit.dateChanged.connect(lambda: self.refresh())
-        bar.addWidget(self.date_edit)
-        bar.addStretch()
-
-        btn_autoplan = QPushButton("▶ Auto Plan")
-        btn_autoplan.clicked.connect(self.run_auto_plan)
-        bar.addWidget(btn_autoplan)
-
-        btn_pull = QPushButton("⬅ Pull Forward")
-        btn_pull.clicked.connect(self.run_pull_forward)
-        bar.addWidget(btn_pull)
-
-        self.btn_consol = QPushButton("🔗 Consolidate Checked")
-        self.btn_consol.setEnabled(False)
-        self.btn_consol.clicked.connect(self._consolidate)
-        bar.addWidget(self.btn_consol)
-
-        self.btn_clear = QPushButton("✖ Clear Checks")
-        self.btn_clear.setEnabled(False)
-        self.btn_clear.clicked.connect(self._clear_checks)
-        bar.addWidget(self.btn_clear)
-
-        self.check_label = QLabel("0 checked")
-        self.check_label.setStyleSheet("color:#555; font-size:11px;")
-        bar.addWidget(self.check_label)
-
-        btn_export = QPushButton("📥 Export")
-        btn_export.setToolTip("Export current plan as normalized Excel")
-        btn_export.clicked.connect(self._export_plan)
-        bar.addWidget(btn_export)
-
-        self.btn_unplanned = QPushButton("📦 Unplanned Orders")
-        self.btn_unplanned.setCheckable(True)
-        self.btn_unplanned.setToolTip(
-            "Show OPEN SOs that still have unplanned remaining quantity")
-        self.btn_unplanned.toggled.connect(self._on_toggle_unplanned)
-        bar.addWidget(self.btn_unplanned)
-
-        layout.addLayout(bar)
-
-        # ── Frozen date-axis header (sits above the scroll area) ──────────────
+        # ── Frozen date-axis header ───────────────────────────────────────────
         self.gantt_header = GanttHeaderWidget(self)
         layout.addWidget(self.gantt_header)
 
@@ -1589,9 +1520,8 @@ class GanttTab(QWidget):
         self.canvas.planSelected.connect(self._on_plan_selected)
         self.canvas.selectionChanged.connect(self._on_selection_changed)
         self.scroll.setWidget(self.canvas)
-        self._on_dim_changed()  # apply initial combo selections to canvas
+        self._on_dim_changed()
 
-        # Sync header horizontal position with scrollbar
         self.scroll.horizontalScrollBar().valueChanged.connect(
             self.gantt_header.set_scroll_h)
 
@@ -1607,10 +1537,380 @@ class GanttTab(QWidget):
         self.detail_label.setStyleSheet(
             "background:#f5f5f5; padding:4px; border-top:1px solid #ccc;")
         self.detail_label.setWordWrap(True)
-        self.detail_label.setMaximumHeight(60)
+        self.detail_label.setMaximumHeight(48)
         layout.addWidget(self.detail_label)
 
         self.refresh()
+
+    # ─── Top Bar (page title / search / KPI pills / action buttons) ──────────
+
+    def _build_topbar(self) -> QWidget:
+        w = QWidget()
+        w.setObjectName("topbar")
+        w.setFixedHeight(54)
+        w.setStyleSheet(
+            "QWidget#topbar { background: #ffffff; }"
+            "QLabel { background: transparent; }"
+        )
+        lay = QHBoxLayout(w)
+        lay.setContentsMargins(16, 0, 12, 0)
+        lay.setSpacing(10)
+
+        # Title + breadcrumb stack
+        tcol = QVBoxLayout()
+        tcol.setSpacing(1)
+        t1 = QLabel("Gantt Planner")
+        t1.setStyleSheet("font-size:14px; font-weight:700; color:#16213d;")
+        t2 = QLabel("Plan / Gantt")
+        t2.setStyleSheet("font-size:10px; color:#9aa1b3;")
+        tcol.addWidget(t1)
+        tcol.addWidget(t2)
+        lay.addLayout(tcol)
+
+        # Search box
+        sf = QFrame()
+        sf.setFixedSize(196, 30)
+        sf.setStyleSheet(
+            "QFrame { background:#f1f2f6; border-radius:6px; border:none; }")
+        sfl = QHBoxLayout(sf)
+        sfl.setContentsMargins(8, 0, 8, 0)
+        sfl.setSpacing(4)
+        sfl.addWidget(QLabel("🔍"))
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Search SO, SKU, Customer…")
+        self.search_edit.setStyleSheet(
+            "border:none; background:transparent; font-size:11px; color:#3a4255;")
+        self.search_edit.textChanged.connect(self._on_search_changed)
+        sfl.addWidget(self.search_edit)
+        lay.addWidget(sf)
+
+        # KPI pills
+        self._pill_ok   = self._make_kpi_pill("#e6f4ea", "#1d8a4a")
+        self._pill_risk = self._make_kpi_pill("#fef3e0", "#b9760a")
+        self._pill_late = self._make_kpi_pill("#fbe7e7", "#c2342f")
+        lay.addWidget(self._pill_ok)
+        lay.addWidget(self._pill_risk)
+        lay.addWidget(self._pill_late)
+
+        lay.addStretch()
+
+        # Primary: Execute Plan
+        btn_plan = QPushButton("▶  Execute Plan")
+        btn_plan.setStyleSheet(
+            "QPushButton { background:#2f5fd6; color:#fff; border:none; border-radius:5px;"
+            " padding:6px 12px; font-size:11px; font-weight:600; }"
+            "QPushButton:hover { background:#2451c2; }"
+        )
+        btn_plan.clicked.connect(self.run_auto_plan)
+        lay.addWidget(btn_plan)
+
+        # Outline: Pull Forward
+        btn_pull = QPushButton("←  Pull Forward")
+        btn_pull.setStyleSheet(
+            "QPushButton { background:#fff; color:#3a4255; border:1px solid #d4d7e0;"
+            " border-radius:5px; padding:6px 12px; font-size:11px; font-weight:600; }"
+            "QPushButton:hover { background:#f5f6fa; }"
+        )
+        btn_pull.clicked.connect(self.run_pull_forward)
+        lay.addWidget(btn_pull)
+
+        # Danger: Clear Plan
+        btn_clear_plan = QPushButton("🗑  Clear Plan")
+        btn_clear_plan.setStyleSheet(
+            "QPushButton { background:#fff; color:#c2342f; border:1px solid #d4d7e0;"
+            " border-radius:5px; padding:6px 12px; font-size:11px; font-weight:600; }"
+            "QPushButton:hover { background:#fbe7e7; }"
+        )
+        btn_clear_plan.clicked.connect(self.run_clear_plan)
+        lay.addWidget(btn_clear_plan)
+
+        # Separator
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setFixedHeight(24)
+        sep.setStyleSheet("background:#e2e4ea; border:none;")
+        sep.setFixedWidth(1)
+        lay.addWidget(sep)
+
+        # Icon: Refresh CRP
+        btn_crp = QPushButton("♻")
+        btn_crp.setFixedSize(32, 32)
+        btn_crp.setToolTip("Refresh CRP")
+        btn_crp.setStyleSheet(
+            "QPushButton { border:1px solid #e2e4ea; border-radius:5px; background:#fff;"
+            " font-size:14px; }"
+            "QPushButton:hover { background:#f5f6fa; }"
+        )
+        btn_crp.clicked.connect(self._on_crp_refresh)
+        lay.addWidget(btn_crp)
+
+        # Icon: New Window
+        btn_win = QPushButton("⧉")
+        btn_win.setFixedSize(32, 32)
+        btn_win.setToolTip("New Window (Ctrl+N)")
+        btn_win.setStyleSheet(
+            "QPushButton { border:1px solid #e2e4ea; border-radius:5px; background:#fff;"
+            " font-size:14px; }"
+            "QPushButton:hover { background:#f5f6fa; }"
+        )
+        btn_win.clicked.connect(self._on_new_window)
+        lay.addWidget(btn_win)
+
+        # Bottom border drawn via a separator widget
+        outer = QWidget()
+        vl = QVBoxLayout(outer)
+        vl.setContentsMargins(0, 0, 0, 0)
+        vl.setSpacing(0)
+        vl.addWidget(w)
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setFixedHeight(1)
+        sep2.setStyleSheet("background:#e2e4ea; border:none;")
+        vl.addWidget(sep2)
+        return outer
+
+    @staticmethod
+    def _make_kpi_pill(bg: str, fg: str) -> QLabel:
+        lbl = QLabel("—")
+        lbl.setStyleSheet(
+            f"QLabel {{ background:{bg}; color:{fg}; border-radius:10px;"
+            f" padding:3px 9px; font-size:10px; font-weight:700; }}"
+        )
+        lbl.setFixedHeight(22)
+        return lbl
+
+    def _update_kpi_pills(self):
+        """Count OPEN SOs by schedule status and update KPI pill labels."""
+        try:
+            from datetime import date as _date, timedelta
+            today = _date.today()
+            sos = SORepo.all()
+            on_time = at_risk = late = 0
+            for so in sos:
+                if so.get("status") != "OPEN":
+                    continue
+                due_str = so.get("due_date")
+                if not due_str:
+                    on_time += 1
+                    continue
+                due = _date.fromisoformat(due_str)
+                days = (due - today).days
+                if days < 0:
+                    late += 1
+                elif days <= 3:
+                    at_risk += 1
+                else:
+                    on_time += 1
+            self._pill_ok.setText(f"On time  {on_time}")
+            self._pill_risk.setText(f"At risk  {at_risk}")
+            self._pill_late.setText(f"Late  {late}")
+        except Exception:
+            pass
+
+    def _on_search_changed(self, text: str):
+        if hasattr(self, "canvas"):
+            self.canvas.set_search_filter(text.strip().lower())
+
+    def _on_crp_refresh(self):
+        if self.main_window and hasattr(self.main_window, "_refresh_crp"):
+            self.main_window._refresh_crp()
+
+    def _on_new_window(self):
+        if self.main_window and hasattr(self.main_window, "_detach_current_tab"):
+            self.main_window._detach_current_tab()
+
+    # ─── View Bar (Y-axis controls / horizon / export) ────────────────────────
+
+    def _build_viewbar(self) -> QWidget:
+        outer = QWidget()
+        vl = QVBoxLayout(outer)
+        vl.setContentsMargins(0, 0, 0, 0)
+        vl.setSpacing(0)
+
+        w = QWidget()
+        w.setObjectName("viewbar")
+        w.setFixedHeight(46)
+        w.setStyleSheet("QWidget#viewbar { background:#fafbfc; }")
+        lay = QHBoxLayout(w)
+        lay.setContentsMargins(14, 0, 12, 0)
+        lay.setSpacing(8)
+
+        # "Y축" label
+        lbl_y = QLabel("Y축")
+        lbl_y.setStyleSheet("font-size:11px; color:#6b7280; font-weight:600;")
+        lay.addWidget(lbl_y)
+
+        # Preset buttons
+        _PRESETS = [("Room", ["Room"]),
+                    ("Room›Proc", ["Room", "Process"]),
+                    ("SKU", ["SKU"])]
+        self._preset_btns: List[QPushButton] = []
+        _PRESET_CSS = (
+            "QPushButton { font-size:10px; font-weight:600; padding:3px 9px;"
+            " border-radius:4px; border:1px solid #d4d7e0; background:#fff; color:#3a4255; }"
+            "QPushButton:checked { background:#dde9ff; border-color:#4f8df0; color:#2451c2; }"
+            "QPushButton:hover:!checked { background:#f5f6fa; }"
+        )
+        for lbl, dims in _PRESETS:
+            btn = QPushButton(lbl)
+            btn.setCheckable(True)
+            btn.setFixedHeight(26)
+            btn.setStyleSheet(_PRESET_CSS)
+            btn.clicked.connect(lambda _c, d=dims: self._apply_preset(d))
+            self._preset_btns.append(btn)
+            lay.addWidget(btn)
+
+        # Separator
+        lay.addWidget(self._vb_sep())
+
+        # Dim selectors with ▸ arrows
+        self._dim_combos: List[QComboBox] = []
+        defaults = ["Room", "Process", "—", "—"]
+        _DIM_CSS = (
+            "QComboBox { background:#fff; border:1px solid #d4d7e0; border-radius:4px;"
+            " padding:3px 5px; font-size:11px; color:#3a4255; }"
+            "QComboBox:focus { border-color:#4f8df0; }"
+        )
+        for i, default_dim in enumerate(defaults):
+            if i > 0:
+                arr = QLabel("▸")
+                arr.setStyleSheet("color:#b0b8cc; font-size:10px;")
+                lay.addWidget(arr)
+            cb = QComboBox()
+            cb.addItems(Y_DIM_OPTIONS)
+            cb.setCurrentText(default_dim)
+            cb.setStyleSheet(_DIM_CSS)
+            cb.currentTextChanged.connect(self._on_dim_changed)
+            cb.setToolTip(f"Y-axis depth {i+1}")
+            self._dim_combos.append(cb)
+            lay.addWidget(cb)
+
+        # Separator
+        lay.addWidget(self._vb_sep())
+
+        # Shift toggle pill
+        self.shift_toggle = QPushButton("Shift")
+        self.shift_toggle.setCheckable(True)
+        self.shift_toggle.setFixedHeight(26)
+        self.shift_toggle.setStyleSheet(
+            "QPushButton { font-size:10px; font-weight:600; padding:3px 10px;"
+            " border-radius:12px; border:1px solid #d4d7e0; color:#6b7280; background:#fff; }"
+            "QPushButton:checked { background:#2f5fd6; color:#fff; border-color:#2f5fd6; }"
+        )
+        self.shift_toggle.toggled.connect(self._on_shift_toggle)
+        lay.addWidget(self.shift_toggle)
+
+        # Horizon segmented selector
+        hz_outer = QFrame()
+        hz_outer.setStyleSheet(
+            "QFrame { background:#eef0f4; border-radius:5px; border:none; }")
+        hz_outer.setFixedHeight(28)
+        hz_lay = QHBoxLayout(hz_outer)
+        hz_lay.setContentsMargins(2, 2, 2, 2)
+        hz_lay.setSpacing(1)
+        _HZ_BTN_CSS = (
+            "QPushButton { font-size:10px; font-weight:600; padding:2px 8px;"
+            " border-radius:4px; border:none; color:#6b7280; background:transparent; }"
+            "QPushButton:checked { background:#fff; color:#16213d; }"
+        )
+        self._horizon_btns: Dict[str, QPushButton] = {}
+        hz_grp = QButtonGroup(self)
+        hz_grp.setExclusive(True)
+        for lbl in ["2W", "4W", "6W", "3M"]:
+            hb = QPushButton(lbl)
+            hb.setCheckable(True)
+            hb.setChecked(lbl == "4W")
+            hb.setStyleSheet(_HZ_BTN_CSS)
+            hb.clicked.connect(lambda _c, t=lbl: self._on_horizon_changed(t))
+            hz_lay.addWidget(hb)
+            hz_grp.addButton(hb)
+            self._horizon_btns[lbl] = hb
+        lay.addWidget(hz_outer)
+
+        # Date picker
+        from PyQt6.QtCore import QDate
+        self.date_edit = QDateEdit(QDate.currentDate())
+        self.date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.date_edit.setFixedHeight(26)
+        self.date_edit.setStyleSheet(
+            "QDateEdit { border:1px solid #d4d7e0; border-radius:4px;"
+            " padding:2px 6px; font-size:11px; color:#3a4255; }")
+        self.date_edit.dateChanged.connect(lambda: self.refresh())
+        lay.addWidget(self.date_edit)
+
+        lay.addStretch()
+
+        # Unplanned button with count badge (updated in refresh)
+        self.btn_unplanned = QPushButton("📦 Unplanned  0")
+        self.btn_unplanned.setCheckable(True)
+        self.btn_unplanned.setFixedHeight(28)
+        self.btn_unplanned.setToolTip("Show OPEN SOs with unplanned remaining quantity")
+        self.btn_unplanned.setStyleSheet(
+            "QPushButton { font-size:11px; font-weight:600; padding:4px 10px;"
+            " border-radius:5px; border:1px solid #d4d7e0; background:#fff; color:#3a4255; }"
+            "QPushButton:checked { background:#fef3e0; border-color:#e09a1f; color:#b9760a; }"
+        )
+        self.btn_unplanned.toggled.connect(self._on_toggle_unplanned)
+        lay.addWidget(self.btn_unplanned)
+
+        # Export
+        btn_export = QPushButton("↓ Export")
+        btn_export.setFixedHeight(28)
+        btn_export.setToolTip("Export current plan as normalized Excel")
+        btn_export.setStyleSheet(
+            "QPushButton { font-size:11px; font-weight:600; padding:4px 10px;"
+            " border-radius:5px; border:1px solid #d4d7e0; background:#fff; color:#3a4255; }"
+            "QPushButton:hover { background:#f5f6fa; }"
+        )
+        btn_export.clicked.connect(self._export_plan)
+        lay.addWidget(btn_export)
+
+        # Consolidate
+        self.btn_consol = QPushButton("🔗 Consolidate (0)")
+        self.btn_consol.setEnabled(False)
+        self.btn_consol.setFixedHeight(28)
+        self.btn_consol.setStyleSheet(
+            "QPushButton { font-size:11px; font-weight:600; padding:4px 10px;"
+            " border-radius:5px; border:1px solid #d4d7e0; background:#fff; color:#3a4255; }"
+            "QPushButton:enabled:hover { background:#f5f6fa; }"
+            "QPushButton:disabled { opacity:0.5; color:#aaa; }"
+        )
+        self.btn_consol.clicked.connect(self._consolidate)
+        lay.addWidget(self.btn_consol)
+
+        # Clear checks (hidden label, still functional)
+        self.btn_clear = QPushButton("✖")
+        self.btn_clear.setEnabled(False)
+        self.btn_clear.setFixedSize(28, 28)
+        self.btn_clear.setToolTip("Clear all checkbox selections")
+        self.btn_clear.setStyleSheet(
+            "QPushButton { border:1px solid #d4d7e0; border-radius:5px;"
+            " background:#fff; color:#3a4255; font-size:12px; }"
+            "QPushButton:enabled:hover { background:#f5f6fa; }"
+        )
+        self.btn_clear.clicked.connect(self._clear_checks)
+        lay.addWidget(self.btn_clear)
+
+        self.check_label = QLabel("")
+        self.check_label.setStyleSheet("color:#555; font-size:10px;")
+        lay.addWidget(self.check_label)
+
+        vl.addWidget(w)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFixedHeight(1)
+        sep.setStyleSheet("background:#e2e4ea; border:none;")
+        vl.addWidget(sep)
+        return outer
+
+    @staticmethod
+    def _vb_sep() -> QFrame:
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setFixedWidth(1)
+        sep.setFixedHeight(22)
+        sep.setStyleSheet("background:#e2e4ea; border:none;")
+        return sep
 
     def _build_unplanned_panel(self) -> QWidget:
         panel = QFrame()
@@ -1846,6 +2146,19 @@ class GanttTab(QWidget):
         # Sync frozen header with canvas data
         self.gantt_header.sync_from(self.canvas)
 
+        # Update topbar KPI pills
+        self._update_kpi_pills()
+
+        # Update unplanned badge count
+        try:
+            n_unplanned = len({
+                (r["so_number"], r["sku_code"], r["line_item"])
+                for r in SORepo.unplanned()
+            })
+            self.btn_unplanned.setText(f"📦 Unplanned  {n_unplanned}")
+        except Exception:
+            pass
+
         if self.btn_unplanned.isChecked():
             self._refresh_unplanned_panel()
 
@@ -1931,7 +2244,8 @@ class GanttTab(QWidget):
 
     def _on_selection_changed(self, checked_ids: list):
         n = len(checked_ids)
-        self.check_label.setText(f"{n} checked")
+        self.check_label.setText(f"{n}" if n > 0 else "")
+        self.btn_consol.setText(f"🔗 Consolidate ({n})")
         self.btn_consol.setEnabled(n >= 2)
         self.btn_clear.setEnabled(n > 0)
 
@@ -1963,6 +2277,28 @@ class GanttTab(QWidget):
         if not dims:
             dims = ["Room"]
         self.canvas.y_dims = dims
+        self._sync_preset_buttons(dims)
+        self.refresh()
+
+    def _apply_preset(self, dims: List[str]):
+        for i, cb in enumerate(self._dim_combos):
+            cb.setCurrentText(dims[i] if i < len(dims) else "—")
+        # _on_dim_changed fires automatically via signal
+
+    def _sync_preset_buttons(self, dims: List[str]):
+        _PRESET_DIMS = [["Room"], ["Room", "Process"], ["SKU"]]
+        for btn, pdims in zip(self._preset_btns, _PRESET_DIMS):
+            btn.setChecked(dims == pdims)
+
+    def _on_horizon_changed(self, text: str):
+        if not hasattr(self, "canvas"):
+            return
+        mapping = {"2W": 14, "4W": 28, "6W": 42, "3M": 90}
+        self.canvas.horizon_days = mapping.get(text, 28)
+        # Sync button group visual state
+        if hasattr(self, "_horizon_btns"):
+            for lbl, hb in self._horizon_btns.items():
+                hb.setChecked(lbl == text)
         self.refresh()
 
     def _on_shift_toggle(self, checked: bool):
