@@ -23,8 +23,9 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QStatusBar, QToolBar, QLabel,
     QMessageBox, QTabBar, QMenu, QPushButton, QScrollArea, QFrame
 )
-from PyQt6.QtCore import Qt, QTimer, QPoint, QFileSystemWatcher
-from PyQt6.QtGui import QAction, QFont, QKeySequence, QShortcut, QColor
+from PyQt6.QtCore import Qt, QTimer, QPoint, QFileSystemWatcher, QByteArray, QSize
+from PyQt6.QtGui import QAction, QFont, QKeySequence, QShortcut, QColor, QIcon, QPixmap, QPainter
+from PyQt6.QtSvg import QSvgRenderer
 
 from data.database import init_db
 from data.crp_excel import crp_manager
@@ -39,6 +40,81 @@ from ui.dashboard_tab import DashboardTab
 from ui.remaining_tabs import InventoryTab, ReleaseReportTab
 
 
+# ─── SVG icon helpers ────────────────────────────────────────────────────────
+
+def _svg_pixmap(svg_body: str, color: str, size: int = 16) -> QPixmap:
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"'
+        f' stroke="{color}" fill="none" stroke-width="1.8"'
+        f' stroke-linecap="round" stroke-linejoin="round">'
+        f'{svg_body}</svg>'
+    )
+    renderer = QSvgRenderer(QByteArray(svg.encode()))
+    px = QPixmap(size, size)
+    px.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(px)
+    renderer.render(painter)
+    painter.end()
+    return px
+
+
+def _rail_icon(svg_body: str, size: int = 16) -> QIcon:
+    """Rail nav icon: inactive (#aab4d6) when unchecked, white when checked."""
+    icon = QIcon()
+    icon.addPixmap(_svg_pixmap(svg_body, "#aab4d6", size),
+                   QIcon.Mode.Normal, QIcon.State.Off)
+    icon.addPixmap(_svg_pixmap(svg_body, "#ffffff", size),
+                   QIcon.Mode.Normal, QIcon.State.On)
+    icon.addPixmap(_svg_pixmap(svg_body, "#d0d8f0", size),
+                   QIcon.Mode.Active, QIcon.State.Off)
+    return icon
+
+
+# Feather-icon SVG bodies (viewBox="0 0 24 24")
+_IC_GANTT    = ('<rect x="3" y="4" width="18" height="18" rx="2"/>'
+                '<line x1="16" y1="2" x2="16" y2="6"/>'
+                '<line x1="8" y1="2" x2="8" y2="6"/>'
+                '<line x1="3" y1="10" x2="21" y2="10"/>')
+
+_IC_SO       = ('<rect x="5" y="4" width="14" height="18" rx="2"/>'
+                '<line x1="8" y1="10" x2="16" y2="10"/>'
+                '<line x1="8" y1="14" x2="16" y2="14"/>'
+                '<line x1="8" y1="18" x2="13" y2="18"/>')
+
+_IC_RELEASE  = ('<line x1="22" y1="2" x2="11" y2="13"/>'
+                '<polygon points="22 2 15 22 11 13 2 9 22 2"/>')
+
+_IC_CRP      = ('<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>'
+                '<circle cx="9" cy="7" r="4"/>'
+                '<path d="M22 21v-2a4 4 0 0 0-3-3.87"/>'
+                '<path d="M16 3.13a4 4 0 0 1 0 7.75"/>')
+
+_IC_INVENTORY= ('<path d="M21 8l-9-5-9 5 9 5 9-5z"/>'
+                '<path d="M3 8v8l9 5 9-5V8"/>'
+                '<path d="M12 13v8"/>')
+
+_IC_ACTUALS  = ('<circle cx="12" cy="12" r="10"/>'
+                '<polyline points="9 12 12 15 17 9"/>')
+
+_IC_ALERTS   = ('<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94'
+                'a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>'
+                '<line x1="12" y1="9" x2="12" y2="13"/>'
+                '<line x1="12" y1="17" x2="12.01" y2="17"/>')
+
+_IC_DASHBOARD= ('<line x1="6" y1="20" x2="6" y2="10"/>'
+                '<line x1="12" y1="20" x2="12" y2="4"/>'
+                '<line x1="18" y1="20" x2="18" y2="14"/>')
+
+_IC_MASTERS  = ('<line x1="4" y1="21" x2="4" y2="14"/>'
+                '<line x1="4" y1="10" x2="4" y2="3"/>'
+                '<line x1="12" y1="21" x2="12" y2="12"/>'
+                '<line x1="12" y1="8" x2="12" y2="3"/>'
+                '<line x1="20" y1="21" x2="20" y2="16"/>'
+                '<line x1="20" y1="12" x2="20" y2="3"/>'
+                '<line x1="1" y1="14" x2="7" y2="14"/>'
+                '<line x1="9" y1="8" x2="15" y2="8"/>'
+                '<line x1="17" y1="16" x2="23" y2="16"/>')
+
 # ─── Left navigation sidebar ─────────────────────────────────────────────────
 
 _RAIL_CSS = """
@@ -46,8 +122,8 @@ QWidget#rail { background: #16213d; }
 QPushButton#rail-item {
     background: transparent; color: #aab4d6;
     border: none; border-left: 3px solid transparent;
-    text-align: left; padding: 8px 18px 8px 15px;
-    font-size: 12.5px; font-family: "Segoe UI";
+    text-align: left; padding: 8px 14px 8px 12px;
+    font-size: 12px; font-family: "Segoe UI";
 }
 QPushButton#rail-item:hover { background: rgba(255,255,255,15); color: #d0d8f0; }
 QPushButton#rail-item:checked {
@@ -98,11 +174,13 @@ class NavSidebar(QWidget):
         lbl.setObjectName("rail-group")
         self._item_layout.addWidget(lbl)
 
-    def add_item(self, icon: str, label: str, tab_idx: int) -> QPushButton:
-        btn = QPushButton(f"  {icon}  {label}")
+    def add_item(self, svg_body: str, label: str, tab_idx: int) -> QPushButton:
+        btn = QPushButton(f"  {label}")
         btn.setObjectName("rail-item")
         btn.setFixedHeight(38)
         btn.setCheckable(True)
+        btn.setIcon(_rail_icon(svg_body))
+        btn.setIconSize(QSize(16, 16))
         btn.setProperty("tab_idx", tab_idx)
         btn.clicked.connect(lambda _=False, i=tab_idx: self._clicked(i))
         self._buttons.append(btn)
@@ -415,18 +493,18 @@ class MainWindow(QMainWindow):
         # ── Sidebar ───────────────────────────────────────────────────────────
         self._sidebar = NavSidebar(self)
         self._sidebar.add_group("Plan")
-        self._sidebar.add_item("📅", "Gantt Planner",  0)
-        self._sidebar.add_item("📋", "Sales Orders",   1)
-        self._sidebar.add_item("🚀", "Release Report", 8)
+        self._sidebar.add_item(_IC_GANTT,     "Gantt Planner",  0)
+        self._sidebar.add_item(_IC_SO,        "Sales Orders",   1)
+        self._sidebar.add_item(_IC_RELEASE,   "Release Report", 8)
         self._sidebar.add_group("Capacity")
-        self._sidebar.add_item("👥", "CRP",            3)
-        self._sidebar.add_item("📦", "Inventory",      7)
+        self._sidebar.add_item(_IC_CRP,       "CRP",            3)
+        self._sidebar.add_item(_IC_INVENTORY, "Inventory",      7)
         self._sidebar.add_group("Track")
-        self._sidebar.add_item("✅", "Actuals",        4)
-        self._sidebar.add_item("⚠️", "Alerts",         5)
-        self._sidebar.add_item("📊", "Dashboard",      6)
+        self._sidebar.add_item(_IC_ACTUALS,   "Actuals",        4)
+        self._sidebar.add_item(_IC_ALERTS,    "Alerts",         5)
+        self._sidebar.add_item(_IC_DASHBOARD, "Dashboard",      6)
         self._sidebar.add_group("Setup")
-        self._sidebar.add_item("🗂", "Masters",        2)
+        self._sidebar.add_item(_IC_MASTERS,   "Masters",        2)
 
         self._sidebar.set_current(0)
         self._sidebar.tabRequested.connect(self._on_sidebar_nav)
