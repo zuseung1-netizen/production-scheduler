@@ -6,19 +6,18 @@ Build exe: pyinstaller --onefile --windowed main.py
 import sys
 import os
 import socket
+import subprocess
 
-# Ensure imports always resolve from the project root,
-# regardless of the CWD the user launches from.
 _ROOT = os.path.dirname(os.path.abspath(__file__))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
-os.chdir(_ROOT)   # make CWD = project root so relative file ops are predictable
+os.chdir(_ROOT)
 
-_SINGLE_INSTANCE_PORT = 47832   # arbitrary local port for instance lock
+_SINGLE_INSTANCE_PORT = 47832
+_PID_FILE = os.path.join(_ROOT, ".planner.pid")
 
 
 def _acquire_instance_lock() -> socket.socket | None:
-    """Try to bind the lock port. Returns the socket on success, None if already running."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
     try:
@@ -28,6 +27,37 @@ def _acquire_instance_lock() -> socket.socket | None:
     except OSError:
         sock.close()
         return None
+
+
+def _read_existing_pid() -> int | None:
+    try:
+        with open(_PID_FILE) as f:
+            return int(f.read().strip())
+    except Exception:
+        return None
+
+
+def _kill_pid(pid: int) -> bool:
+    try:
+        result = subprocess.run(
+            ["taskkill", "/PID", str(pid), "/F"],
+            capture_output=True, timeout=5
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _write_pid():
+    with open(_PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+
+def _remove_pid():
+    try:
+        os.remove(_PID_FILE)
+    except Exception:
+        pass
 
 
 # ── DB must be initialized BEFORE any other import that touches repositories ──
@@ -43,25 +73,48 @@ from ui.main_window import MainWindow
 
 def main():
     lock_sock = _acquire_instance_lock()
+
     if lock_sock is None:
-        # Another instance is already running — show warning and exit
+        # Another instance is running — ask whether to close it
         app = QApplication(sys.argv)
         app.setStyle("Fusion")
-        QMessageBox.warning(
-            None,
-            "Already Running",
-            "Production Planner is already running.\n\n"
-            "Please use the existing window instead of opening a new instance.\n"
-            "If you need a second view, use Ctrl+N (New Window) inside the app."
-        )
-        sys.exit(0)
 
+        ret = QMessageBox.warning(
+            None,
+            "이미 실행 중",
+            "Production Planner가 이미 실행 중입니다.\n\n"
+            "기존 창을 닫고 새 창을 열겠습니까?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            sys.exit(0)
+
+        pid = _read_existing_pid()
+        if pid:
+            _kill_pid(pid)
+
+        # Wait for the port to be released (up to 3 s)
+        import time
+        for _ in range(15):
+            time.sleep(0.2)
+            lock_sock = _acquire_instance_lock()
+            if lock_sock:
+                break
+
+        if lock_sock is None:
+            QMessageBox.critical(
+                None,
+                "오류",
+                "기존 창을 종료하지 못했습니다.\n직접 닫은 후 다시 시작해 주세요.",
+            )
+            sys.exit(1)
+
+    _write_pid()
     try:
-        app = QApplication(sys.argv)
+        app = QApplication.instance() or QApplication(sys.argv)
         app.setApplicationName("Production Planner")
         app.setOrganizationName("YourCompany")
-
-        # Modern look
         app.setStyle("Fusion")
         font = QFont("Segoe UI", 9)
         app.setFont(font)
@@ -71,6 +124,7 @@ def main():
         sys.exit(app.exec())
     finally:
         lock_sock.close()
+        _remove_pid()
 
 
 if __name__ == "__main__":

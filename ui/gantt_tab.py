@@ -71,10 +71,9 @@ SHIFT_W    = DAY_W   # shift-view cells stay the same width as day-view cards
 HEADER_H   = 52
 UTIL_ROW_H = 18
 UTIL_H     = UTIL_ROW_H * 2
-Y_LABEL_W  = 165   # legacy default — canvas uses _y_label_w property
 DIM_COL_W  = 110   # width of each Y-axis depth column
 SKU_COL_W  = 72
-PROC_COL_W = Y_LABEL_W - SKU_COL_W
+Y_LABEL_W  = DIM_COL_W  # kept for any external references; canvas uses _y_label_w property
 
 # ─── Y-axis dimension helpers ──────────────────────────────────────────────────
 # Available dim names (shown in toolbar dropdowns)
@@ -247,7 +246,7 @@ class GanttHeaderWidget(QWidget):
         self.start_date   : date       = date.today()
         self._shifts      : list       = []
         self._scroll_h    : int        = 0    # horizontal scrollbar value
-        self._y_label_w   : int        = Y_LABEL_W
+        self._y_label_w   : int        = DIM_COL_W
 
     def sync_from(self, canvas: 'GanttCanvas'):
         """Copy display parameters from the canvas and repaint."""
@@ -689,7 +688,7 @@ class GanttCanvas(QWidget):
         # Grid lines
         p.setPen(QPen(GRID_LINE, 1))
         for col in range(self._col_count() + 1):
-            x = Y_LABEL_W + col * self._col_w()
+            x = self._y_label_w + col * self._col_w()
             p.drawLine(x, HEADER_H, x, h)
         for ri in range(len(self._rows)):
             y = self._row_y_list[ri]
@@ -1191,7 +1190,7 @@ class GanttCanvas(QWidget):
                         f"Cannot move here.")
                 else:
                     center = self._drag_rect.center()
-                    col    = (center.x() - Y_LABEL_W) // self._col_w()
+                    col    = (center.x() - self._y_label_w) // self._col_w()
                     if 0 <= col < self._col_count():
                         new_date, new_shift = self._col_to_date_shift(col)
                         plan = next((p for p in self._plans
@@ -1590,6 +1589,7 @@ class GanttTab(QWidget):
         self.canvas.planSelected.connect(self._on_plan_selected)
         self.canvas.selectionChanged.connect(self._on_selection_changed)
         self.scroll.setWidget(self.canvas)
+        self._on_dim_changed()  # apply initial combo selections to canvas
 
         # Sync header horizontal position with scrollbar
         self.scroll.horizontalScrollBar().valueChanged.connect(
@@ -1957,6 +1957,8 @@ class GanttTab(QWidget):
             QMessageBox.warning(self, "Export Failed", msg)
 
     def _on_dim_changed(self):
+        if not hasattr(self, "canvas"):
+            return
         dims = [cb.currentText() for cb in self._dim_combos if cb.currentText() != "—"]
         if not dims:
             dims = ["Room"]

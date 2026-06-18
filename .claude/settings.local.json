@@ -24,7 +24,11 @@
       "PowerShell(cd \"C:\\\\production scheduler\"; $env:PYTHONIOENCODING=\"utf-8\"; python _verify_detach.py)",
       "PowerShell(cd \"C:\\\\production scheduler\"; $env:PYTHONIOENCODING=\"utf-8\"; python _verify_redock.py)",
       "PowerShell(Select-String *)",
-      "PowerShell(winget install *)"
+      "PowerShell(winget install *)",
+      "PowerShell($env:PATH = [System.Environment]::GetEnvironmentVariable\\(\"PATH\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"PATH\",\"User\"\\); cd \"C:\\\\production scheduler\" && git remote -v 2>&1)",
+      "PowerShell($env:PATH = [System.Environment]::GetEnvironmentVariable\\(\"PATH\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"PATH\",\"User\"\\); cd \"C:\\\\production scheduler\" && git push origin master 2>&1)",
+      "PowerShell(cd \"C:\\\\production scheduler\"; $env:PATH = [System.Environment]::GetEnvironmentVariable\\(\"PATH\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"PATH\",\"User\"\\); $proc = Start-Process -FilePath python -ArgumentList \"main.py\" -PassThru -NoNewWindow; Start-Sleep -Seconds 8; if \\(!$proc.HasExited\\) { \"앱 실행 중 \\(PID $\\($proc.Id\\)\\) — 정상 기동\" } else { \"종료됨. 종료코드: $\\($proc.ExitCode\\)\" })",
+      "PowerShell($env:PATH = [System.Environment]::GetEnvironmentVariable\\(\"PATH\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"PATH\",\"User\"\\); cd \"C:\\\\production scheduler\"; $proc = Start-Process -FilePath python -ArgumentList \"main.py\" -PassThru -NoNewWindow; Start-Sleep -Seconds 6; if \\(!$proc.HasExited\\) { \"앱 실행 중 \\(PID $\\($proc.Id\\)\\)\" } else { \"종료. 코드: $\\($proc.ExitCode\\)\" })"
     ]
   }
 }
