@@ -5,3 +5,4 @@ planner.db
 *.zip
 *.log
 .pytest_cache/
+.planner.pid
