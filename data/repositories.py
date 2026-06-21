@@ -3,7 +3,7 @@ Repository layer — abstracts all data access.
 All DB operations go through these classes so swapping the backend is easy.
 """
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 from data.database import get_connection
@@ -32,9 +32,10 @@ class ConfigRepo:
     @staticmethod
     def set(key: str, value: str):
         with get_connection() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO app_config(config_key,config_value) VALUES(?,?)",
-                (key, value))
+            conn.execute("""
+                INSERT INTO app_config(config_key, config_value) VALUES(?, ?)
+                ON CONFLICT(config_key) DO UPDATE SET config_value=excluded.config_value
+            """, (key, value))
 
     @staticmethod
     def all() -> List[Dict]:
@@ -61,13 +62,15 @@ class SKURepo:
     @staticmethod
     def upsert(data: Dict):
         data["updated_at"] = _now()
+        data.setdefault("campaign_mode", 1)
         with get_connection() as conn:
             conn.execute("""
-                INSERT INTO sku_master(sku_code,sku_name,uom,post_lead_days,note,updated_at)
-                VALUES(:sku_code,:sku_name,:uom,:post_lead_days,:note,:updated_at)
+                INSERT INTO sku_master(sku_code,sku_name,uom,post_lead_days,campaign_mode,note,updated_at)
+                VALUES(:sku_code,:sku_name,:uom,:post_lead_days,:campaign_mode,:note,:updated_at)
                 ON CONFLICT(sku_code) DO UPDATE SET
                     sku_name=excluded.sku_name, uom=excluded.uom,
                     post_lead_days=excluded.post_lead_days,
+                    campaign_mode=excluded.campaign_mode,
                     note=excluded.note, updated_at=excluded.updated_at
             """, data)
 
@@ -295,14 +298,15 @@ class RoomRepo:
 
     @staticmethod
     def upsert(data: Dict):
+        data.setdefault("changeover_shifts", 0)
         with get_connection() as conn:
             conn.execute("""
                 INSERT INTO room_master
                     (room_code,process_name,process_type,room_type,
-                     upph,uph_fixed,hc_min,hc_max,hc_fixed,note)
+                     upph,uph_fixed,hc_min,hc_max,hc_fixed,changeover_shifts,note)
                 VALUES
                     (:room_code,:process_name,:process_type,:room_type,
-                     :upph,:uph_fixed,:hc_min,:hc_max,:hc_fixed,:note)
+                     :upph,:uph_fixed,:hc_min,:hc_max,:hc_fixed,:changeover_shifts,:note)
                 ON CONFLICT(room_code,process_name) DO UPDATE SET
                     process_type=excluded.process_type,
                     room_type=excluded.room_type,
@@ -311,6 +315,7 @@ class RoomRepo:
                     hc_min=excluded.hc_min,
                     hc_max=excluded.hc_max,
                     hc_fixed=excluded.hc_fixed,
+                    changeover_shifts=excluded.changeover_shifts,
                     note=excluded.note
             """, data)
 
@@ -363,14 +368,16 @@ class CalendarRepo:
 
     @staticmethod
     def set_slot(cal_date: str, shift_no: int, room_code: str,
-                 is_open: int = 1, is_hold: int = 0):
+                 is_open: int = 1, is_hold: int = 0,
+                 deduct_minutes: int = 0):
         with get_connection() as conn:
             conn.execute("""
-                INSERT INTO calendar(cal_date,shift_no,room_code,is_open,is_hold)
-                VALUES(?,?,?,?,?)
+                INSERT INTO calendar(cal_date,shift_no,room_code,is_open,is_hold,deduct_minutes)
+                VALUES(?,?,?,?,?,?)
                 ON CONFLICT(cal_date,shift_no,room_code) DO UPDATE SET
-                    is_open=excluded.is_open, is_hold=excluded.is_hold
-            """, (cal_date, shift_no, room_code, is_open, is_hold))
+                    is_open=excluded.is_open, is_hold=excluded.is_hold,
+                    deduct_minutes=excluded.deduct_minutes
+            """, (cal_date, shift_no, room_code, is_open, is_hold, deduct_minutes))
 
     @staticmethod
     def get_unavailable_slots(date_from: str, date_to: str) -> List[Dict]:
@@ -381,6 +388,15 @@ class CalendarRepo:
                 WHERE cal_date BETWEEN ? AND ?
                   AND (is_open=0 OR is_hold=1)
                 ORDER BY cal_date, shift_no, room_code
+            """, (date_from, date_to)).fetchall())
+
+    @staticmethod
+    def get_deduct_slots(date_from: str, date_to: str) -> List[Dict]:
+        """Return calendar records that have deduct_minutes > 0 (partial holds)."""
+        with get_connection() as conn:
+            return _rows_to_dicts(conn.execute("""
+                SELECT cal_date, shift_no, room_code, deduct_minutes FROM calendar
+                WHERE cal_date BETWEEN ? AND ? AND deduct_minutes > 0
             """, (date_from, date_to)).fetchall())
 
     @staticmethod
@@ -536,16 +552,18 @@ class SORepo:
             raise ValueError(f"Snapshot {batch_id} not found")
         data = json.loads(row["snapshot_data"])
         with get_connection() as conn:
+            conn.execute("DELETE FROM so_inventory_allocation")
             conn.execute("DELETE FROM sales_order")
             for so in data:
                 conn.execute("""
                     INSERT INTO sales_order
                         (so_number,sku_code,line_item,qty,due_date,priority,
-                         received_at,status,start_no_earlier,note)
+                         received_at,status,start_no_earlier,note,customer_name)
                     VALUES
                         (:so_number,:sku_code,:line_item,:qty,:due_date,:priority,
-                         :received_at,:status,:start_no_earlier,:note)
-                """, so)
+                         :received_at,:status,:start_no_earlier,:note,
+                         :customer_name)
+                """, {**so, "customer_name": so.get("customer_name", "")})
 
     @staticmethod
     def unplanned() -> List[Dict]:
@@ -588,6 +606,44 @@ class SORepo:
             r.get("priority") if r.get("priority") is not None else 999,
             r.get("process_seq") or 0,
         ))
+        return result
+
+    @staticmethod
+    def open_demand_for_sku(sku_code: str) -> List[Dict]:
+        """OPEN SO line-items for a SKU with remaining production need > 0.
+        Remaining = SO qty - inventory allocated - actuals already saved.
+        Sorted by priority ASC, due_date ASC, received_at ASC."""
+        with get_connection() as conn:
+            rows = _rows_to_dicts(conn.execute("""
+                SELECT so.*,
+                       COALESCE(act.qty_actual_total, 0) AS qty_actual_total,
+                       COALESCE(alloc.qty_inv_allocated, 0) AS qty_inv_allocated
+                FROM sales_order so
+                LEFT JOIN (
+                    SELECT so_number, sku_code, line_item,
+                           SUM(qty_actual) AS qty_actual_total
+                    FROM production_actual
+                    GROUP BY so_number, sku_code, line_item
+                ) act ON act.so_number=so.so_number
+                     AND act.sku_code=so.sku_code
+                     AND act.line_item=so.line_item
+                LEFT JOIN (
+                    SELECT so_number, sku_code, line_item,
+                           SUM(qty_allocated) AS qty_inv_allocated
+                    FROM so_inventory_allocation
+                    GROUP BY so_number, sku_code, line_item
+                ) alloc ON alloc.so_number=so.so_number
+                       AND alloc.sku_code=so.sku_code
+                       AND alloc.line_item=so.line_item
+                WHERE so.sku_code=? AND so.status='OPEN'
+                ORDER BY so.priority ASC, so.due_date ASC, so.received_at ASC
+            """, (sku_code,)).fetchall())
+        result = []
+        for r in rows:
+            remaining = r["qty"] - r["qty_actual_total"] - r["qty_inv_allocated"]
+            if remaining > 0:
+                r["remaining_needed"] = remaining
+                result.append(r)
         return result
 
 
@@ -680,9 +736,11 @@ class PlanRepo:
         set_clause = ", ".join(f"{k}=:{k}" for k in fields)
         fields["plan_id"] = plan_id
         with get_connection() as conn:
-            conn.execute(
+            cur = conn.execute(
                 f"UPDATE production_plan SET {set_clause} "
                 f"WHERE plan_id=:plan_id", fields)
+            if cur.rowcount == 0:
+                raise ValueError(f"Plan {plan_id} not found in DB — update had no effect")
         _log_plan_history(plan_id, "MODIFIED", old,
                           {**(old or {}), **fields}, reason)
 
@@ -731,11 +789,13 @@ class PlanRepo:
 
     @staticmethod
     def delete_unlocked(date_from: str, date_to: str) -> int:
-        """Clear ALL unlocked plans (SKU + MATERIAL) in a date range and
+        """Clear ALL unlocked plans (SKU + MATERIAL) up to date_to and
         orphaned demand-group rows. Called at the start of auto_plan() so
-        that every run starts with a clean slate — locked plans are kept."""
-        clauses = ["is_locked=0", "plan_date BETWEEN ? AND ?"]
-        params = [date_from, date_to]
+        that every run starts with a clean slate — locked plans are kept.
+        No lower-bound filter: stale plans from previous days (before date_from)
+        are also removed so they don't inflate planned_qty checks."""
+        clauses = ["is_locked=0", "plan_date <= ?"]
+        params = [date_to]
         where = "WHERE " + " AND ".join(clauses)
         mat_where = "WHERE " + " AND ".join(
             clauses + ["material_group_id IS NOT NULL"])
@@ -752,6 +812,22 @@ class PlanRepo:
                 conn.execute(
                     f"DELETE FROM material_demand_group "
                     f"WHERE group_id IN ({placeholders})", group_ids)
+        return n
+
+    @staticmethod
+    def delete_unlocked_for_so(so_number: str, sku_code: str, line_item: str,
+                               date_from: str = None, date_to: str = None) -> int:
+        """Delete ALL unlocked SKU plans for one specific SO (no date filter).
+        Used by force_plan_so() to clear stale plans before re-trying — this
+        includes plans placed before date_from that would otherwise survive
+        delete_unlocked() and inflate the planned_qty guard."""
+        with get_connection() as conn:
+            n = conn.execute(
+                "DELETE FROM production_plan "
+                "WHERE so_number=? AND sku_code=? AND line_item=? "
+                "AND entity_type='SKU' AND is_locked=0",
+                (so_number, sku_code, line_item)
+            ).rowcount
         return n
 
     @staticmethod
@@ -862,6 +938,108 @@ class PlanRepo:
                 ).fetchall()
         return _rows_to_dicts(rows)
 
+    @staticmethod
+    def impact_summary() -> List[Dict]:
+        """Pull-in / push-out report.
+
+        For each OPEN SO that has at least one production plan, computes:
+        - planned_release  = MAX(final plan date) + post_lead_days
+        - projected_release = MAX(actual_date) + post_lead_days  (if complete)
+                           = planned_release                      (if in-progress / not started)
+        - delta_days       = projected_release - planned_release
+          Negative → pull-in (early), Positive → push-out (late)
+        """
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        with get_connection() as conn:
+            rows = _rows_to_dicts(conn.execute("""
+                SELECT
+                    so.so_number, so.sku_code, so.line_item, so.qty,
+                    so.due_date, so.priority, so.customer_name,
+                    sm.post_lead_days,
+                    fp.max_plan_date,
+                    fp.qty_planned_by_today,
+                    COALESCE(act.qty_actual_total, 0) AS qty_actual_total,
+                    act.max_actual_date,
+                    COALESCE(inv.qty_inv_allocated, 0) AS qty_inv_allocated
+                FROM sales_order so
+                JOIN sku_master sm ON sm.sku_code = so.sku_code
+                JOIN (
+                    SELECT so_number, sku_code, line_item,
+                           MAX(plan_date) AS max_plan_date,
+                           SUM(CASE WHEN plan_date <= ? THEN qty_planned ELSE 0 END)
+                               AS qty_planned_by_today
+                    FROM production_plan
+                    WHERE entity_type='SKU' AND is_final_seq=1
+                    GROUP BY so_number, sku_code, line_item
+                ) fp ON fp.so_number=so.so_number
+                    AND fp.sku_code=so.sku_code
+                    AND fp.line_item=so.line_item
+                LEFT JOIN (
+                    SELECT so_number, sku_code, line_item,
+                           SUM(qty_actual) AS qty_actual_total,
+                           MAX(actual_date) AS max_actual_date
+                    FROM production_actual
+                    GROUP BY so_number, sku_code, line_item
+                ) act ON act.so_number=so.so_number
+                     AND act.sku_code=so.sku_code
+                     AND act.line_item=so.line_item
+                LEFT JOIN (
+                    SELECT so_number, sku_code, line_item,
+                           SUM(qty_allocated) AS qty_inv_allocated
+                    FROM so_inventory_allocation
+                    GROUP BY so_number, sku_code, line_item
+                ) inv ON inv.so_number=so.so_number
+                     AND inv.sku_code=so.sku_code
+                     AND inv.line_item=so.line_item
+                WHERE so.status='OPEN'
+                ORDER BY so.priority ASC, so.due_date ASC
+            """, (today_str,)).fetchall())
+
+        result = []
+        today = datetime.now().date()
+        for r in rows:
+            post = r.get("post_lead_days") or 0
+            qty_produced = r["qty_actual_total"] + r["qty_inv_allocated"]
+            remaining    = max(0, r["qty"] - qty_produced)
+
+            # Planned release
+            planned_release = None
+            if r["max_plan_date"]:
+                pd = datetime.strptime(r["max_plan_date"], "%Y-%m-%d").date()
+                planned_release = pd + timedelta(days=post)
+
+            # Projected release & status
+            if remaining == 0 and r.get("max_actual_date"):
+                ad = datetime.strptime(r["max_actual_date"], "%Y-%m-%d").date()
+                projected_release = ad + timedelta(days=post)
+                impact_status = "COMPLETE"
+            elif qty_produced > 0:
+                projected_release = planned_release
+                impact_status = "PARTIAL"
+            else:
+                projected_release = planned_release
+                impact_status = "NOT STARTED"
+
+            delta_days = None
+            if planned_release and projected_release:
+                delta_days = (projected_release - planned_release).days
+                if impact_status == "COMPLETE":
+                    if delta_days < -1:
+                        impact_status = "PULL-IN"
+                    elif delta_days > 1:
+                        impact_status = "PUSH-OUT"
+                    else:
+                        impact_status = "ON TRACK"
+
+            r["qty_produced"]      = qty_produced
+            r["remaining"]         = remaining
+            r["planned_release"]   = planned_release.isoformat()  if planned_release   else ""
+            r["projected_release"] = projected_release.isoformat() if projected_release else ""
+            r["delta_days"]        = delta_days
+            r["impact_status"]     = impact_status
+            result.append(r)
+        return result
+
 
 def _log_plan_history(plan_id, action, old_val, new_val, reason):
     with get_connection() as conn:
@@ -945,6 +1123,11 @@ class ActualRepo:
         data.setdefault("so_number", "")
         data.setdefault("sku_code", "")
         data.setdefault("line_item", "")
+        data.setdefault("plan_id", None)
+        data.setdefault("room_code", "")
+        data.setdefault("process_name", "")
+        data.setdefault("shift_no", 0)
+        data.setdefault("note", "")
         with get_connection() as conn:
             cur = conn.execute("""
                 INSERT INTO production_actual
@@ -1003,6 +1186,14 @@ class ActualRepo:
                 "SELECT * FROM production_actual "
                 "ORDER BY entered_at DESC LIMIT ?",
                 (limit,)).fetchall())
+
+    @staticmethod
+    def for_date(actual_date: str) -> List[Dict]:
+        with get_connection() as conn:
+            return _rows_to_dicts(conn.execute(
+                "SELECT * FROM production_actual WHERE actual_date=? "
+                "ORDER BY entered_at DESC",
+                (actual_date,)).fetchall())
 
 
 # ─── LOT Sample ───────────────────────────────────────────────────────────────
@@ -1216,6 +1407,29 @@ class InventoryRepo:
                 (status, _now(), inv_id))
 
     @staticmethod
+    def add_excess(sku_code: str, lot_number: str, qty: int,
+                   production_date: str = None) -> int:
+        """Add qty to an existing lot or create a new AVAILABLE lot."""
+        now = _now()
+        with get_connection() as conn:
+            existing = conn.execute(
+                "SELECT inv_id FROM inventory WHERE sku_code=? AND lot_number=?",
+                (sku_code, lot_number)).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE inventory SET qty_available=qty_available+?, "
+                    "updated_at=? WHERE inv_id=?",
+                    (qty, now, existing["inv_id"]))
+                return existing["inv_id"]
+            cur = conn.execute("""
+                INSERT INTO inventory
+                    (sku_code, lot_number, qty_available, production_date,
+                     expiry_date, status, note, created_at, updated_at)
+                VALUES (?,?,?,?,NULL,'AVAILABLE',NULL,?,?)
+            """, (sku_code, lot_number, qty, production_date, now, now))
+            return cur.lastrowid
+
+    @staticmethod
     def fefo_suggestion(sku_code: str, qty_needed: int) -> List[Dict]:
         """
         FEFO auto-suggestion: returns a list of (inv_id, lot_number,
@@ -1360,6 +1574,91 @@ class AllocationRepo:
 
 
 # ─── Legacy alias (keeps older imports working) ───────────────────────────────
+# ─── Company Holiday ─────────────────────────────────────────────────────────
+
+class CompanyHolidayRepo:
+    @staticmethod
+    def all() -> List[Dict]:
+        with get_connection() as conn:
+            return _rows_to_dicts(conn.execute(
+                "SELECT cal_date, name FROM company_holiday ORDER BY cal_date"
+            ).fetchall())
+
+    @staticmethod
+    def upsert(cal_date: str, name: str):
+        with get_connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO company_holiday(cal_date, name) VALUES(?,?)",
+                (cal_date, name))
+            conn.commit()
+
+    @staticmethod
+    def delete(cal_date: str):
+        with get_connection() as conn:
+            conn.execute("DELETE FROM company_holiday WHERE cal_date=?", (cal_date,))
+            conn.commit()
+
+    @staticmethod
+    def date_set() -> set:
+        with get_connection() as conn:
+            return {r[0] for r in conn.execute(
+                "SELECT cal_date FROM company_holiday").fetchall()}
+
+
+class ScenarioRepo:
+    @staticmethod
+    def all() -> List[Dict]:
+        with get_connection() as conn:
+            return [dict(r) for r in conn.execute(
+                "SELECT * FROM scenario ORDER BY created_at DESC").fetchall()]
+
+    @staticmethod
+    def get(scenario_id: int) -> Optional[Dict]:
+        with get_connection() as conn:
+            r = conn.execute("SELECT * FROM scenario WHERE scenario_id=?",
+                             (scenario_id,)).fetchone()
+            return dict(r) if r else None
+
+    @staticmethod
+    def insert(name, date_from, date_to, max_hc_add, hc_step, bottlenecks_json) -> int:
+        import json
+        from datetime import datetime
+        with get_connection() as conn:
+            cur = conn.execute(
+                """INSERT INTO scenario(name,date_from,date_to,max_hc_add,hc_step,
+                   bottlenecks,created_at) VALUES(?,?,?,?,?,?,?)""",
+                (name, date_from, date_to, max_hc_add, hc_step,
+                 bottlenecks_json, datetime.now().isoformat()))
+            conn.commit()
+            return cur.lastrowid
+
+    @staticmethod
+    def delete(scenario_id: int):
+        with get_connection() as conn:
+            conn.execute("DELETE FROM scenario_result WHERE scenario_id=?", (scenario_id,))
+            conn.execute("DELETE FROM scenario WHERE scenario_id=?", (scenario_id,))
+            conn.commit()
+
+    @staticmethod
+    def results_for(scenario_id: int) -> List[Dict]:
+        with get_connection() as conn:
+            return [dict(r) for r in conn.execute(
+                "SELECT * FROM scenario_result WHERE scenario_id=? ORDER BY hc_added",
+                (scenario_id,)).fetchall()]
+
+    @staticmethod
+    def insert_result(scenario_id, hc_added, late_before, late_after,
+                      resolved_sos_json, detail_json):
+        from datetime import datetime
+        with get_connection() as conn:
+            conn.execute(
+                """INSERT INTO scenario_result(scenario_id,hc_added,late_before,late_after,
+                   resolved_sos,detail,created_at) VALUES(?,?,?,?,?,?,?)""",
+                (scenario_id, hc_added, late_before, late_after,
+                 resolved_sos_json, detail_json, datetime.now().isoformat()))
+            conn.commit()
+
+
 # Old code referenced SKUProcessRepo — redirect to ProcessRoutingRepo
 class SKUProcessRepo:
     @staticmethod

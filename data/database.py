@@ -30,9 +30,15 @@ def init_db():
         sku_name        TEXT NOT NULL,
         uom             INTEGER NOT NULL DEFAULT 1,
         post_lead_days  INTEGER NOT NULL DEFAULT 0,
+        campaign_mode   INTEGER NOT NULL DEFAULT 1,
         note            TEXT,
         updated_at      TEXT
     )""")
+
+    # Migration: add campaign_mode to existing DBs
+    sku_cols = [r[1] for r in c.execute("PRAGMA table_info(sku_master)").fetchall()]
+    if "campaign_mode" not in sku_cols:
+        c.execute("ALTER TABLE sku_master ADD COLUMN campaign_mode INTEGER NOT NULL DEFAULT 1")
 
     # ── Material Master ──────────────────────────────────────────────────────
     # Semi-finished goods (반제품). No SO — demand derived from SKU plans.
@@ -77,21 +83,39 @@ def init_db():
         except Exception:
             pass  # SQLite < 3.35 — column stays but is unused
 
+    # ── calendar.deduct_minutes migration ────────────────────────────────────
+    cal_cols = [r[1] for r in c.execute("PRAGMA table_info(calendar)").fetchall()]
+    if "deduct_minutes" not in cal_cols:
+        c.execute("ALTER TABLE calendar ADD COLUMN deduct_minutes INTEGER NOT NULL DEFAULT 0")
+
+    # ── Company Holiday (사내 휴무일) ─────────────────────────────────────────
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS company_holiday (
+        cal_date  TEXT PRIMARY KEY,
+        name      TEXT NOT NULL DEFAULT ''
+    )""")
+
     # ── Production Room Master ───────────────────────────────────────────────
     c.execute("""
     CREATE TABLE IF NOT EXISTS room_master (
-        room_code       TEXT NOT NULL,
-        process_name    TEXT NOT NULL,
-        process_type    TEXT NOT NULL CHECK(process_type IN ('AUTO','MANUAL')),
-        room_type       TEXT NOT NULL,
-        upph            REAL,
-        uph_fixed       REAL,
-        hc_min          INTEGER,
-        hc_max          INTEGER,
-        hc_fixed        INTEGER,
-        note            TEXT,
+        room_code           TEXT NOT NULL,
+        process_name        TEXT NOT NULL,
+        process_type        TEXT NOT NULL CHECK(process_type IN ('AUTO','MANUAL')),
+        room_type           TEXT NOT NULL,
+        upph                REAL,
+        uph_fixed           REAL,
+        hc_min              INTEGER,
+        hc_max              INTEGER,
+        hc_fixed            INTEGER,
+        changeover_shifts   INTEGER NOT NULL DEFAULT 0,
+        note                TEXT,
         PRIMARY KEY (room_code, process_name)
     )""")
+
+    # Migration: add changeover_shifts to existing DBs
+    room_cols = [r[1] for r in c.execute("PRAGMA table_info(room_master)").fetchall()]
+    if "changeover_shifts" not in room_cols:
+        c.execute("ALTER TABLE room_master ADD COLUMN changeover_shifts INTEGER NOT NULL DEFAULT 0")
 
     # ── Shift Config ─────────────────────────────────────────────────────────
     c.execute("""
@@ -311,6 +335,7 @@ def init_db():
         ("crp_excel_path",         "",          "Path to CRP Excel file"),
         ("room_assign_mode",       "CAPACITY",  "Room auto-assign mode: CAPACITY or UPH"),
         ("material_due_merge_days","21",        "Merge material demand within this many days of due date"),
+        ("max_consolidation_days", "7",         "Max due-date gap (days) for campaign consolidation of same SKU orders"),
     ]
     for key, val, desc in defaults:
         c.execute("""
@@ -327,6 +352,32 @@ def init_db():
             INSERT OR IGNORE INTO shift_config(shift_no, shift_name, start_time, end_time)
             VALUES (?,?,?,?)
         """, s)
+
+    # ── Scenario Planner ─────────────────────────────────────────────────────
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS scenario (
+        scenario_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+        name          TEXT NOT NULL DEFAULT 'Scenario',
+        date_from     TEXT NOT NULL,
+        date_to       TEXT NOT NULL,
+        max_hc_add    INTEGER NOT NULL DEFAULT 0,
+        hc_step       INTEGER NOT NULL DEFAULT 5,
+        bottlenecks   TEXT,
+        created_at    TEXT NOT NULL
+    )""")
+
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS scenario_result (
+        result_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+        scenario_id   INTEGER NOT NULL,
+        hc_added      INTEGER NOT NULL,
+        late_before   INTEGER NOT NULL DEFAULT 0,
+        late_after    INTEGER NOT NULL DEFAULT 0,
+        resolved_sos  TEXT,
+        detail        TEXT,
+        created_at    TEXT NOT NULL,
+        FOREIGN KEY (scenario_id) REFERENCES scenario(scenario_id)
+    )""")
 
     conn.commit()
     conn.close()
