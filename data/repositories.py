@@ -1578,6 +1578,67 @@ class AllocationRepo:
                 ORDER BY a.allocated_at DESC
             """).fetchall())
 
+    @staticmethod
+    def allocation_summary_for_open_sos() -> dict:
+        """Single query returning {(so_number, sku_code, line_item): allocated_qty}."""
+        with get_connection() as conn:
+            rows = _rows_to_dicts(conn.execute("""
+                SELECT a.so_number, a.sku_code, a.line_item,
+                       COALESCE(SUM(a.qty_allocated), 0) AS allocated
+                FROM so_inventory_allocation a
+                JOIN sales_order so
+                  ON so.so_number=a.so_number
+                 AND so.sku_code=a.sku_code
+                 AND so.line_item=a.line_item
+                GROUP BY a.so_number, a.sku_code, a.line_item
+            """).fetchall())
+        return {(r["so_number"], r["sku_code"], r["line_item"]): r["allocated"]
+                for r in rows}
+
+    @staticmethod
+    def deallocate_all_for_so(so_number: str, sku_code: str, line_item: str) -> int:
+        """Remove all allocations for one SO line and restore inventory status."""
+        with get_connection() as conn:
+            rows = _rows_to_dicts(conn.execute(
+                "SELECT alloc_id, inv_id FROM so_inventory_allocation "
+                "WHERE so_number=? AND sku_code=? AND line_item=?",
+                (so_number, sku_code, line_item)).fetchall())
+            conn.execute(
+                "DELETE FROM so_inventory_allocation "
+                "WHERE so_number=? AND sku_code=? AND line_item=?",
+                (so_number, sku_code, line_item))
+        for r in rows:
+            InventoryRepo.update_status(r["inv_id"], "AVAILABLE")
+        return len(rows)
+
+    @staticmethod
+    def bulk_auto_allocate() -> dict:
+        """FEFO × Priority auto-allocation for all OPEN SOs.
+        Returns {"allocated": [...], "skipped": [...]}."""
+        sos = SORepo.all("OPEN")
+        sos.sort(key=lambda s: (
+            s["priority"] if s["priority"] is not None else 9999,
+            s["due_date"] or ""))
+        allocated, skipped = [], []
+        for so in sos:
+            prod_needed = AllocationRepo.production_needed(
+                so["so_number"], so["sku_code"], so["line_item"])
+            if prod_needed <= 0:
+                continue
+            suggestion = InventoryRepo.fefo_suggestion(so["sku_code"], prod_needed)
+            if not suggestion:
+                skipped.append(so)
+                continue
+            AllocationRepo.confirm_fefo_suggestion(
+                so["so_number"], so["sku_code"], so["line_item"], suggestion)
+            allocated.append({
+                "so_number":   so["so_number"],
+                "sku_code":    so["sku_code"],
+                "line_item":   so["line_item"],
+                "qty_covered": sum(s["qty_to_allocate"] for s in suggestion),
+            })
+        return {"allocated": allocated, "skipped": skipped}
+
 
 # ─── Legacy alias (keeps older imports working) ───────────────────────────────
 # ─── Company Holiday ─────────────────────────────────────────────────────────

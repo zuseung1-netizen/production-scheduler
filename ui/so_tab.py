@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QDate
 from PyQt6.QtGui import QColor, QBrush, QCursor
 
-from data.repositories import SORepo, PlanRepo, ActualRepo, SKURepo
+from data.repositories import SORepo, PlanRepo, ActualRepo, SKURepo, InventoryRepo, AllocationRepo
 from utils.excel_io import upload_so, preview_so_upload, download_so_template, export_all
 
 
@@ -36,12 +36,11 @@ LATE_COLOR = QColor("#ffcccc")
 
 
 class SOTab(QWidget):
-    # columns editable in edit mode
     # 0=SO, 1=SKU, 2=Line, 3=Customer, 4=Qty, 5=PlannedQty, 6=ActualQty,
-    # 7=Due(Req), 8=CommittedDue, 9=Priority, 10=Status,
-    # 11=ProdCompletion, 12=Release, 13=ReceivedAt, 14=Note, 15=StartNoEarlier
-    _EDITABLE_COLS  = {3, 4, 7, 8, 9, 10, 14, 15}
-    _READONLY_COLS  = {0, 1, 2, 5, 6, 11, 12, 13}
+    # 7=Inventory(RO), 8=Due(Req), 9=CommittedDue, 10=Priority, 11=Status,
+    # 12=ProdCompletion, 13=Release, 14=ReceivedAt, 15=Note, 16=StartNoEarlier
+    _EDITABLE_COLS  = {3, 4, 8, 9, 10, 11, 15, 16}
+    _READONLY_COLS  = {0, 1, 2, 5, 6, 7, 12, 13, 14}
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -82,6 +81,12 @@ class SOTab(QWidget):
         for b in (btn_upload, btn_template, btn_export, btn_rollback):
             fbar.addWidget(b)
 
+        btn_bulk_alloc = QPushButton("📦 Bulk Allocate")
+        btn_bulk_alloc.setStyleSheet(
+            "background:#1976d2; color:white; font-weight:bold; padding:5px 12px;")
+        btn_bulk_alloc.clicked.connect(self._open_bulk_allocation)
+        fbar.addWidget(btn_bulk_alloc)
+
         self._btn_edit = QPushButton("✏ Edit Mode")
         self._btn_edit.clicked.connect(self._toggle_edit_mode)
         self._btn_save = QPushButton("💾 Save Changes")
@@ -111,7 +116,7 @@ class SOTab(QWidget):
         self.table.itemChanged.connect(self._on_cell_changed)
 
         cols = ["SO Number", "SKU Code", "Line", "Customer", "Qty", "Planned Qty",
-                "Actual Qty", "Due Date (Req)", "Committed Due", "Priority", "Status",
+                "Actual Qty", "📦 Inventory", "Due Date (Req)", "Committed Due", "Priority", "Status",
                 "Prod. Completion", "Release Date", "Received At", "Note", "Start No Earlier"]
         self.table.setColumnCount(len(cols))
         self.table.setHorizontalHeaderLabels(cols)
@@ -153,6 +158,9 @@ class SOTab(QWidget):
         self.table.setRowCount(len(sos))
         today = date.today()
 
+        # Batch allocation query — avoids N+1
+        alloc_map = AllocationRepo.allocation_summary_for_open_sos()
+
         for ri, so in enumerate(sos):
             planned = PlanRepo.planned_qty(so["so_number"], so["sku_code"], so["line_item"])
             actual  = ActualRepo.actual_qty(so["so_number"], so["sku_code"], so["line_item"])
@@ -174,10 +182,25 @@ class SOTab(QWidget):
             else:
                 rel_date = "-"
 
+            # Inventory allocation summary (col 7)
+            key = (so["so_number"], so["sku_code"], so["line_item"])
+            allocated = alloc_map.get(key, 0)
+            so_qty    = so["qty"]
+            if allocated == 0:
+                inv_text = "—"
+                inv_bg   = None
+            elif allocated >= so_qty:
+                inv_text = "✅ FULL"
+                inv_bg   = QColor("#e8f5e9")
+            else:
+                inv_text = f"{allocated}/{so_qty}"
+                inv_bg   = QColor("#fff3e0")
+
             values = [
                 so["so_number"], so["sku_code"], so["line_item"],
                 so.get("customer_name") or "",
                 so["qty"], planned, actual,
+                inv_text,                                          # col 7 Inventory
                 so["due_date"],
                 so.get("committed_due_date") or "",
                 so["priority"] if so["priority"] is not None else "",
@@ -203,6 +226,9 @@ class SOTab(QWidget):
             bg = LATE_COLOR if is_late else STATUS_COLORS.get(so["status"], QColor("white"))
             for ci in range(self.table.columnCount()):
                 self.table.item(ri, ci).setBackground(QBrush(bg))
+            # Inventory cell gets its own colour on top of row colour
+            if inv_bg and not is_late:
+                self.table.item(ri, 7).setBackground(QBrush(inv_bg))
 
         self.table.setSortingEnabled(True)
         self._loading = False
@@ -224,7 +250,7 @@ class SOTab(QWidget):
         so_no  = self.table.item(row, 0).text()
         sku    = self.table.item(row, 1).text()
         li     = self.table.item(row, 2).text()
-        status = self.table.item(row, 9).text()  # col 9 = Status
+        status = self.table.item(row, 11).text()  # col 11 = Status
 
         menu = QMenu(self)
         menu.addAction("✏ Edit",    lambda: self._edit_row())
@@ -237,6 +263,8 @@ class SOTab(QWidget):
         menu.addAction("🚫 Close",  lambda: self._close_so(so_no, sku, li))
         menu.addAction("⭐ Set Priority", lambda: self._set_priority(so_no, sku, li))
         menu.addAction("📅 Set Start-No-Earlier", lambda: self._set_start_date(so_no, sku, li))
+        menu.addSeparator()
+        menu.addAction("📦 Allocate Inventory", lambda: self._open_inv_allocation(so_no, sku, li))
         menu.exec(QCursor.pos())
 
     def _edit_row(self):
@@ -304,12 +332,12 @@ class SOTab(QWidget):
                     continue
                 customer          = self.table.item(ri, 3).text().strip() or None
                 qty_text          = self.table.item(ri, 4).text().strip()
-                due_date          = self.table.item(ri, 7).text().strip()
-                committed_due     = self.table.item(ri, 8).text().strip() or None
-                pri_text          = self.table.item(ri, 9).text().strip()
-                status            = self.table.item(ri, 10).text().strip().upper()
-                note              = self.table.item(ri, 14).text().strip() or None
-                start_no_earlier  = self.table.item(ri, 15).text().strip() or None
+                due_date          = self.table.item(ri, 8).text().strip()
+                committed_due     = self.table.item(ri, 9).text().strip() or None
+                pri_text          = self.table.item(ri, 10).text().strip()
+                status            = self.table.item(ri, 11).text().strip().upper()
+                note              = self.table.item(ri, 15).text().strip() or None
+                start_no_earlier  = self.table.item(ri, 16).text().strip() or None
 
                 qty = int(qty_text) if qty_text else orig["qty"]
                 if qty <= 0:
@@ -394,6 +422,18 @@ class SOTab(QWidget):
         if ok:
             SORepo.upsert({**so, "start_no_earlier": val or None})
             self.refresh()
+
+    def _open_inv_allocation(self, so_no, sku, li):
+        dlg = SOInventoryAllocationDialog(so_no, sku, li, self)
+        if dlg.exec():
+            self.refresh()
+            if self.main_window:
+                self.main_window.notify(f"Inventory allocated: {so_no}/{sku}/{li}")
+
+    def _open_bulk_allocation(self):
+        dlg = BulkAllocationDialog(self)
+        dlg.exec()
+        self.refresh()
 
     def _upload(self):
         path, _ = QFileDialog.getOpenFileName(self, "Upload SO Excel", "", "Excel (*.xlsx *.xls)")
@@ -903,3 +943,384 @@ class SplitSODialog(QDialog):
 
         self.split_results = rows
         self.accept()
+
+
+# ── Single-SO Inventory Allocation Dialog (Version B: inline) ─────────────────
+
+class SOInventoryAllocationDialog(QDialog):
+    """Inline FEFO allocation for a single SO line item."""
+
+    def __init__(self, so_number: str, sku_code: str, line_item: str, parent=None):
+        super().__init__(parent)
+        self.so_number = so_number
+        self.sku_code  = sku_code
+        self.line_item = line_item
+        so = SORepo.get(so_number, sku_code, line_item)
+        self.so_qty     = so["qty"] if so else 0
+        self.due_date   = so["due_date"] if so else ""
+        self.setWindowTitle(f"📦 Allocate Inventory — {so_number} / {sku_code} / {line_item}")
+        self.setMinimumSize(780, 480)
+        self._spinboxes: list = []   # (inv_id, lot_number, QSpinBox, qty_remaining)
+        self._build_ui()
+        self._load_lots()
+
+    # ── UI ────────────────────────────────────────────────────────────────────
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        # SO info bar
+        so    = SORepo.get(self.so_number, self.sku_code, self.line_item)
+        already = AllocationRepo.total_allocated(self.so_number, self.sku_code, self.line_item)
+        needed  = max(0, self.so_qty - already)
+        info = QLabel(
+            f"SO: {self.so_number}  |  SKU: {self.sku_code}  |  Line: {self.line_item}  |  "
+            f"SO Qty: {self.so_qty}  |  Already Allocated: {already}  |  "
+            f"Production Needed: {AllocationRepo.production_needed(self.so_number, self.sku_code, self.line_item)}"
+        )
+        info.setStyleSheet(
+            "font-weight:bold; padding:8px 10px; background:#e8f0fe; "
+            "border-radius:4px; font-size:12px;")
+        layout.addWidget(info)
+
+        # Progress bar row
+        prog_row = QHBoxLayout()
+        prog_row.addWidget(QLabel("Allocation:"))
+        self._prog_bar = QLabel()
+        self._prog_bar.setFixedHeight(18)
+        self._prog_bar.setMinimumWidth(300)
+        self._prog_bar.setStyleSheet(
+            "background:#e3e9f5; border-radius:9px; padding:1px 6px; font-size:11px;")
+        prog_row.addWidget(self._prog_bar)
+        self._prog_label = QLabel()
+        self._prog_label.setMinimumWidth(160)
+        prog_row.addWidget(self._prog_label)
+        prog_row.addStretch()
+        layout.addLayout(prog_row)
+
+        # Lot table — cols: LOT | Expiry | Lot Remaining | Allocate Qty
+        hdr_row = QHBoxLayout()
+        hdr_row.addWidget(QLabel("Available Lots (FEFO sorted):"))
+        hdr_row.addStretch()
+        btn_fefo = QPushButton("🤖 Auto FEFO")
+        btn_fefo.clicked.connect(self._apply_fefo)
+        btn_clear = QPushButton("Clear All")
+        btn_clear.clicked.connect(self._clear_all)
+        hdr_row.addWidget(btn_fefo)
+        hdr_row.addWidget(btn_clear)
+        layout.addLayout(hdr_row)
+
+        self._lot_table = QTableWidget()
+        self._lot_table.setColumnCount(4)
+        self._lot_table.setHorizontalHeaderLabels(
+            ["LOT Number", "Expiry Date", "Lot Remaining", "Allocate Qty"])
+        hdr = self._lot_table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self._lot_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        layout.addWidget(self._lot_table, stretch=1)
+
+        # Summary + expiry warning
+        self._summary_label = QLabel()
+        self._summary_label.setStyleSheet("font-size:12px; padding:4px;")
+        layout.addWidget(self._summary_label)
+
+        self._warn_label = QLabel()
+        self._warn_label.setStyleSheet(
+            "background:#fff3e0; color:#b45309; border:1px solid #ffcc80; "
+            "border-radius:4px; padding:6px 10px; font-size:11px;")
+        self._warn_label.setWordWrap(True)
+        self._warn_label.hide()
+        layout.addWidget(self._warn_label)
+
+        # Footer buttons
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel)
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("✅ Confirm Allocation")
+        btns.button(QDialogButtonBox.StandardButton.Ok).setStyleSheet(
+            "background:#2e7d32; color:white; font-weight:bold; padding:6px 18px;")
+        btns.accepted.connect(self._confirm)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    # ── Data ─────────────────────────────────────────────────────────────────
+
+    def _load_lots(self):
+        lots = InventoryRepo.available_for_sku(self.sku_code)
+        self._spinboxes.clear()
+        self._lot_table.setRowCount(len(lots))
+        for ri, lot in enumerate(lots):
+            exp    = lot.get("expiry_date") or "—"
+            rem    = lot["qty_remaining"]
+            warn   = (exp != "—" and self.due_date and exp < self.due_date)
+
+            lot_item = QTableWidgetItem(lot["lot_number"])
+            exp_item = QTableWidgetItem(exp)
+            rem_item = QTableWidgetItem(str(rem))
+            for item in (lot_item, exp_item, rem_item):
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            if warn:
+                exp_item.setForeground(QBrush(QColor("#e65100")))
+                exp_item.setText(f"{exp} ⚠")
+
+            spin = QSpinBox()
+            spin.setRange(0, rem)
+            spin.setValue(0)
+            spin.valueChanged.connect(self._update_summary)
+
+            self._lot_table.setItem(ri, 0, lot_item)
+            self._lot_table.setItem(ri, 1, exp_item)
+            self._lot_table.setItem(ri, 2, rem_item)
+            self._lot_table.setCellWidget(ri, 3, spin)
+            self._spinboxes.append((lot["inv_id"], lot["lot_number"], spin, rem, warn))
+
+        self._update_summary()
+
+    def _apply_fefo(self):
+        needed = self.so_qty
+        for inv_id, lot_no, spin, rem, warn in self._spinboxes:
+            if needed <= 0:
+                spin.setValue(0)
+            else:
+                take = min(rem, needed)
+                spin.setValue(take)
+                needed -= take
+        self._update_summary()
+
+    def _clear_all(self):
+        for _, _, spin, _, _ in self._spinboxes:
+            spin.setValue(0)
+        self._update_summary()
+
+    def _update_summary(self):
+        total = sum(spin.value() for _, _, spin, _, _ in self._spinboxes)
+        pct   = int(total / self.so_qty * 100) if self.so_qty else 0
+        remaining = self.so_qty - total
+
+        self._prog_label.setText(
+            f"{total} / {self.so_qty} ({pct}%)  —  still to produce: {max(0, remaining)}")
+        color = "#2e7d32" if total >= self.so_qty else ("#e65100" if total > 0 else "#64748b")
+        self._prog_label.setStyleSheet(f"font-weight:bold; color:{color};")
+
+        # Expiry warnings
+        warnings = []
+        for _, lot_no, spin, _, warn in self._spinboxes:
+            if spin.value() > 0 and warn:
+                warnings.append(f"⚠ {lot_no} expires before due date")
+        if warnings:
+            self._warn_label.setText("  ".join(warnings))
+            self._warn_label.show()
+        else:
+            self._warn_label.hide()
+
+        self._summary_label.setText(
+            f"Total to allocate: {total} / {self.so_qty}  "
+            + ("✅ Fully covered" if total >= self.so_qty
+               else f"⚠ {remaining} units still need production"))
+
+    # ── Confirm ──────────────────────────────────────────────────────────────
+
+    def _confirm(self):
+        entries = [(inv_id, lot_no, spin.value())
+                   for inv_id, lot_no, spin, _, _ in self._spinboxes
+                   if spin.value() > 0]
+        if not entries:
+            QMessageBox.warning(self, "No Allocation", "Set at least one lot quantity.")
+            return
+        # Clear existing allocations then write new ones
+        AllocationRepo.deallocate_all_for_so(self.so_number, self.sku_code, self.line_item)
+        suggestion = [{"inv_id": inv_id, "lot_number": lot_no, "qty_to_allocate": qty}
+                      for inv_id, lot_no, qty in entries]
+        AllocationRepo.confirm_fefo_suggestion(
+            self.so_number, self.sku_code, self.line_item, suggestion)
+        self.accept()
+
+
+# ── Bulk Allocation Dialog (Version C) ────────────────────────────────────────
+
+class BulkAllocationDialog(QDialog):
+    """FEFO × Priority auto-allocation for all OPEN SOs."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("📦 Bulk Inventory Allocation — All Open SOs")
+        self.setMinimumSize(900, 560)
+        self._result: dict = {}
+        self._build_ui()
+        self._load_preview()
+
+    # ── UI ────────────────────────────────────────────────────────────────────
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        # KPI bar
+        kpi_bar = QHBoxLayout()
+        self._kpi_open    = self._make_kpi("Open SOs",     "blue")
+        self._kpi_full    = self._make_kpi("✅ Full",       "green")
+        self._kpi_partial = self._make_kpi("⚠ Partial",    "orange")
+        self._kpi_none    = self._make_kpi("❌ No Inv.",    "red")
+        self._kpi_inv     = self._make_kpi("Inv. Available","gray")
+        for w in (self._kpi_open, self._kpi_full, self._kpi_partial,
+                  self._kpi_none, self._kpi_inv):
+            kpi_bar.addWidget(w)
+        kpi_bar.addStretch()
+
+        btn_auto = QPushButton("🚀 Auto-Allocate All  (FEFO × Priority)")
+        btn_auto.setStyleSheet(
+            "background:#e65100; color:white; font-weight:bold; "
+            "padding:9px 20px; font-size:13px;")
+        btn_auto.clicked.connect(self._auto_allocate)
+        btn_reset = QPushButton("↺ Reset All")
+        btn_reset.clicked.connect(self._reset)
+        kpi_bar.addWidget(btn_auto)
+        kpi_bar.addWidget(btn_reset)
+        layout.addLayout(kpi_bar)
+
+        # SO table
+        self._table = QTableWidget()
+        self._table.setColumnCount(7)
+        self._table.setHorizontalHeaderLabels(
+            ["Pri", "SO Number", "SKU / Line", "Customer", "SO Qty", "Allocated", "Status"])
+        hdr = self._table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setAlternatingRowColors(True)
+        layout.addWidget(self._table, stretch=1)
+
+        # Result banner (hidden until auto-allocate runs)
+        self._result_label = QLabel()
+        self._result_label.setWordWrap(True)
+        self._result_label.setStyleSheet(
+            "background:#e8f5e9; color:#1b5e20; border:1px solid #a5d6a7; "
+            "border-radius:4px; padding:8px 12px; font-size:12px;")
+        self._result_label.hide()
+        layout.addWidget(self._result_label)
+
+        # Footer
+        btns = QHBoxLayout()
+        btn_close = QPushButton("Close")
+        btn_close.clicked.connect(self.accept)
+        btns.addStretch()
+        btns.addWidget(btn_close)
+        layout.addLayout(btns)
+
+    def _make_kpi(self, label: str, color: str) -> QGroupBox:
+        colors = {"blue": "#1976d2", "green": "#2e7d32",
+                  "orange": "#e65100", "red": "#c62828", "gray": "#64748b"}
+        grp = QGroupBox()
+        grp.setFixedWidth(110)
+        v = QVBoxLayout(grp)
+        v.setContentsMargins(6, 4, 6, 4)
+        val_lbl = QLabel("—")
+        val_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        val_lbl.setStyleSheet(
+            f"font-size:22px; font-weight:800; color:{colors.get(color,'#333')};")
+        sub_lbl = QLabel(label)
+        sub_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sub_lbl.setStyleSheet("font-size:10px; color:#64748b;")
+        v.addWidget(val_lbl)
+        v.addWidget(sub_lbl)
+        grp.val_lbl = val_lbl
+        return grp
+
+    # ── Data ─────────────────────────────────────────────────────────────────
+
+    def _load_preview(self):
+        sos = SORepo.all("OPEN")
+        sos.sort(key=lambda s: (
+            s["priority"] if s["priority"] is not None else 9999,
+            s["due_date"] or ""))
+        alloc_map = AllocationRepo.allocation_summary_for_open_sos()
+
+        n_full = n_partial = n_none = 0
+        inv_total = sum(
+            InventoryRepo.total_available(s["sku_code"]) for s in sos) if sos else 0
+
+        self._table.setRowCount(len(sos))
+        for ri, so in enumerate(sos):
+            key       = (so["so_number"], so["sku_code"], so["line_item"])
+            allocated = alloc_map.get(key, 0)
+            so_qty    = so["qty"]
+
+            if allocated >= so_qty:
+                status_txt = "✅ Full"; bg = QColor("#e8f5e9"); n_full += 1
+            elif allocated > 0:
+                status_txt = "⚠ Partial"; bg = QColor("#fff8e1"); n_partial += 1
+            else:
+                avail = InventoryRepo.total_available(so["sku_code"])
+                status_txt = "❌ No Inventory" if avail == 0 else "— Not Allocated"
+                bg = QColor("#ffebee") if avail == 0 else QColor("#ffffff")
+                n_none += 1
+
+            row_vals = [
+                str(so["priority"] or "—"),
+                so["so_number"],
+                f"{so['sku_code']} / {so['line_item']}",
+                so.get("customer_name") or "",
+                str(so_qty),
+                str(allocated),
+                status_txt,
+            ]
+            for ci, val in enumerate(row_vals):
+                item = QTableWidgetItem(val)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                item.setBackground(QBrush(bg))
+                self._table.setItem(ri, ci, item)
+
+        # KPI update
+        self._kpi_open.val_lbl.setText(str(len(sos)))
+        self._kpi_full.val_lbl.setText(str(n_full))
+        self._kpi_partial.val_lbl.setText(str(n_partial))
+        self._kpi_none.val_lbl.setText(str(n_none))
+        self._kpi_inv.val_lbl.setText(str(inv_total))
+
+    def _auto_allocate(self):
+        reply = QMessageBox.question(
+            self, "Auto-Allocate All",
+            "Run FEFO × Priority auto-allocation for all OPEN SOs?\n\n"
+            "Existing unconfirmed allocations will be overwritten.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        result = AllocationRepo.bulk_auto_allocate()
+        self._result = result
+
+        n_alloc  = len(result["allocated"])
+        n_skip   = len(result["skipped"])
+        qty_total = sum(r["qty_covered"] for r in result["allocated"])
+
+        msg = f"✅ Auto-allocation complete: {n_alloc} SOs covered ({qty_total} units)."
+        if n_skip:
+            skipped_sos = ", ".join(r["so_number"] for r in result["skipped"][:5])
+            msg += f"\n⚠ {n_skip} SO(s) skipped (no inventory): {skipped_sos}"
+            if n_skip > 5:
+                msg += " …"
+        self._result_label.setText(msg)
+        self._result_label.show()
+
+        self._load_preview()
+
+    def _reset(self):
+        if QMessageBox.question(
+                self, "Reset All Allocations",
+                "Remove ALL inventory allocations for OPEN SOs?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        sos = SORepo.all("OPEN")
+        for so in sos:
+            AllocationRepo.deallocate_all_for_so(
+                so["so_number"], so["sku_code"], so["line_item"])
+        self._result_label.hide()
+        self._load_preview()
