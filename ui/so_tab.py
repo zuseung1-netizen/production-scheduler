@@ -39,8 +39,8 @@ class SOTab(QWidget):
     # columns editable in edit mode
     # 0=SO, 1=SKU, 2=Line, 3=Customer, 4=Qty, 5=PlannedQty, 6=ActualQty,
     # 7=Due(Req), 8=CommittedDue, 9=Priority, 10=Status,
-    # 11=ProdCompletion, 12=Release, 13=ReceivedAt, 14=Note
-    _EDITABLE_COLS  = {3, 4, 7, 8, 9, 10, 14}
+    # 11=ProdCompletion, 12=Release, 13=ReceivedAt, 14=Note, 15=StartNoEarlier
+    _EDITABLE_COLS  = {3, 4, 7, 8, 9, 10, 14, 15}
     _READONLY_COLS  = {0, 1, 2, 5, 6, 11, 12, 13}
 
     def __init__(self, parent=None):
@@ -112,7 +112,7 @@ class SOTab(QWidget):
 
         cols = ["SO Number", "SKU Code", "Line", "Customer", "Qty", "Planned Qty",
                 "Actual Qty", "Due Date (Req)", "Committed Due", "Priority", "Status",
-                "Prod. Completion", "Release Date", "Received At", "Note"]
+                "Prod. Completion", "Release Date", "Received At", "Note", "Start No Earlier"]
         self.table.setColumnCount(len(cols))
         self.table.setHorizontalHeaderLabels(cols)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
@@ -185,6 +185,7 @@ class SOTab(QWidget):
                 prod_complete, rel_date,
                 so["received_at"][:10] if so["received_at"] else "",
                 so["note"] or "",
+                so.get("start_no_earlier") or "",
             ]
             for ci, val in enumerate(values):
                 item = QTableWidgetItem(str(val))
@@ -301,13 +302,14 @@ class SOTab(QWidget):
                 orig = self.table.item(ri, 0).data(Qt.ItemDataRole.UserRole)
                 if not orig:
                     continue
-                customer       = self.table.item(ri, 3).text().strip() or None
-                qty_text       = self.table.item(ri, 4).text().strip()
-                due_date       = self.table.item(ri, 7).text().strip()
-                committed_due  = self.table.item(ri, 8).text().strip() or None
-                pri_text       = self.table.item(ri, 9).text().strip()
-                status         = self.table.item(ri, 10).text().strip().upper()
-                note           = self.table.item(ri, 14).text().strip() or None
+                customer          = self.table.item(ri, 3).text().strip() or None
+                qty_text          = self.table.item(ri, 4).text().strip()
+                due_date          = self.table.item(ri, 7).text().strip()
+                committed_due     = self.table.item(ri, 8).text().strip() or None
+                pri_text          = self.table.item(ri, 9).text().strip()
+                status            = self.table.item(ri, 10).text().strip().upper()
+                note              = self.table.item(ri, 14).text().strip() or None
+                start_no_earlier  = self.table.item(ri, 15).text().strip() or None
 
                 qty = int(qty_text) if qty_text else orig["qty"]
                 if qty <= 0:
@@ -327,6 +329,12 @@ class SOTab(QWidget):
                     except ValueError:
                         errors.append(f"Row {ri+1}: Committed Due format must be YYYY-MM-DD")
                         continue
+                if start_no_earlier:
+                    try:
+                        datetime.strptime(start_no_earlier, "%Y-%m-%d")
+                    except ValueError:
+                        errors.append(f"Row {ri+1}: Start No Earlier format must be YYYY-MM-DD")
+                        continue
                 try:
                     pri = int(pri_text) if pri_text else None
                     if pri is not None and pri <= 0:
@@ -343,6 +351,7 @@ class SOTab(QWidget):
                     "priority":           pri,
                     "status":             status,
                     "note":               note,
+                    "start_no_earlier":   start_no_earlier,
                 })
                 SORepo.upsert(updated)
                 saved += 1
