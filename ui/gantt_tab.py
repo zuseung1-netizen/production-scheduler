@@ -1555,6 +1555,10 @@ class GanttCanvas(QWidget):
                 else:
                     center = self._drag_rect.center()
                     col    = center.x() // self._col_w()
+                    # Use actual cursor position for row (room) determination,
+                    # not drag-rect center — avoids room-drift when clicked
+                    # near top/bottom edge of a plan card.
+                    cursor_y = int(event.pos().y())
                     if 0 <= col < self._col_count():
                         new_date, new_shift = self._col_to_date_shift(col)
                         plan = next((p for p in self._plans
@@ -1562,7 +1566,7 @@ class GanttCanvas(QWidget):
                         if plan and not plan["is_locked"]:
                             new_room = plan["room_code"]
                             if "Room" in self.y_dims:
-                                row = self._row_at_y(center.y())
+                                row = self._row_at_y(cursor_y)
                                 if 0 <= row < len(self._rows):
                                     rk = self._rows[row]
                                     room_idx = self.y_dims.index("Room")
