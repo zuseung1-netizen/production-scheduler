@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem, QPushButton, QLabel, QComboBox, QLineEdit,
     QSpinBox, QDoubleSpinBox, QFileDialog, QMessageBox,
     QDialog, QDialogButtonBox, QFormLayout, QAbstractItemView,
-    QHeaderView, QMenu, QCheckBox
+    QHeaderView, QMenu, QCheckBox, QGroupBox
 )
 from datetime import datetime, timedelta
 
@@ -16,7 +16,8 @@ from PyQt6.QtCore import Qt, QDate
 from PyQt6.QtWidgets import QDateEdit
 from PyQt6.QtGui import QCursor, QBrush, QColor
 
-from data.repositories import SKURepo, RoomRepo, ShiftRepo, ConfigRepo, SKUProcessRepo, CalendarRepo
+from data.repositories import SKURepo, RoomRepo, ShiftRepo, ConfigRepo, SKUProcessRepo, CalendarRepo, CompanyHolidayRepo
+from utils.korean_holidays import is_holiday, holiday_name
 from utils.excel_io import (
     upload_sku, download_sku_template,
     upload_room, download_room_template,
@@ -33,7 +34,6 @@ class MasterTab(QWidget):
         tabs.addTab(ProcessRoutingWidget(self), "Process Routing")
         tabs.addTab(RoomMasterWidget(self), "Room / Process")
         tabs.addTab(ShiftConfigWidget(self), "Shift Config")
-        tabs.addTab(CalendarWidget(self), "Calendar")
         tabs.addTab(AppConfigWidget(self), "App Config")
         lay = QVBoxLayout(self)
         lay.addWidget(tabs)
@@ -47,7 +47,7 @@ class MasterTab(QWidget):
 class ItemMasterWidget(QWidget):
     """Single tab for both SKU and Material masters."""
 
-    COLS    = ["Type", "Code", "Name", "UoM", "Post Lead Days", "Note"]
+    COLS    = ["Type", "Code", "Name", "UoM", "Post Lead Days", "Campaign", "Note"]
     _SKU_BG  = QColor("#ddeeff")
     _MAT_BG  = QColor("#ddf0dd")
     _MISS_BG = QColor("#ffe0b2")
@@ -127,12 +127,16 @@ class ItemMasterWidget(QWidget):
             for s in SKURepo.all():
                 rows.append({"type": "SKU", "code": s["sku_code"],
                               "name": s["sku_name"], "uom": s["uom"],
-                              "lead": s["post_lead_days"], "note": s["note"] or ""})
+                              "lead": s["post_lead_days"],
+                              "campaign": int(s.get("campaign_mode", 1)),
+                              "note": s["note"] or ""})
         if t in ("ALL", "MATERIAL"):
             for m in MaterialRepo.all():
                 rows.append({"type": "MATERIAL", "code": m["material_code"],
                               "name": m["material_name"], "uom": m["uom"],
-                              "lead": m["post_lead_days"], "note": m["note"] or ""})
+                              "lead": m["post_lead_days"],
+                              "campaign": "",   # N/A for Material
+                              "note": m["note"] or ""})
         if f:
             rows = [r for r in rows
                     if f in r["code"].lower() or f in r["name"].lower()]
@@ -144,11 +148,13 @@ class ItemMasterWidget(QWidget):
                 self._MISS_BG if r["code"] in missing else self._MAT_BG)
             for ci, val in enumerate([
                 r["type"], r["code"], r["name"],
-                str(r["uom"]), str(r["lead"]), r["note"]
+                str(r["uom"]), str(r["lead"]),
+                ("✅" if r.get("campaign") == 1 else ("❌" if r.get("campaign") == 0 else "")),
+                r["note"]
             ]):
                 item = QTableWidgetItem(str(val))
                 item.setBackground(QBrush(bg))
-                if ci in (0, 1):  # Type / Code are PK — read-only
+                if ci in (0, 1, 5):  # Type / Code / Campaign are read-only (toggle via dialog)
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.table.setItem(ri, ci, item)
 
@@ -243,10 +249,15 @@ class ItemMasterWidget(QWidget):
                 name = self.table.item(ri, 2).text().strip()
                 uom  = int(self.table.item(ri, 3).text())
                 lead = int(self.table.item(ri, 4).text())
-                note = self.table.item(ri, 5).text() or None
+                # col 5 = Campaign (read-only display, not editable inline)
+                note = self.table.item(ri, 6).text() or None
                 if item_type == "SKU":
+                    # preserve existing campaign_mode — inline save doesn't change it
+                    existing = SKURepo.get(code) or {}
                     SKURepo.upsert({"sku_code": code, "sku_name": name,
-                                    "uom": uom, "post_lead_days": lead, "note": note})
+                                    "uom": uom, "post_lead_days": lead,
+                                    "campaign_mode": existing.get("campaign_mode", 1),
+                                    "note": note})
                 else:
                     MaterialRepo.upsert({"material_code": code, "material_name": name,
                                          "uom": uom, "post_lead_days": lead, "note": note})
@@ -317,18 +328,26 @@ class SKUEditDialog(QDialog):
         layout = QVBoxLayout(self)
         form   = QFormLayout()
 
-        self.code = QLineEdit(data.get("sku_code", ""))
-        self.name = QLineEdit(data.get("sku_name", ""))
-        self.uom  = QSpinBox(); self.uom.setRange(1, 9999); self.uom.setValue(data.get("uom", 1))
-        self.lead = QSpinBox(); self.lead.setRange(0, 365); self.lead.setValue(data.get("post_lead_days", 0))
-        self.note = QLineEdit(data.get("note") or "")
+        self.code     = QLineEdit(data.get("sku_code", ""))
+        self.name     = QLineEdit(data.get("sku_name", ""))
+        self.uom      = QSpinBox(); self.uom.setRange(1, 9999); self.uom.setValue(data.get("uom", 1))
+        self.lead     = QSpinBox(); self.lead.setRange(0, 365); self.lead.setValue(data.get("post_lead_days", 0))
+        self.campaign = QCheckBox("Enable campaign consolidation")
+        self.campaign.setChecked(bool(int(data.get("campaign_mode", 1))))
+        self.note     = QLineEdit(data.get("note") or "")
 
         form.addRow("SKU Code:",       self.code)
         form.addRow("SKU Name:",       self.name)
         form.addRow("UoM (qty/EA):",   self.uom)
         form.addRow("Post Lead Days:", self.lead)
+        form.addRow("Campaign Mode:",  self.campaign)
         form.addRow("Note:",           self.note)
         layout.addLayout(form)
+
+        note_lbl = QLabel("Campaign mode consolidates same-SKU orders within max_consolidation_days.\nDisable for SKUs where early production risks expiry.")
+        note_lbl.setStyleSheet("color:#6b7280;font-size:10px;")
+        note_lbl.setWordWrap(True)
+        layout.addWidget(note_lbl)
 
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(self._ok); btns.rejected.connect(self.reject)
@@ -336,11 +355,12 @@ class SKUEditDialog(QDialog):
 
     def _ok(self):
         self.result = {
-            "sku_code": self.code.text().strip(),
-            "sku_name": self.name.text().strip(),
-            "uom":      self.uom.value(),
+            "sku_code":       self.code.text().strip(),
+            "sku_name":       self.name.text().strip(),
+            "uom":            self.uom.value(),
             "post_lead_days": self.lead.value(),
-            "note":     self.note.text() or None,
+            "campaign_mode":  1 if self.campaign.isChecked() else 0,
+            "note":           self.note.text() or None,
         }
         if not self.result["sku_code"]:
             QMessageBox.warning(self, "Error", "SKU Code required"); return
@@ -351,11 +371,12 @@ class SKUEditDialog(QDialog):
 
 class RoomMasterWidget(QWidget):
     COLS = ["Room Code", "Process Name", "Type", "UPPH", "UPH Fixed",
-            "HC Min", "HC Max", "HC Fixed", "Note"]
+            "HC Min", "HC Max", "HC Fixed", "Changeover (shifts)", "Note"]
     _READONLY_COLS = {0, 1}  # Room Code, Process Name are PK
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._master_tab = parent  # MasterTab reference for gantt refresh
         self._edit_mode = False
         self._changed_cells: set = set()
         self._loading = False
@@ -396,6 +417,7 @@ class RoomMasterWidget(QWidget):
                 r["room_code"], r["process_name"], r["process_type"],
                 r["upph"] or "", r["uph_fixed"] or "",
                 r["hc_min"] or "", r["hc_max"] or "", r["hc_fixed"] or "",
+                r.get("changeover_shifts") or 0,
                 r["note"] or ""
             ]):
                 item = QTableWidgetItem(str(val))
@@ -450,7 +472,7 @@ class RoomMasterWidget(QWidget):
             self.table.setEditTriggers(
                 QAbstractItemView.EditTrigger.DoubleClicked |
                 QAbstractItemView.EditTrigger.EditKeyPressed)
-            self._status.setText("✏ 편집 모드 — 셀을 더블클릭하거나 F2로 편집하세요")
+            self._status.setText("✏ Edit mode — double-click or press F2 to edit")
             self._status.setStyleSheet(
                 "color:#7a5800; background:#fff9c4; padding:4px; border-radius:4px;")
         else:
@@ -480,26 +502,28 @@ class RoomMasterWidget(QWidget):
         for ri in sorted(changed_rows):
             try:
                 orig = self.table.item(ri, 0).data(Qt.ItemDataRole.UserRole) or {}
-                room_code    = self.table.item(ri, 0).text().strip()
-                process_name = self.table.item(ri, 1).text().strip()
-                process_type = self.table.item(ri, 2).text().strip() or "MANUAL"
-                upph         = float(self.table.item(ri, 3).text() or 0) or None
-                uph_fixed    = float(self.table.item(ri, 4).text() or 0) or None
-                hc_min       = int(self.table.item(ri, 5).text() or 0) or None
-                hc_max       = int(self.table.item(ri, 6).text() or 0) or None
-                hc_fixed     = int(self.table.item(ri, 7).text() or 0) or None
-                note         = self.table.item(ri, 8).text() or None
+                room_code         = self.table.item(ri, 0).text().strip()
+                process_name      = self.table.item(ri, 1).text().strip()
+                process_type      = self.table.item(ri, 2).text().strip() or "MANUAL"
+                upph              = float(self.table.item(ri, 3).text() or 0) or None
+                uph_fixed         = float(self.table.item(ri, 4).text() or 0) or None
+                hc_min            = int(self.table.item(ri, 5).text() or 0) or None
+                hc_max            = int(self.table.item(ri, 6).text() or 0) or None
+                hc_fixed          = int(self.table.item(ri, 7).text() or 0) or None
+                changeover_shifts = int(self.table.item(ri, 8).text() or 0)
+                note              = self.table.item(ri, 9).text() or None
                 RoomRepo.upsert({
-                    "room_code":    room_code,
-                    "process_name": process_name,
-                    "process_type": process_type,
-                    "room_type":    orig.get("room_type", "TYPE-A"),
-                    "upph":         upph,
-                    "uph_fixed":    uph_fixed,
-                    "hc_min":       hc_min,
-                    "hc_max":       hc_max,
-                    "hc_fixed":     hc_fixed,
-                    "note":         note,
+                    "room_code":          room_code,
+                    "process_name":       process_name,
+                    "process_type":       process_type,
+                    "room_type":          orig.get("room_type", "TYPE-A"),
+                    "upph":               upph,
+                    "uph_fixed":          uph_fixed,
+                    "hc_min":             hc_min,
+                    "hc_max":             hc_max,
+                    "hc_fixed":           hc_fixed,
+                    "changeover_shifts":  changeover_shifts,
+                    "note":               note,
                 })
                 saved += 1
             except Exception as e:
@@ -510,6 +534,9 @@ class RoomMasterWidget(QWidget):
             QMessageBox.warning(self, "Save Errors", "\n".join(errors))
         self._status.setText(f"✅ Saved {saved} row(s)")
         self._status.setStyleSheet("color:green; padding:4px;")
+        mw = self._get_main_window()
+        if mw:
+            mw.gantt_tab.refresh()
 
 
 class RoomEditDialog(QDialog):
@@ -526,12 +553,15 @@ class RoomEditDialog(QDialog):
         if data.get("process_type") == "AUTO": self.ptype.setCurrentIndex(1)
 
         self.rtype = QLineEdit(data.get("room_type", ""))
-        self.upph     = QDoubleSpinBox(); self.upph.setRange(0, 99999); self.upph.setValue(data.get("upph") or 0)
-        self.uph_fix  = QDoubleSpinBox(); self.uph_fix.setRange(0, 99999); self.uph_fix.setValue(data.get("uph_fixed") or 0)
-        self.hc_min   = QSpinBox(); self.hc_min.setRange(0, 999); self.hc_min.setValue(data.get("hc_min") or 0)
-        self.hc_max   = QSpinBox(); self.hc_max.setRange(0, 999); self.hc_max.setValue(data.get("hc_max") or 0)
-        self.hc_fixed = QSpinBox(); self.hc_fixed.setRange(0, 999); self.hc_fixed.setValue(data.get("hc_fixed") or 0)
-        self.note     = QLineEdit(data.get("note") or "")
+        self.upph       = QDoubleSpinBox(); self.upph.setRange(0, 99999); self.upph.setValue(data.get("upph") or 0)
+        self.uph_fix    = QDoubleSpinBox(); self.uph_fix.setRange(0, 99999); self.uph_fix.setValue(data.get("uph_fixed") or 0)
+        self.hc_min     = QSpinBox(); self.hc_min.setRange(0, 999); self.hc_min.setValue(data.get("hc_min") or 0)
+        self.hc_max     = QSpinBox(); self.hc_max.setRange(0, 999); self.hc_max.setValue(data.get("hc_max") or 0)
+        self.hc_fixed   = QSpinBox(); self.hc_fixed.setRange(0, 999); self.hc_fixed.setValue(data.get("hc_fixed") or 0)
+        self.changeover = QSpinBox(); self.changeover.setRange(0, 20)
+        self.changeover.setSuffix(" shift(s)")
+        self.changeover.setValue(int(data.get("changeover_shifts") or 0))
+        self.note       = QLineEdit(data.get("note") or "")
 
         form.addRow("Room Code:",    self.room)
         form.addRow("Process Name:", self.proc)
@@ -542,6 +572,7 @@ class RoomEditDialog(QDialog):
         form.addRow("HC Min:",  self.hc_min)
         form.addRow("HC Max:",  self.hc_max)
         form.addRow("HC Fixed (auto):", self.hc_fixed)
+        form.addRow("Changeover time:", self.changeover)
         form.addRow("Note:",    self.note)
         layout.addLayout(form)
 
@@ -551,16 +582,17 @@ class RoomEditDialog(QDialog):
 
     def _ok(self):
         self.result = {
-            "room_code":    self.room.text().strip(),
-            "process_name": self.proc.text().strip(),
-            "process_type": self.ptype.currentText(),
-            "room_type":    self.rtype.text().strip() or "TYPE-A",
-            "upph":         self.upph.value() or None,
-            "uph_fixed":    self.uph_fix.value() or None,
-            "hc_min":       self.hc_min.value() or None,
-            "hc_max":       self.hc_max.value() or None,
-            "hc_fixed":     self.hc_fixed.value() or None,
-            "note":         self.note.text() or None,
+            "room_code":         self.room.text().strip(),
+            "process_name":      self.proc.text().strip(),
+            "process_type":      self.ptype.currentText(),
+            "room_type":         self.rtype.text().strip() or "TYPE-A",
+            "upph":              self.upph.value() or None,
+            "uph_fixed":         self.uph_fix.value() or None,
+            "hc_min":            self.hc_min.value() or None,
+            "hc_max":            self.hc_max.value() or None,
+            "hc_fixed":          self.hc_fixed.value() or None,
+            "changeover_shifts": self.changeover.value(),
+            "note":              self.note.text() or None,
         }
         if not self.result["room_code"] or not self.result["process_name"]:
             QMessageBox.warning(self, "Error", "Room Code and Process Name required"); return
@@ -575,6 +607,7 @@ class ShiftConfigWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._master_tab = parent
         self._edit_mode = False
         self._changed_cells: set = set()
         self._loading = False
@@ -638,7 +671,7 @@ class ShiftConfigWidget(QWidget):
             self.table.setEditTriggers(
                 QAbstractItemView.EditTrigger.DoubleClicked |
                 QAbstractItemView.EditTrigger.EditKeyPressed)
-            self._status.setText("✏ 편집 모드 — 셀을 더블클릭하거나 F2로 편집하세요")
+            self._status.setText("✏ Edit mode — double-click or press F2 to edit")
             self._status.setStyleSheet(
                 "color:#7a5800; background:#fff9c4; padding:4px; border-radius:4px;")
         else:
@@ -686,6 +719,9 @@ class ShiftConfigWidget(QWidget):
             QMessageBox.warning(self, "Save Errors", "\n".join(errors))
         self._status.setText(f"✅ Saved {saved} row(s)")
         self._status.setStyleSheet("color:green; padding:4px;")
+        mw = self._get_main_window()
+        if mw:
+            mw.gantt_tab.refresh()
 
 
 class ShiftEditDialog(QDialog):
@@ -723,9 +759,10 @@ class ShiftEditDialog(QDialog):
 class CalendarWidget(QWidget):
     """날짜 × 생산실 × Shift 가동 여부 설정 그리드."""
 
-    BG_OPEN   = QColor("#c8e6c9")
-    BG_CLOSED = QColor("#ffcdd2")
-    BG_HOLD   = QColor("#ffe0b2")
+    BG_OPEN    = QColor("#c8e6c9")
+    BG_CLOSED  = QColor("#ffcdd2")
+    BG_HOLD    = QColor("#ffe0b2")
+    BG_PARTIAL = QColor("#fff9c4")   # yellow tint for partial hold
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -733,6 +770,14 @@ class CalendarWidget(QWidget):
         self._room_shifts: list = []   # [(room_code, shift_no), ...]
         self._loading = False
         self._build_ui()
+
+    def _get_main_window(self):
+        w = self.parent()
+        while w is not None:
+            if hasattr(w, "gantt_tab"):
+                return w
+            w = w.parent()
+        return None
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -766,8 +811,8 @@ class CalendarWidget(QWidget):
         layout.addLayout(ctrl)
 
         legend = QLabel(
-            "● Green = Open   ● Red = Closed   ● Orange = Hold  "
-            "| Click cell to toggle Open/Closed | Right-click for Hold")
+            "● Green = Open   ● Red = Closed   ● Orange = Hold   ● Yellow = Partial (deduct min)  "
+            "| Click to toggle Open/Closed | Right-click for Hold / Deduct Minutes")
         legend.setStyleSheet("font-size:10px; color:#555; padding:2px 0;")
         layout.addWidget(legend)
 
@@ -804,6 +849,22 @@ class CalendarWidget(QWidget):
         self.table.setHorizontalHeaderLabels(headers)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        # Mark holiday columns in header (public + company)
+        company_hdays = CompanyHolidayRepo.date_set()
+        for di, d in enumerate(self._dates):
+            d_obj = datetime.strptime(d, "%Y-%m-%d").date()
+            pub_name = holiday_name(d_obj)
+            comp_name = ""
+            if d in company_hdays:
+                row = next((r for r in CompanyHolidayRepo.all() if r["cal_date"] == d), None)
+                comp_name = row["name"] if row else "Company Holiday"
+            if pub_name or comp_name:
+                hdr_item = self.table.horizontalHeaderItem(2 + di)
+                if hdr_item:
+                    hdr_item.setBackground(QBrush(QColor("#ffcdd2")))
+                    hdr_item.setForeground(QBrush(QColor("#c62828")))
+                    tip = " / ".join(filter(None, [pub_name, comp_name]))
+                    hdr_item.setToolTip(tip)
 
         for ri, (room, sno) in enumerate(self._room_shifts):
             self.table.setItem(ri, 0, QTableWidgetItem(room))
@@ -814,14 +875,17 @@ class CalendarWidget(QWidget):
         self._loading = False
 
     def _paint_cell(self, row, col, slot):
+        deduct = int(slot.get("deduct_minutes", 0)) if slot else 0
         if slot is None:
             text, bg = "✓", self.BG_OPEN
         elif slot["is_hold"]:
             text, bg = "H", self.BG_HOLD
-        elif slot["is_open"]:
-            text, bg = "✓", self.BG_OPEN
-        else:
+        elif not slot["is_open"]:
             text, bg = "–", self.BG_CLOSED
+        elif deduct > 0:
+            text, bg = f"⏱{deduct}m", self.BG_PARTIAL
+        else:
+            text, bg = "✓", self.BG_OPEN
         item = QTableWidgetItem(text)
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         item.setBackground(QBrush(bg))
@@ -836,6 +900,9 @@ class CalendarWidget(QWidget):
         is_open_now = slot is None or (slot["is_open"] and not slot["is_hold"])
         CalendarRepo.set_slot(d, sno, room, is_open=0 if is_open_now else 1, is_hold=0)
         self._paint_cell(row, col, CalendarRepo.get_slot(d, sno, room))
+        mw = self._get_main_window()
+        if mw:
+            mw.gantt_tab.refresh()
 
     def _context_menu(self, pos):
         item = self.table.itemAt(pos)
@@ -845,17 +912,60 @@ class CalendarWidget(QWidget):
         room, sno = self._room_shifts[row]
         d = self._dates[col - 2]
         slot = CalendarRepo.get_slot(d, sno, room)
-        is_hold = bool(slot and slot["is_hold"])
+        is_hold   = bool(slot and slot["is_hold"])
+        deduct    = int(slot.get("deduct_minutes", 0)) if slot else 0
         menu = QMenu(self)
         if is_hold:
             menu.addAction("Remove Hold", lambda: self._toggle_hold(row, col, room, sno, d, False))
         else:
             menu.addAction("Set Hold", lambda: self._toggle_hold(row, col, room, sno, d, True))
+        menu.addSeparator()
+        if deduct > 0:
+            menu.addAction(f"⏱ Clear Deduct ({deduct}m)",
+                           lambda: self._set_deduct(row, col, room, sno, d, 0))
+        menu.addAction("⏱ Set Deduct Minutes…",
+                       lambda: self._set_deduct_dialog(row, col, room, sno, d, deduct))
         menu.exec(QCursor.pos())
 
     def _toggle_hold(self, row, col, room, sno, d, hold: bool):
-        CalendarRepo.set_slot(d, sno, room, is_open=1, is_hold=1 if hold else 0)
+        slot = CalendarRepo.get_slot(d, sno, room)
+        deduct = int(slot.get("deduct_minutes", 0)) if slot else 0
+        CalendarRepo.set_slot(d, sno, room, is_open=1, is_hold=1 if hold else 0,
+                              deduct_minutes=deduct)
         self._paint_cell(row, col, CalendarRepo.get_slot(d, sno, room))
+        mw = self._get_main_window()
+        if mw:
+            mw.gantt_tab.refresh()
+
+    def _set_deduct(self, row, col, room, sno, d, minutes: int):
+        slot = CalendarRepo.get_slot(d, sno, room)
+        is_open = 1 if (slot is None or slot["is_open"]) else 0
+        is_hold = int(slot["is_hold"]) if slot else 0
+        CalendarRepo.set_slot(d, sno, room, is_open=is_open, is_hold=is_hold,
+                              deduct_minutes=minutes)
+        self._paint_cell(row, col, CalendarRepo.get_slot(d, sno, room))
+        mw = self._get_main_window()
+        if mw:
+            mw.gantt_tab.refresh()
+
+    def _set_deduct_dialog(self, row, col, room, sno, d, current: int):
+        from PyQt6.QtWidgets import QDialog, QSpinBox, QFormLayout, QDialogButtonBox
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Set Deduct Minutes")
+        spin = QSpinBox()
+        spin.setRange(0, 720)
+        spin.setSuffix(" min")
+        spin.setValue(current)
+        spin.setToolTip("Minutes unavailable in this shift (e.g. 150 for mandatory training)")
+        form = QFormLayout(dlg)
+        form.addRow(f"Deduct minutes  ({room} / S{sno} / {d}):", spin)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        form.addRow(btns)
+        if dlg.exec():
+            self._set_deduct(row, col, room, sno, d, spin.value())
 
     def _bulk(self, action: str):
         self._loading = True
@@ -876,6 +986,9 @@ class CalendarWidget(QWidget):
                     CalendarRepo.set_slot(d, sno, room, is_open=open_v, is_hold=0)
                     self._paint_cell(ri, col, {"is_open": open_v, "is_hold": 0})
         self._loading = False
+        mw = self._get_main_window()
+        if mw:
+            mw.gantt_tab.refresh()
 
 
 # ─── App Config ───────────────────────────────────────────────────────────────
@@ -918,7 +1031,75 @@ class AppConfigWidget(QWidget):
         btn_save = QPushButton("💾 Save Settings")
         btn_save.clicked.connect(self._save)
         layout.addWidget(btn_save)
+
+        # ── Company Holidays ──────────────────────────────────────────────────
+        grp = QGroupBox("Company Holidays")
+        grp_lay = QVBoxLayout(grp)
+
+        self._hol_table = QTableWidget()
+        self._hol_table.setColumnCount(2)
+        self._hol_table.setHorizontalHeaderLabels(["Date", "Name"])
+        self._hol_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._hol_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._hol_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents)
+        self._hol_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch)
+        self._hol_table.setMaximumHeight(200)
+        grp_lay.addWidget(self._hol_table)
+
+        btn_row = QHBoxLayout()
+        btn_add = QPushButton("＋ Add Holiday")
+        btn_add.clicked.connect(self._add_holiday)
+        self._btn_del_hol = QPushButton("🗑 Delete")
+        self._btn_del_hol.clicked.connect(self._del_holiday)
+        btn_row.addWidget(btn_add)
+        btn_row.addWidget(self._btn_del_hol)
+        btn_row.addStretch()
+        grp_lay.addLayout(btn_row)
+        layout.addWidget(grp)
         layout.addStretch()
+
+        self._load_holidays()
+
+    def _load_holidays(self):
+        rows = CompanyHolidayRepo.all()
+        self._hol_table.setRowCount(len(rows))
+        for ri, r in enumerate(rows):
+            self._hol_table.setItem(ri, 0, QTableWidgetItem(r["cal_date"]))
+            self._hol_table.setItem(ri, 1, QTableWidgetItem(r["name"]))
+
+    def _add_holiday(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Add Company Holiday")
+        dlg.setMinimumWidth(300)
+        form = QFormLayout(dlg)
+        date_edit = QDateEdit()
+        date_edit.setCalendarPopup(True)
+        from PyQt6.QtCore import QDate as _QDate
+        date_edit.setDate(_QDate.currentDate())
+        name_edit = QLineEdit()
+        form.addRow("Date:", date_edit)
+        form.addRow("Name:", name_edit)
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        form.addRow(btns)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            d = date_edit.date().toString("yyyy-MM-dd")
+            n = name_edit.text().strip() or "Company Holiday"
+            CompanyHolidayRepo.upsert(d, n)
+            self._load_holidays()
+
+    def _del_holiday(self):
+        rows = {i.row() for i in self._hol_table.selectedItems()}
+        if not rows:
+            return
+        for ri in sorted(rows, reverse=True):
+            d = self._hol_table.item(ri, 0).text()
+            CompanyHolidayRepo.delete(d)
+        self._load_holidays()
 
     def _browse_crp(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select CRP Excel", "", "Excel (*.xlsx)")
@@ -1352,7 +1533,7 @@ class ProcessRoutingWidget(QWidget):
             self.table.setEditTriggers(
                 QAbstractItemView.EditTrigger.DoubleClicked |
                 QAbstractItemView.EditTrigger.EditKeyPressed)
-            self.info_label.setText("✏ 편집 모드 — Final 컬럼: '✅' 또는 빈칸, Min Gap: 숫자")
+            self.info_label.setText("✏ Edit mode — Final column: '✅' or blank; Min Gap: integer")
             self.info_label.setStyleSheet(
                 "color:#7a5800; background:#fff9c4; padding:4px; border-radius:4px;")
         else:
@@ -1394,7 +1575,7 @@ class ProcessRoutingWidget(QWidget):
                 min_gap      = int(self.table.item(ri, 7).text() or 0)
                 note         = self.table.item(ri, 8).text() or None
                 if not allowed:
-                    errors.append(f"Row {ri+1}: Allowed Room Types는 비워둘 수 없습니다")
+                    errors.append(f"Row {ri+1}: Allowed Room Types cannot be empty")
                     continue
                 ProcessRoutingRepo.upsert({
                     "entity_type":            entity_type,

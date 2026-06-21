@@ -14,17 +14,676 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView,
     QFileDialog, QMessageBox, QScrollArea, QGroupBox, QComboBox,
     QSpinBox, QLineEdit, QDateEdit, QFormLayout, QDialog,
-    QDialogButtonBox, QTextEdit, QSplitter, QTabWidget, QCheckBox
+    QDialogButtonBox, QTextEdit, QSplitter, QTabWidget, QCheckBox,
+    QRadioButton, QStackedWidget, QFrame, QListWidget, QListWidgetItem
 )
 from PyQt6.QtCore import Qt, QDate
-from PyQt6.QtGui import QColor, QBrush, QFont
+from PyQt6.QtGui import QColor, QBrush, QFont, QPen
 
 from data.repositories import (
     PlanRepo, SORepo, SKURepo, ShiftRepo, RoomRepo, ActualRepo, ConfigRepo,
-    ProcessRoutingRepo
+    ProcessRoutingRepo, MaterialRepo, InventoryRepo, CompanyHolidayRepo
 )
 from data.crp_excel import crp_manager
 from core.scheduler import scheduler
+from utils.korean_holidays import is_holiday, holiday_name
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  GAP BAR CHART
+# ════════════════════════════════════════════════════════════════════════════
+
+class GapBarChart(QWidget):
+    """Grouped vertical bar chart drawn with QPainter. Scrollable horizontally."""
+    BAR_W      = 14
+    BAR_GAP    = 3
+    GROUP_GAP  = 16
+    PAD_LEFT   = 44
+    PAD_BOTTOM = 28
+    LEGEND_H   = 22
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._data: list   = []   # [(group_label, [val, ...]), ...]
+        self._series: list = []
+        self._colors: list = []
+        self._max_val = 1.0
+        self._holiday_lbls: set = set()
+        self.setMinimumHeight(160)
+
+    def set_data(self, data, series_labels, colors, holiday_labels: set | None = None):
+        self._data         = data
+        self._series       = series_labels
+        self._colors       = [QColor(c) for c in colors]
+        self._holiday_lbls = holiday_labels or set()
+        all_vals = [v for _, vals in data for v in vals]
+        self._max_val = max((v for v in all_vals if v > 0), default=1.0)
+        n  = len(series_labels)
+        gw = n * self.BAR_W + max(0, n - 1) * self.BAR_GAP + self.GROUP_GAP
+        self.setMinimumWidth(max(300, self.PAD_LEFT + len(data) * gw + 20))
+        self.update()
+
+    def paintEvent(self, event):
+        from PyQt6.QtGui import QPainter, QPen
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        W, H = self.width(), self.height()
+        chart_h  = H - self.LEGEND_H - self.PAD_BOTTOM - 4
+        bottom_y = self.LEGEND_H + chart_h
+        if not self._data or chart_h < 20:
+            p.end(); return
+        n = len(self._series)
+        gw = n * self.BAR_W + max(0, n - 1) * self.BAR_GAP + self.GROUP_GAP
+
+        # Legend
+        lx = self.PAD_LEFT
+        from PyQt6.QtGui import QFont
+        p.setFont(QFont("Segoe UI", 8))
+        for lbl, col in zip(self._series, self._colors):
+            p.fillRect(lx, 4, 10, 10, col)
+            p.setPen(QPen(QColor("#374151")))
+            p.drawText(lx + 13, 13, lbl)
+            lx += 13 + len(lbl) * 6 + 12
+
+        # Y gridlines
+        for frac in (0.25, 0.5, 0.75, 1.0):
+            y = int(bottom_y - frac * chart_h)
+            p.setPen(QPen(QColor("#e5e7eb"), 1))
+            p.drawLine(self.PAD_LEFT, y, W - 4, y)
+            p.setPen(QPen(QColor("#6b7280")))
+            p.setFont(QFont("Segoe UI", 7))
+            p.drawText(2, y + 4, f"{self._max_val * frac:.0f}")
+
+        # Bars
+        x = self.PAD_LEFT
+        p.setFont(QFont("Segoe UI", 7))
+        for lbl, vals in self._data:
+            for si, (v, col) in enumerate(zip(vals, self._colors)):
+                bx = x + si * (self.BAR_W + self.BAR_GAP)
+                bh = max(1, int((v / self._max_val) * chart_h)) if self._max_val > 0 and v > 0 else 0
+                p.fillRect(bx, bottom_y - bh, self.BAR_W, bh, col)
+            cx = x + (n * (self.BAR_W + self.BAR_GAP)) // 2 - len(lbl) * 3
+            lbl_col = QColor("#c62828") if lbl in self._holiday_lbls else QColor("#374151")
+            p.setPen(QPen(lbl_col))
+            p.drawText(cx, bottom_y + 14, lbl)
+            x += gw
+        p.end()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  LINE CHART
+# ════════════════════════════════════════════════════════════════════════════
+
+class LineChart(QWidget):
+    """Multi-series percentage line chart (0-100%) drawn with QPainter."""
+    PAD_LEFT   = 48
+    PAD_BOTTOM = 28
+    PAD_TOP    = 8
+    LEGEND_H   = 22
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._series: list   = []
+        self._x_labels: list = []
+        self._holiday_lbls: set = set()
+        self.setMinimumHeight(180)
+
+    def set_data(self, x_labels: list, series: list,
+                 holiday_labels=None):
+        """
+        x_labels: ['W22 06/01', ...] or ['06/01', ...]
+        series: [{'label': str, 'color': str, 'values': [float, ...]}]
+        values aligned with x_labels (0-100 range, % values)
+        """
+        self._x_labels = x_labels
+        self._series = series
+        self._holiday_lbls = holiday_labels or set()
+        n = len(x_labels)
+        self.setMinimumWidth(max(300, self.PAD_LEFT + n * 40 + 20))
+        self.update()
+
+    def paintEvent(self, event):
+        from PyQt6.QtGui import QPainter, QPen, QFont, QFontMetrics
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        W, H = self.width(), self.height()
+        chart_h = H - self.LEGEND_H - self.PAD_BOTTOM - self.PAD_TOP
+        chart_w = W - self.PAD_LEFT - 8
+        bottom_y = self.LEGEND_H + self.PAD_TOP + chart_h
+        left_x = self.PAD_LEFT
+
+        if not self._x_labels or chart_h < 20:
+            p.end(); return
+
+        n = len(self._x_labels)
+
+        # Legend
+        lx = left_x
+        p.setFont(QFont("Segoe UI", 8))
+        for s in self._series:
+            col = QColor(s['color'])
+            p.fillRect(lx, 4, 12, 3, col)
+            p.setPen(QPen(QColor("#374151")))
+            p.drawText(lx + 15, 13, s['label'])
+            lx += 15 + len(s['label']) * 6 + 14
+
+        # Y gridlines + labels (0%, 25%, 50%, 75%, 100%)
+        for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+            y = int(bottom_y - frac * chart_h)
+            p.setPen(QPen(QColor("#e5e7eb"), 1))
+            p.drawLine(left_x, y, W - 8, y)
+            p.setPen(QPen(QColor("#6b7280")))
+            p.setFont(QFont("Segoe UI", 7))
+            p.drawText(2, y + 4, f"{int(frac*100)}%")
+
+        # X labels + vertical guidelines
+        if n > 1:
+            step_w = chart_w / (n - 1)
+        else:
+            step_w = chart_w
+
+        p.setFont(QFont("Segoe UI", 7))
+        for i, lbl in enumerate(self._x_labels):
+            x = int(left_x + i * step_w) if n > 1 else left_x + chart_w // 2
+            lbl_col = QColor("#c62828") if lbl in self._holiday_lbls else QColor("#374151")
+            p.setPen(QPen(lbl_col))
+            p.drawText(x - 14, bottom_y + 14, lbl)
+            p.setPen(QPen(QColor("#f3f4f6"), 1))
+            p.drawLine(x, self.LEGEND_H + self.PAD_TOP, x, bottom_y)
+
+        # Lines + dots
+        for s in self._series:
+            vals = s.get('values', [])
+            col = QColor(s['color'])
+            p.setPen(QPen(col, 2))
+            pts = []
+            for i, v in enumerate(vals):
+                x = int(left_x + i * step_w) if n > 1 else left_x + chart_w // 2
+                y = int(bottom_y - (v / 100.0) * chart_h) if v is not None else None
+                if y is not None:
+                    pts.append((x, y))
+            for j in range(len(pts) - 1):
+                p.drawLine(pts[j][0], pts[j][1], pts[j+1][0], pts[j+1][1])
+            p.setBrush(QBrush(col))
+            p.setPen(Qt.PenStyle.NoPen)
+            for x, y in pts:
+                p.drawEllipse(x - 3, y - 3, 6, 6)
+
+        p.end()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  CAPACITY ANALYSIS WIDGET
+# ════════════════════════════════════════════════════════════════════════════
+
+class CapacityAnalysisWidget(QWidget):
+    """HC shortage / Line Gap analysis + multi-scenario simulation."""
+    _MAX_SCEN  = 3
+    _SCEN_COLS = ["#2563eb", "#16a34a", "#d97706"]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._scenarios: List[Dict] = []
+        self._analysis:  Dict       = {}
+        self._build_ui()
+
+    # ── UI build ─────────────────────────────────────────────────────────────
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+
+        # Controls
+        ctrl = QHBoxLayout()
+        ctrl.addWidget(QLabel("From:"))
+        self.d_from = QDateEdit(QDate.currentDate())
+        self.d_from.setDisplayFormat("yyyy-MM-dd")
+        ctrl.addWidget(self.d_from)
+        ctrl.addWidget(QLabel("To:"))
+        self.d_to = QDateEdit(QDate.currentDate().addDays(83))
+        self.d_to.setDisplayFormat("yyyy-MM-dd")
+        ctrl.addWidget(self.d_to)
+        ctrl.addWidget(QLabel("View:"))
+        self.gran = QComboBox()
+        self.gran.addItems(["Weekly", "Daily"])
+        ctrl.addWidget(self.gran)
+        btn_analyze = QPushButton("▶ Analyze")
+        btn_analyze.setStyleSheet(
+            "background:#2563EB;color:white;font-weight:bold;"
+            "border:none;border-radius:5px;padding:5px 14px;")
+        btn_analyze.clicked.connect(self._analyze)
+        ctrl.addWidget(btn_analyze)
+        ctrl.addStretch()
+        lay.addLayout(ctrl)
+
+        # Scenario panel
+        scen_grp = QGroupBox("HC Scenarios")
+        scen_vlay = QVBoxLayout(scen_grp)
+        btn_add = QPushButton("+ Add Scenario")
+        btn_add.clicked.connect(self._add_scenario)
+        scen_vlay.addWidget(btn_add, alignment=Qt.AlignmentFlag.AlignLeft)
+        self._scen_row = QHBoxLayout()
+        self._scen_row.setSpacing(8)
+        self._scen_row.addStretch()
+        scen_vlay.addLayout(self._scen_row)
+        lay.addWidget(scen_grp)
+
+        # Result tabs
+        self._rtabs = QTabWidget()
+
+        # HC Gap tab
+        hc_w = QWidget(); hcl = QVBoxLayout(hc_w); hcl.setContentsMargins(4, 4, 4, 4)
+        lbl_hc = QLabel("HC Utilization (%)")
+        lbl_hc.setStyleSheet("font-size:11px;font-weight:bold;color:#374151;padding:2px 0;")
+        hcl.addWidget(lbl_hc)
+        self._hc_chart = LineChart()
+        hc_sa = QScrollArea(); hc_sa.setWidget(self._hc_chart)
+        hc_sa.setWidgetResizable(False); hc_sa.setFixedHeight(200)
+        hc_sa.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        hcl.addWidget(hc_sa)
+        self._hc_tbl = self._make_table()
+        hcl.addWidget(self._hc_tbl, 1)
+        self._rtabs.addTab(hc_w, "HC Gap")
+
+        # Line Gap tab
+        ln_w = QWidget(); lnl = QVBoxLayout(ln_w); lnl.setContentsMargins(4, 4, 4, 4)
+        lbl_ln = QLabel("Line Utilization (%)")
+        lbl_ln.setStyleSheet("font-size:11px;font-weight:bold;color:#374151;padding:2px 0;")
+        lnl.addWidget(lbl_ln)
+        self._ln_chart = LineChart()
+        ln_sa = QScrollArea(); ln_sa.setWidget(self._ln_chart)
+        ln_sa.setWidgetResizable(False); ln_sa.setFixedHeight(200)
+        ln_sa.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        lnl.addWidget(ln_sa)
+        self._ln_tbl = self._make_table()
+        lnl.addWidget(self._ln_tbl, 1)
+        self._rtabs.addTab(ln_w, "Line Gap")
+
+        # Backlog Compare tab
+        bl_w = QWidget(); bll = QVBoxLayout(bl_w); bll.setContentsMargins(4, 4, 4, 4)
+        self._bl_note = QLabel(
+            "Run '▶ Analyze' then '▶ Run Simulation' on each scenario to compare HC coverage.")
+        self._bl_note.setStyleSheet("color:#6b7280;font-size:10px;padding:2px 4px;")
+        self._bl_note.setWordWrap(True)
+        bll.addWidget(self._bl_note)
+        self._bl_tbl = self._make_table()
+        bll.addWidget(self._bl_tbl, 1)
+        self._rtabs.addTab(bl_w, "Backlog Compare")
+
+        lay.addWidget(self._rtabs, 1)
+
+    @staticmethod
+    def _make_table() -> QTableWidget:
+        t = QTableWidget()
+        t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        t.setAlternatingRowColors(True)
+        t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        t.verticalHeader().setVisible(False)
+        return t
+
+    # ── Scenario management ───────────────────────────────────────────────────
+
+    def _add_scenario(self):
+        if len(self._scenarios) >= self._MAX_SCEN:
+            QMessageBox.information(self, "Limit", "Maximum 3 scenarios.")
+            return
+        idx = len(self._scenarios)
+        self._scenarios.append({"name": f"Scenario {chr(65+idx)}", "periods": [], "result": None})
+        self._rebuild_cards()
+
+    def _rebuild_cards(self):
+        while self._scen_row.count() > 1:
+            item = self._scen_row.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        for i, s in enumerate(self._scenarios):
+            self._scen_row.insertWidget(i, self._make_card(i, s))
+
+    def _make_card(self, idx: int, scen: Dict) -> QGroupBox:
+        col = self._SCEN_COLS[idx]
+        card = QGroupBox(scen["name"])
+        card.setFixedWidth(295)
+        card.setStyleSheet(f"QGroupBox::title{{color:{col};font-weight:bold;}}")
+        lay = QVBoxLayout(card)
+
+        hdr = QHBoxLayout()
+        btn_ren = QPushButton("Rename")
+        btn_ren.clicked.connect(lambda _, i=idx: self._rename_scenario(i))
+        btn_x = QPushButton("✕")
+        btn_x.setFixedWidth(26)
+        btn_x.setStyleSheet("background:#dc2626;color:white;border:none;border-radius:3px;")
+        btn_x.clicked.connect(lambda _, i=idx: self._del_scenario(i))
+        hdr.addWidget(btn_ren); hdr.addStretch(); hdr.addWidget(btn_x)
+        lay.addLayout(hdr)
+
+        tbl = QTableWidget(len(scen["periods"]), 4)
+        tbl.setHorizontalHeaderLabels(["From", "To", "HC/Day", ""])
+        tbl.verticalHeader().setVisible(False)
+        tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        tbl.setFixedHeight(max(52, min(140, 28 + len(scen["periods"]) * 24)))
+        for ri, (d0, d1, hc) in enumerate(scen["periods"]):
+            for ci, txt in enumerate([d0, d1, f"{hc} ppl/day"]):
+                it = QTableWidgetItem(txt)
+                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                tbl.setItem(ri, ci, it)
+            bx = QPushButton("✕")
+            bx.setFixedSize(22, 20)
+            bx.setStyleSheet("background:#dc2626;color:white;border:none;font-size:10px;")
+            bx.clicked.connect(lambda _, i=idx, r=ri: self._del_period(i, r))
+            tbl.setCellWidget(ri, 3, bx)
+        lay.addWidget(tbl)
+
+        btn_add_p = QPushButton("+ Add Period")
+        btn_add_p.clicked.connect(lambda _, i=idx: self._add_period(i))
+        lay.addWidget(btn_add_p)
+
+        btn_run = QPushButton("▶ Run Simulation")
+        btn_run.setStyleSheet(
+            f"background:{col};color:white;font-weight:bold;"
+            "border:none;border-radius:4px;padding:4px;")
+        btn_run.clicked.connect(lambda _, i=idx: self._run_scenario(i))
+        lay.addWidget(btn_run)
+        return card
+
+    def _add_period(self, sidx: int):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Add HC Period")
+        form = QFormLayout(dlg)
+        d0e = QDateEdit(QDate.currentDate()); d0e.setDisplayFormat("yyyy-MM-dd")
+        d1e = QDateEdit(QDate.currentDate().addDays(30)); d1e.setDisplayFormat("yyyy-MM-dd")
+        sp  = QSpinBox(); sp.setRange(0, 9999); sp.setValue(40); sp.setSuffix(" ppl/day")
+        form.addRow("From:", d0e)
+        form.addRow("To:",   d1e)
+        form.addRow("HC/Day:", sp)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                              QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        form.addRow(bb)
+        if dlg.exec():
+            self._scenarios[sidx]["periods"].append((
+                d0e.date().toString("yyyy-MM-dd"),
+                d1e.date().toString("yyyy-MM-dd"),
+                sp.value()))
+            self._scenarios[sidx]["periods"].sort(key=lambda x: x[0])
+            self._rebuild_cards()
+
+    def _del_period(self, sidx: int, pidx: int):
+        del self._scenarios[sidx]["periods"][pidx]
+        self._rebuild_cards()
+
+    def _rename_scenario(self, sidx: int):
+        from PyQt6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(
+            self, "Rename", "Name:", text=self._scenarios[sidx]["name"])
+        if ok and name.strip():
+            self._scenarios[sidx]["name"] = name.strip()
+            self._rebuild_cards()
+
+    def _del_scenario(self, sidx: int):
+        del self._scenarios[sidx]
+        self._rebuild_cards()
+        self._refresh_backlog_table()
+
+    # ── Data helpers ──────────────────────────────────────────────────────────
+
+    def _date_list(self):
+        from datetime import date as dt, timedelta
+        d0 = self.d_from.date().toString("yyyy-MM-dd")
+        d1 = self.d_to.date().toString("yyyy-MM-dd")
+        cur, end = dt.fromisoformat(d0), dt.fromisoformat(d1)
+        dates = []
+        while cur <= end:
+            dates.append(cur.isoformat()); cur += timedelta(days=1)
+        return d0, d1, dates
+
+    def _buckets(self, dates):
+        """Returns [(label, [dates])]."""
+        if self.gran.currentText() == "Daily":
+            return [(d[5:], [d]) for d in dates]
+        from datetime import date as dt
+        result, seen = [], {}
+        for d in dates:
+            yr, wk, _ = dt.fromisoformat(d).isocalendar()
+            key = (yr, wk)
+            if key not in seen:
+                seen[key] = len(result)
+                result.append((f"W{wk:02d} {d[5:]}", []))
+            result[seen[key]][1].append(d)
+        return result
+
+    def _holiday_labels_for_buckets(self, bkts) -> set:
+        """Return set of bucket labels that contain a public or company holiday."""
+        from datetime import date as dt
+        company_hdays = CompanyHolidayRepo.date_set()
+        hday_lbls = set()
+        for lbl, ds in bkts:
+            if any(is_holiday(dt.fromisoformat(d)) or d in company_hdays for d in ds):
+                hday_lbls.add(lbl)
+        return hday_lbls
+
+    def _sum_shifts(self, hc_by_date_shift, dates):
+        """Sum all shifts per day → {date: total}."""
+        return {d: sum(hc_by_date_shift.get(d, {}).values()) for d in dates}
+
+    def _scen_hc(self, scenario, dates):
+        """{date: hc_per_day} from scenario periods."""
+        out = {}
+        for d in dates:
+            for d0p, d1p, hc in scenario["periods"]:
+                if d0p <= d <= d1p:
+                    out[d] = hc; break
+            else:
+                out[d] = 0
+        return out
+
+    # ── Analysis ─────────────────────────────────────────────────────────────
+
+    def _analyze(self):
+        from core.scheduler import scheduler
+        d0, d1, dates = self._date_list()
+        self._analysis = {
+            "d0": d0, "d1": d1, "dates": dates,
+            "req_hc":   scheduler.compute_required_hc_from_plans(d0, d1),
+            "avail_hc": scheduler.get_available_hc_by_date(d0, d1),
+            "line":     scheduler.compute_line_utilization(d0, d1),
+        }
+        self._update_hc_tab()
+        self._update_line_tab()
+        self._refresh_backlog_table()
+
+    def _update_hc_tab(self):
+        a = self._analysis
+        dates   = a["dates"]
+        bkts    = self._buckets(dates)
+        req_d   = self._sum_shifts(a["req_hc"],   dates)
+        avl_d   = self._sum_shifts(a["avail_hc"], dates)
+        scen_ds = [self._scen_hc(s, dates) for s in self._scenarios]
+        snames  = [s["name"] for s in self._scenarios]
+
+        hdrs = (["Period", "Req HC", "CRP HC", "Gap"] +
+                snames + [f"{n} Gap" for n in snames])
+        self._hc_tbl.setColumnCount(len(hdrs))
+        self._hc_tbl.setHorizontalHeaderLabels(hdrs)
+        self._hc_tbl.setRowCount(len(bkts))
+
+        x_labels = []
+        util_vals = []
+
+        for ri, (lbl, bd) in enumerate(bkts):
+            req  = sum(req_d.get(d, 0) for d in bd)
+            avl  = sum(avl_d.get(d, 0) for d in bd)
+            gap  = avl - req
+            shcs = [sum(sd.get(d, 0) for d in bd) for sd in scen_ds]
+            sgps = [sh - req for sh in shcs]
+
+            def _it(txt, bg=None):
+                it = QTableWidgetItem(txt)
+                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if bg: it.setBackground(QBrush(QColor(bg)))
+                return it
+
+            self._hc_tbl.setItem(ri, 0, QTableWidgetItem(lbl))
+            self._hc_tbl.setItem(ri, 1, _it(f"{req:.1f}", "#fee2e2"))
+            self._hc_tbl.setItem(ri, 2, _it(f"{avl:.0f}"))
+            self._hc_tbl.setItem(ri, 3, _it(f"{gap:+.1f}",
+                                             "#dcfce7" if gap >= 0 else "#fee2e2"))
+            for ci, (sh, sg) in enumerate(zip(shcs, sgps)):
+                self._hc_tbl.setItem(ri, 4 + ci, _it(f"{sh:.0f}"))
+                self._hc_tbl.setItem(ri, 4 + len(self._scenarios) + ci,
+                                     _it(f"{sg:+.1f}", "#dcfce7" if sg >= 0 else "#fee2e2"))
+
+            x_labels.append(lbl)
+            util_pct = (req / avl * 100) if avl > 0 else 0.0
+            util_vals.append(min(util_pct, 100.0))
+
+        self._hc_tbl.resizeColumnsToContents()
+        hday_lbls = self._holiday_labels_for_buckets(bkts)
+        self._hc_chart.set_data(
+            x_labels,
+            [{'label': 'HC Util%', 'color': '#2563eb', 'values': util_vals}],
+            holiday_labels=hday_lbls)
+
+    def _update_line_tab(self):
+        a    = self._analysis
+        line = a["line"]
+        bkts = self._buckets(a["dates"])
+
+        # Get active line capacity (rooms that have plans) for Operating Util%
+        try:
+            from core.scheduler import scheduler as _sched
+            active_cap = _sched.compute_active_line_capacity(a["d0"], a["d1"])
+        except Exception:
+            active_cap = {}
+
+        hdrs = ["Period", "Avail Slots", "Used Slots", "Slot Gap",
+                "Max Cap (units)", "Planned (units)", "Total Util%", "Operating Util%"]
+        self._ln_tbl.setColumnCount(len(hdrs))
+        self._ln_tbl.setHorizontalHeaderLabels(hdrs)
+        self._ln_tbl.setRowCount(len(bkts))
+
+        x_labels = []
+        total_util_vals = []
+        operating_util_vals = []
+
+        for ri, (lbl, bd) in enumerate(bkts):
+            avl  = sum(line["available"].get(d, 0) for d in bd)
+            used = sum(line["used"].get(d, 0)      for d in bd)
+            gap  = avl - used
+            mx   = sum(line["max_cap"].get(d, 0)   for d in bd)
+            pln  = sum(line["planned"].get(d, 0)   for d in bd)
+            act_cap = sum(active_cap.get(d, 0)     for d in bd)
+
+            total_util = (pln / mx * 100) if mx > 0 else 0.0
+            op_util    = (pln / act_cap * 100) if act_cap > 0 else 0.0
+
+            def _it(txt, bg=None):
+                it = QTableWidgetItem(txt)
+                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if bg: it.setBackground(QBrush(QColor(bg)))
+                return it
+
+            self._ln_tbl.setItem(ri, 0, QTableWidgetItem(lbl))
+            self._ln_tbl.setItem(ri, 1, _it(str(avl)))
+            self._ln_tbl.setItem(ri, 2, _it(str(used)))
+            self._ln_tbl.setItem(ri, 3, _it(f"{gap:+d}",
+                                             "#dcfce7" if gap >= 0 else "#fee2e2"))
+            self._ln_tbl.setItem(ri, 4, _it(f"{mx:,.0f}"))
+            self._ln_tbl.setItem(ri, 5, _it(f"{pln:,.0f}"))
+            self._ln_tbl.setItem(ri, 6, _it(f"{total_util:.1f}%"))
+            self._ln_tbl.setItem(ri, 7, _it(f"{op_util:.1f}%"))
+
+            x_labels.append(lbl)
+            total_util_vals.append(min(total_util, 100.0))
+            operating_util_vals.append(min(op_util, 100.0))
+
+        self._ln_tbl.resizeColumnsToContents()
+        hday_lbls = self._holiday_labels_for_buckets(bkts)
+        self._ln_chart.set_data(
+            x_labels,
+            [
+                {'label': 'Total Line Util%',     'color': '#2563eb', 'values': total_util_vals},
+                {'label': 'Operating Line Util%',  'color': '#16a34a', 'values': operating_util_vals},
+            ],
+            holiday_labels=hday_lbls)
+
+    def _run_scenario(self, sidx: int):
+        if not self._analysis:
+            QMessageBox.information(
+                self, "Analyze First", "Click '▶ Analyze' first.")
+            return
+        scen   = self._scenarios[sidx]
+        a      = self._analysis
+        dates  = a["dates"]
+        req_d  = self._sum_shifts(a["req_hc"],   dates)
+        avl_d  = self._sum_shifts(a["avail_hc"], dates)
+        scen_d = self._scen_hc(scen, dates)
+        bkts   = self._buckets(dates)
+
+        bucket_results = []
+        for lbl, bd in bkts:
+            req     = sum(req_d.get(d, 0)   for d in bd)
+            avl     = sum(avl_d.get(d, 0)   for d in bd)
+            scen_hc = sum(scen_d.get(d, 0)  for d in bd)
+            curr_cov = min(1.0, avl / req)    if req > 0 else 1.0
+            scen_cov = min(1.0, scen_hc / req) if req > 0 else 1.0
+            bucket_results.append((lbl, req, avl, scen_hc, curr_cov, scen_cov))
+
+        scen["result"] = {"buckets": bucket_results}
+        self._refresh_backlog_table()
+        self._rtabs.setCurrentIndex(2)  # jump to Backlog Compare
+
+    def _refresh_backlog_table(self):
+        run = [(i, s) for i, s in enumerate(self._scenarios) if s.get("result")]
+        if not run or not self._analysis:
+            self._bl_tbl.setRowCount(0)
+            self._bl_tbl.setColumnCount(0)
+            return
+
+        bkts = self._buckets(self._analysis["dates"])
+        hdrs = (["Period", "Req HC", "CRP Cov%"] +
+                [f"{self._scenarios[i]['name']} HC"   for i, _ in run] +
+                [f"{self._scenarios[i]['name']} Cov%" for i, _ in run])
+        self._bl_tbl.setColumnCount(len(hdrs))
+        self._bl_tbl.setHorizontalHeaderLabels(hdrs)
+        self._bl_tbl.setRowCount(len(bkts))
+
+        n_run = len(run)
+        for ri, (lbl, _) in enumerate(bkts):
+            # Req HC + current coverage from first run scenario
+            _, _, bkts0 = run[0][0], run[0][1], run[0][1]["result"]["buckets"]
+            row0 = bkts0[ri] if ri < len(bkts0) else (lbl, 0, 0, 0, 1.0, 1.0)
+            _, req, _, _, curr_cov, _ = row0
+
+            def _it(txt, bg=None):
+                it = QTableWidgetItem(txt)
+                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if bg: it.setBackground(QBrush(QColor(bg)))
+                return it
+
+            self._bl_tbl.setItem(ri, 0, QTableWidgetItem(lbl))
+            self._bl_tbl.setItem(ri, 1, _it(f"{req:.1f}"))
+            self._bl_tbl.setItem(ri, 2, _it(
+                f"{curr_cov*100:.0f}%",
+                "#dcfce7" if curr_cov >= 1.0 else "#fee2e2"))
+
+            for ci, (sidx, scen) in enumerate(run):
+                bkts_s = scen["result"]["buckets"]
+                row_s  = bkts_s[ri] if ri < len(bkts_s) else (lbl, 0, 0, 0, 1.0, 1.0)
+                _, _, _, sh, _, cov = row_s
+                self._bl_tbl.setItem(ri, 3 + ci, _it(f"{sh:.0f}"))
+                cov_bg = ("#dcfce7" if cov >= 1.0 else
+                          "#fff3cd" if cov >= 0.8 else "#fee2e2")
+                self._bl_tbl.setItem(ri, 3 + n_run + ci,
+                                     _it(f"{cov*100:.0f}%", cov_bg))
+
+        self._bl_tbl.resizeColumnsToContents()
+        self._bl_note.setText(
+            "Coverage % = Scenario HC / Required HC.  "
+            "✅ ≥100%: HC sufficient for planned demand.  "
+            "⚠ Line constraints are shown separately in the 'Line Gap' tab.  "
+            "For exact backlog, run 'Execute Plan' after adjusting CRP.")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -38,13 +697,87 @@ class CRPTab(QWidget):
         self._build_ui()
 
     def _build_ui(self):
-        layout = QVBoxLayout(self)
-
         self._crp_edit_mode    = False
         self._crp_changed_cells: set = set()
         self._crp_loading      = False
         self._crp_dates:  list = []
         self._crp_shifts: list = []
+
+        # ── Outer: left sub-menu + right content stack ────────────────────────
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # Sub-menu panel
+        sub_panel = QWidget()
+        sub_panel.setFixedWidth(168)
+        sub_panel.setStyleSheet(
+            "QWidget { background:#f4f5f8; border-right:1px solid #dde3ed; }")
+        sub_layout = QVBoxLayout(sub_panel)
+        sub_layout.setContentsMargins(0, 10, 0, 10)
+        sub_layout.setSpacing(2)
+
+        grp_lbl = QLabel("CRP / CAPACITY")
+        grp_lbl.setStyleSheet(
+            "color:#6b7aa3; font-size:10px; font-weight:bold;"
+            " padding:6px 16px 4px 16px; background:transparent;"
+            " letter-spacing:0.08em;")
+        sub_layout.addWidget(grp_lbl)
+
+        _btn_css = (
+            "QPushButton { background:transparent; border:none;"
+            " border-left:3px solid transparent;"
+            " text-align:left; padding:8px 14px 8px 14px;"
+            " font-size:12px; color:#374151; }"
+            "QPushButton:hover { background:rgba(0,0,0,0.05); }"
+            "QPushButton:checked { background:#dbeafe;"
+            " border-left-color:#2563eb; color:#1e40af; font-weight:600; }"
+        )
+        self._btn_labor = QPushButton("  Labor")
+        self._btn_labor.setCheckable(True)
+        self._btn_labor.setStyleSheet(_btn_css)
+        self._btn_labor.clicked.connect(lambda: self._switch_page(0))
+
+        self._btn_prod = QPushButton("  Production Lines")
+        self._btn_prod.setCheckable(True)
+        self._btn_prod.setStyleSheet(_btn_css)
+        self._btn_prod.clicked.connect(lambda: self._switch_page(1))
+
+        self._btn_cap = QPushButton("  Capacity Analysis")
+        self._btn_cap.setCheckable(True)
+        self._btn_cap.setStyleSheet(_btn_css)
+        self._btn_cap.clicked.connect(lambda: self._switch_page(2))
+
+        sub_layout.addWidget(self._btn_labor)
+        sub_layout.addWidget(self._btn_prod)
+        sub_layout.addWidget(self._btn_cap)
+        sub_layout.addStretch()
+        outer.addWidget(sub_panel)
+
+        # Content stack
+        self._content_stack = QStackedWidget()
+        self._content_stack.addWidget(self._build_labor_page())
+
+        from ui.master_tab import CalendarWidget
+        self._cal_widget = CalendarWidget(self)
+        self._content_stack.addWidget(self._cal_widget)
+
+        self._cap_widget = CapacityAnalysisWidget(self)
+        self._content_stack.addWidget(self._cap_widget)
+
+        outer.addWidget(self._content_stack, stretch=1)
+        self._switch_page(0)
+        self.refresh()
+
+    def _switch_page(self, idx: int):
+        self._content_stack.setCurrentIndex(idx)
+        self._btn_labor.setChecked(idx == 0)
+        self._btn_prod.setChecked(idx == 1)
+        self._btn_cap.setChecked(idx == 2)
+
+    def _build_labor_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
 
         bar = QHBoxLayout()
         bar.addWidget(QLabel("CRP Excel:"))
@@ -77,7 +810,6 @@ class CRPTab(QWidget):
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
 
-        # Guidance banner when CRP path not configured
         self.crp_guide = QLabel(
             "⚠  CRP Excel path is not configured. "
             "Go to Masters > App Config > CRP Excel Path and set the path, then click Refresh.")
@@ -88,7 +820,6 @@ class CRPTab(QWidget):
         self.crp_guide.setVisible(False)
         layout.addWidget(self.crp_guide)
 
-        # Headcount summary table
         layout.addWidget(QLabel("Total Headcount per Shift (from CRP Excel):"))
         self.table = QTableWidget()
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -97,7 +828,7 @@ class CRPTab(QWidget):
         self.table.itemChanged.connect(self._on_crp_cell_changed)
         layout.addWidget(self.table, stretch=1)
 
-        self.refresh()
+        return page
 
     def refresh(self):
         if self._crp_edit_mode:
@@ -153,9 +884,9 @@ class CRPTab(QWidget):
 
     def _toggle_crp_edit_mode(self, checked: bool):
         self._crp_edit_mode = checked
-        self._btn_crp_edit.setText("✏ Editing..." if checked else "✏ Edit Mode")
+        self._btn_crp_edit.setText("🔒 Exit Edit Mode" if checked else "✏ Edit Mode")
         self._btn_crp_edit.setStyleSheet(
-            "background:#fef9c3; font-weight:bold;" if checked else "")
+            "background:#e65100; color:white; font-weight:bold;" if checked else "")
         self._btn_crp_save.setVisible(checked)
         if checked:
             self.table.setEditTriggers(
@@ -198,6 +929,9 @@ class CRPTab(QWidget):
                 hc = int(item.text())
             except ValueError:
                 errors.append(f"Row {ri+1}, Col {ci}: '{item.text()}' is not a valid integer")
+                continue
+            if hc < 0:
+                errors.append(f"Row {ri+1}, Col {ci}: HC cannot be negative (got {hc})")
                 continue
             if ci - 1 >= len(self._crp_dates) or ri >= len(self._crp_shifts):
                 continue
@@ -251,155 +985,435 @@ class ActualsTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.main_window = parent
+        self._alloc_rows: list = []
+        self._current_lot: dict = {}
+        self._excess: int = 0
+        self._loading_alloc: bool = False
         self._build_ui()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
-        # Filter: select date + shift to see planned SO-LineItems
-        fbar = QHBoxLayout()
-        fbar.addWidget(QLabel("Date:"))
+        # ── Zone 1: Lot Entry ─────────────────────────────────────────────
+        entry_group = QGroupBox("Lot Entry")
+        el = QVBoxLayout(entry_group)
+
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("Date:"))
         self.date_edit = QDateEdit(QDate.currentDate())
         self.date_edit.setDisplayFormat("yyyy-MM-dd")
-        fbar.addWidget(self.date_edit)
+        row1.addWidget(self.date_edit)
+        row1.addSpacing(24)
+        row1.addWidget(QLabel("Type:"))
+        self.radio_sku = QRadioButton("SKU")
+        self.radio_mat = QRadioButton("Material")
+        self.radio_sku.setChecked(True)
+        self.radio_sku.toggled.connect(self._on_type_changed)
+        row1.addWidget(self.radio_sku)
+        row1.addWidget(self.radio_mat)
+        row1.addStretch()
+        el.addLayout(row1)
 
-        fbar.addWidget(QLabel("Shift:"))
-        self.shift_combo = QComboBox()
-        self._reload_shifts()
-        fbar.addWidget(self.shift_combo)
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Code:"))
+        self.code_combo = QComboBox()
+        self.code_combo.setEditable(True)
+        self.code_combo.setMinimumWidth(200)
+        row2.addWidget(self.code_combo)
+        row2.addSpacing(12)
+        row2.addWidget(QLabel("Lot Number:"))
+        self.lot_edit = QLineEdit()
+        self.lot_edit.setMinimumWidth(150)
+        row2.addWidget(self.lot_edit)
+        row2.addSpacing(12)
+        row2.addWidget(QLabel("Qty:"))
+        self.qty_spin = QSpinBox()
+        self.qty_spin.setRange(1, 9999999)
+        self.qty_spin.setMinimumWidth(100)
+        row2.addWidget(self.qty_spin)
+        row2.addStretch()
+        el.addLayout(row2)
 
-        btn_load = QPushButton("🔍 Load Planned Items")
-        btn_load.clicked.connect(self._load_planned)
-        fbar.addWidget(btn_load)
+        row3 = QHBoxLayout()
+        row3.addWidget(QLabel("Note:"))
+        self.note_edit = QLineEdit()
+        self.note_edit.setPlaceholderText("Optional")
+        row3.addWidget(self.note_edit, stretch=1)
+        self.btn_preview = QPushButton("🔍 Preview Allocation")
+        self.btn_preview.setStyleSheet(
+            "background:#2e6fd8; color:white; font-weight:bold; padding:5px 14px;")
+        self.btn_preview.clicked.connect(self._on_entry_action)
+        row3.addWidget(self.btn_preview)
+        el.addLayout(row3)
 
+        layout.addWidget(entry_group)
+
+        # ── Zone 2: Allocation Preview (hidden until previewed) ───────────
+        self.preview_group = QGroupBox("Allocation Preview")
+        self.preview_group.setVisible(False)
+        pl = QVBoxLayout(self.preview_group)
+
+        self.info_label = QLabel("")
+        self.info_label.setStyleSheet(
+            "background:#e8f0fe; color:#1a3a7a; font-weight:bold; "
+            "padding:6px 10px; border-radius:4px;")
+        pl.addWidget(self.info_label)
+
+        self.alloc_table = QTableWidget()
+        self.alloc_table.setColumnCount(8)
+        self.alloc_table.setHorizontalHeaderLabels([
+            "SO#", "Line", "Customer", "Priority",
+            "Due Date", "SO Qty", "Actual So Far", "Allocate Qty",
+        ])
+        hh = self.alloc_table.horizontalHeader()
+        hh.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.alloc_table.setAlternatingRowColors(True)
+        self.alloc_table.itemChanged.connect(self._on_alloc_changed)
+        pl.addWidget(self.alloc_table)
+
+        excess_row = QHBoxLayout()
+        self.excess_label = QLabel("")
+        self.excess_label.setStyleSheet("color:#c0392b; font-weight:bold;")
+        self.excess_label.setVisible(False)
+        excess_row.addWidget(self.excess_label)
+        self.radio_inv = QRadioButton("Save as Inventory")
+        self.radio_discard = QRadioButton("Discard / Note only")
+        self.radio_discard.setChecked(True)
+        self.radio_inv.setVisible(False)
+        self.radio_discard.setVisible(False)
+        excess_row.addWidget(self.radio_inv)
+        excess_row.addWidget(self.radio_discard)
+        excess_row.addStretch()
+        pl.addLayout(excess_row)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_cancel_preview = QPushButton("Cancel")
+        btn_cancel_preview.clicked.connect(self._cancel_preview)
+        self.btn_confirm = QPushButton("✅ Confirm & Save")
+        self.btn_confirm.setStyleSheet(
+            "background:#27ae60; color:white; font-weight:bold; padding:6px 18px;")
+        self.btn_confirm.clicked.connect(self._confirm_save)
+        btn_row.addWidget(btn_cancel_preview)
+        btn_row.addWidget(self.btn_confirm)
+        pl.addLayout(btn_row)
+
+        layout.addWidget(self.preview_group)
+
+        # ── Zone 3: Today's Lots Log ──────────────────────────────────────
+        log_group = QGroupBox("Actuals Log")
+        ll = QVBoxLayout(log_group)
+
+        log_bar = QHBoxLayout()
         btn_sample = QPushButton("🧪 LOT Sample Qty")
         btn_sample.clicked.connect(self._open_sample_entry)
-        fbar.addWidget(btn_sample)
-
         btn_replan = QPushButton("🔄 Replan after Actuals")
         btn_replan.clicked.connect(self._replan)
-        fbar.addWidget(btn_replan)
-        fbar.addStretch()
-        layout.addLayout(fbar)
+        log_bar.addWidget(btn_sample)
+        log_bar.addWidget(btn_replan)
+        log_bar.addStretch()
+        log_bar.addWidget(QLabel("Log Date:"))
+        self.log_date = QDateEdit(QDate.currentDate())
+        self.log_date.setDisplayFormat("yyyy-MM-dd")
+        self.log_date.dateChanged.connect(self._refresh_log)
+        log_bar.addWidget(self.log_date)
+        btn_refresh = QPushButton("Refresh")
+        btn_refresh.clicked.connect(self._refresh_log)
+        log_bar.addWidget(btn_refresh)
+        ll.addLayout(log_bar)
 
-        splitter = QSplitter(Qt.Orientation.Vertical)
-
-        # Planned items for the shift
-        grp1 = QGroupBox("Planned Items")
-        g1l  = QVBoxLayout(grp1)
-        self.plan_table = QTableWidget()
-        self.plan_table.setColumnCount(8)
-        self.plan_table.setHorizontalHeaderLabels([
-            "Plan ID", "SO", "SKU", "Line", "Room", "Process", "Qty Planned", "Qty Actual (enter)"
+        self.log_table = QTableWidget()
+        self.log_table.setColumnCount(8)
+        self.log_table.setHorizontalHeaderLabels([
+            "Time", "Type", "Code", "Lot Number",
+            "SO#", "Line", "Qty", "Note",
         ])
-        self.plan_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        g1l.addWidget(self.plan_table)
+        self.log_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        lhh = self.log_table.horizontalHeader()
+        lhh.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        lhh.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.log_table.setAlternatingRowColors(True)
+        ll.addWidget(self.log_table, stretch=1)
 
-        btn_save = QPushButton("💾 Save Actuals")
-        btn_save.clicked.connect(self._save_actuals)
-        g1l.addWidget(btn_save)
-        splitter.addWidget(grp1)
+        self.log_status = QLabel("")
+        self.log_status.setStyleSheet("color:#555; font-size:11px; padding:2px 4px;")
+        ll.addWidget(self.log_status)
 
-        # Unplanned production entry
-        grp2 = QGroupBox("Unplanned Production Entry")
-        g2l  = QFormLayout(grp2)
-        self.up_so    = QLineEdit(); g2l.addRow("SO Number:", self.up_so)
-        self.up_sku   = QLineEdit(); g2l.addRow("SKU Code:",  self.up_sku)
-        self.up_li    = QLineEdit(); g2l.addRow("Line Item:", self.up_li)
-        self.up_lot   = QLineEdit(); g2l.addRow("LOT Number:",self.up_lot)
-        self.up_room  = QLineEdit(); g2l.addRow("Room:",      self.up_room)
-        self.up_proc  = QLineEdit(); g2l.addRow("Process:",   self.up_proc)
-        self.up_qty   = QSpinBox(); self.up_qty.setRange(1, 999999); g2l.addRow("Qty:", self.up_qty)
-        self.up_note  = QLineEdit(); g2l.addRow("Note:",      self.up_note)
-        btn_add_up = QPushButton("➕ Add Unplanned Actual")
-        btn_add_up.clicked.connect(self._add_unplanned)
-        g2l.addRow("", btn_add_up)
-        splitter.addWidget(grp2)
+        layout.addWidget(log_group, stretch=1)
 
-        splitter.setSizes([500, 200])
-        layout.addWidget(splitter, stretch=1)
+        self._reload_codes()
+        self._refresh_log()
 
-    def _reload_shifts(self):
-        self.shift_combo.clear()
-        for s in ShiftRepo.all():
-            self.shift_combo.addItem(f"{s['shift_no']} - {s['shift_name']}", s["shift_no"])
+    # ── Type toggle ───────────────────────────────────────────────────────
 
-    def refresh(self):
-        self._reload_shifts()
+    def _on_type_changed(self):
+        self._reload_codes()
+        if self.radio_sku.isChecked():
+            self.btn_preview.setText("🔍 Preview Allocation")
+        else:
+            self.btn_preview.setText("💾 Save Material Actual")
+        self.preview_group.setVisible(False)
 
-    def _load_planned(self):
-        d = self.date_edit.date().toString("yyyy-MM-dd")
-        sno = self.shift_combo.currentData()
-        plans = [p for p in PlanRepo.all(d, d) if p["shift_no"] == sno]
-        self.plan_table.setRowCount(len(plans))
-        for ri, p in enumerate(plans):
-            actual = ActualRepo.actual_qty(p["so_number"], p["sku_code"], p["line_item"])
-            for ci, val in enumerate([
-                p["plan_id"], p["so_number"], p["sku_code"], p["line_item"],
-                p["room_code"], p["process_name"], p["qty_planned"], actual
-            ]):
-                item = QTableWidgetItem(str(val))
-                if ci == 7:  # actual qty — editable
-                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
-                self.plan_table.setItem(ri, ci, item)
+    def _reload_codes(self):
+        self.code_combo.clear()
+        if self.radio_sku.isChecked():
+            for sku in SKURepo.all():
+                self.code_combo.addItem(sku["sku_code"])
+        else:
+            for mat in MaterialRepo.all():
+                self.code_combo.addItem(mat["material_code"])
+        self.code_combo.setCurrentIndex(-1)
+        if self.code_combo.lineEdit():
+            self.code_combo.lineEdit().setPlaceholderText("Type or select…")
 
-    def _save_actuals(self):
-        d = self.date_edit.date().toString("yyyy-MM-dd")
-        sno = self.shift_combo.currentData()
+    # ── Entry action ──────────────────────────────────────────────────────
+
+    def _on_entry_action(self):
+        code = self.code_combo.currentText().strip()
+        lot  = self.lot_edit.text().strip()
+        qty  = self.qty_spin.value()
+
+        if not code:
+            QMessageBox.warning(self, "Input Required", "Please select a code.")
+            return
+        if not lot:
+            QMessageBox.warning(self, "Input Required", "Please enter a Lot Number.")
+            return
+
+        if self.radio_mat.isChecked():
+            self._save_material_actual(code, lot, qty)
+            return
+
+        # SKU: compute allocation preview
+        actual_date = self.date_edit.date().toString("yyyy-MM-dd")
+        self._current_lot = {
+            "entity_type": "SKU",
+            "sku_code": code,
+            "lot_number": lot,
+            "total_qty": qty,
+            "actual_date": actual_date,
+            "note": self.note_edit.text().strip(),
+        }
+
+        demands = SORepo.open_demand_for_sku(code)
+        remaining = qty
+        self._alloc_rows = []
+        for d in demands:
+            alloc = min(d["remaining_needed"], remaining)
+            self._alloc_rows.append({
+                "so_number":       d["so_number"],
+                "sku_code":        d["sku_code"],
+                "line_item":       d["line_item"],
+                "customer_name":   d.get("customer_name") or "",
+                "priority":        d.get("priority", ""),
+                "due_date":        d.get("due_date", ""),
+                "so_qty":          d["qty"],
+                "qty_actual_so_far": d["qty_actual_total"],
+                "alloc_qty":       alloc,
+            })
+            remaining -= alloc
+            if remaining <= 0:
+                break
+        self._excess = remaining
+        self._render_alloc_table()
+        self.preview_group.setVisible(True)
+
+    # ── Allocation preview ────────────────────────────────────────────────
+
+    def _render_alloc_table(self):
+        self._loading_alloc = True
+        self.alloc_table.setRowCount(len(self._alloc_rows))
+        today = date.today()
+        for ri, row in enumerate(self._alloc_rows):
+            due_str = row.get("due_date", "")
+            vals = [
+                row["so_number"], row["line_item"],
+                row["customer_name"],
+                str(row.get("priority", "")),
+                due_str,
+                str(row["so_qty"]),
+                str(row["qty_actual_so_far"]),
+                str(row["alloc_qty"]),
+            ]
+            for ci, val in enumerate(vals):
+                item = QTableWidgetItem(val)
+                if ci == 7:
+                    item.setBackground(QBrush(QColor("#fffde7")))
+                else:
+                    item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                if ci == 4 and due_str:
+                    try:
+                        due = date.fromisoformat(due_str)
+                        if due < today:
+                            item.setForeground(QBrush(QColor("#c0392b")))
+                        elif (due - today).days <= 3:
+                            item.setForeground(QBrush(QColor("#e67e22")))
+                    except ValueError:
+                        pass
+                self.alloc_table.setItem(ri, ci, item)
+        self._loading_alloc = False
+        self._update_alloc_summary()
+
+    def _update_alloc_summary(self):
+        total_alloc = sum(r["alloc_qty"] for r in self._alloc_rows)
+        total_qty   = self._current_lot.get("total_qty", 0)
+        self._excess = total_qty - total_alloc
+
+        self.info_label.setText(
+            f"Lot: {self._current_lot.get('lot_number', '')}  ·  "
+            f"SKU: {self._current_lot.get('sku_code', '')}  ·  "
+            f"Total Qty: {total_qty}  ·  "
+            f"Allocated: {total_alloc}  ·  "
+            f"Excess: {self._excess}"
+        )
+        has_excess = self._excess > 0
+        self.excess_label.setVisible(has_excess)
+        self.radio_inv.setVisible(has_excess)
+        self.radio_discard.setVisible(has_excess)
+        if has_excess:
+            self.excess_label.setText(
+                f"⚠  {self._excess} unit(s) unallocated — disposition:")
+        self.btn_confirm.setEnabled(total_alloc > 0 or has_excess)
+
+    def _on_alloc_changed(self, item):
+        if self._loading_alloc or item.column() != 7:
+            return
+        ri = item.row()
+        if ri >= len(self._alloc_rows):
+            return
+        try:
+            new_qty = max(0, int(item.text()))
+        except ValueError:
+            new_qty = self._alloc_rows[ri]["alloc_qty"]
+        self._alloc_rows[ri]["alloc_qty"] = new_qty
+        self._update_alloc_summary()
+
+    def _cancel_preview(self):
+        self.preview_group.setVisible(False)
+        self._alloc_rows = []
+        self._current_lot = {}
+
+    def _confirm_save(self):
+        actual_date = self._current_lot["actual_date"]
+        lot         = self._current_lot["lot_number"]
+        sku         = self._current_lot["sku_code"]
+        note        = self._current_lot.get("note", "")
+
         saved = 0
-        for ri in range(self.plan_table.rowCount()):
-            plan_id = int(self.plan_table.item(ri, 0).text())
-            try:
-                qty = int(self.plan_table.item(ri, 7).text())
-            except (ValueError, AttributeError):
+        for row in self._alloc_rows:
+            if row["alloc_qty"] <= 0:
                 continue
-            if qty <= 0:
-                continue
-            plan = PlanRepo.get(plan_id)
-            if not plan:
-                continue
-            lot, ok = "", True
-            from PyQt6.QtWidgets import QInputDialog
-            lot, ok = QInputDialog.getText(
-                self, "LOT Number",
-                f"LOT for SO {plan['so_number']} SKU {plan['sku_code']} Qty {qty}:"
-            )
             ActualRepo.insert({
-                "plan_id":      plan_id,
-                "so_number":    plan["so_number"],
-                "sku_code":     plan["sku_code"],
-                "line_item":    plan["line_item"],
+                "entity_type":  "SKU",
+                "entity_code":  sku,
+                "so_number":    row["so_number"],
+                "sku_code":     sku,
+                "line_item":    row["line_item"],
                 "lot_number":   lot,
-                "room_code":    plan["room_code"],
-                "process_name": plan["process_name"],
-                "actual_date":  d,
-                "shift_no":     sno,
-                "qty_actual":   qty,
-                "note":         "",
+                "actual_date":  actual_date,
+                "qty_actual":   row["alloc_qty"],
+                "note":         note,
             })
             saved += 1
-        QMessageBox.information(self, "Actuals", f"Saved {saved} actual entries.")
 
-    def _add_unplanned(self):
-        d = self.date_edit.date().toString("yyyy-MM-dd")
-        sno = self.shift_combo.currentData()
+        excess_msg = ""
+        if self._excess > 0:
+            if self.radio_inv.isChecked():
+                InventoryRepo.add_excess(sku, lot, self._excess, actual_date)
+                excess_msg = f", {self._excess} unit(s) saved to inventory"
+            else:
+                ActualRepo.insert({
+                    "entity_type": "SKU",
+                    "entity_code": sku,
+                    "so_number":   "",
+                    "sku_code":    sku,
+                    "line_item":   "",
+                    "lot_number":  lot,
+                    "actual_date": actual_date,
+                    "qty_actual":  self._excess,
+                    "note":        f"EXCESS{' — ' + note if note else ''}",
+                })
+                excess_msg = f", {self._excess} noted as excess"
+
+        self.preview_group.setVisible(False)
+        self._alloc_rows = []
+        self._current_lot = {}
+        self.lot_edit.clear()
+        self.qty_spin.setValue(1)
+        self.note_edit.clear()
+        self._refresh_log()
+
+        if self.main_window:
+            self.main_window.notify(
+                f"Saved {saved} actual record(s){excess_msg}.")
+
+    # ── Material direct save ──────────────────────────────────────────────
+
+    def _save_material_actual(self, code: str, lot: str, qty: int):
         ActualRepo.insert({
-            "plan_id":      None,
-            "so_number":    self.up_so.text(),
-            "sku_code":     self.up_sku.text(),
-            "line_item":    self.up_li.text(),
-            "lot_number":   self.up_lot.text(),
-            "room_code":    self.up_room.text(),
-            "process_name": self.up_proc.text(),
-            "actual_date":  d,
-            "shift_no":     sno,
-            "qty_actual":   self.up_qty.value(),
-            "note":         self.up_note.text(),
+            "entity_type": "MATERIAL",
+            "entity_code": code,
+            "lot_number":  lot,
+            "actual_date": self.date_edit.date().toString("yyyy-MM-dd"),
+            "qty_actual":  qty,
+            "note":        self.note_edit.text().strip(),
         })
-        QMessageBox.information(self, "Saved", "Unplanned actual saved.")
+        self.lot_edit.clear()
+        self.qty_spin.setValue(1)
+        self.note_edit.clear()
+        self._refresh_log()
+        if self.main_window:
+            self.main_window.notify(
+                f"Material actual saved: {code} · Lot {lot} · {qty}")
+
+    # ── Log ───────────────────────────────────────────────────────────────
+
+    def _refresh_log(self):
+        d = self.log_date.date().toString("yyyy-MM-dd")
+        actuals = ActualRepo.for_date(d)
+        self.log_table.setRowCount(len(actuals))
+        for ri, a in enumerate(actuals):
+            ts = a.get("entered_at", "")
+            time_str = ts[11:16] if len(ts) >= 16 else ""
+            note = a.get("note") or ""
+            tag  = "EXCESS" if note.startswith("EXCESS") else ""
+            vals = [
+                time_str,
+                a.get("entity_type", ""),
+                a.get("entity_code", ""),
+                a.get("lot_number", ""),
+                a.get("so_number", "") or tag,
+                a.get("line_item", ""),
+                str(a.get("qty_actual", "")),
+                note,
+            ]
+            for ci, val in enumerate(vals):
+                item = QTableWidgetItem(val)
+                if tag and ci in (4, 7):
+                    item.setForeground(QBrush(QColor("#e67e22")))
+                self.log_table.setItem(ri, ci, item)
+
+        total_sku = sum(
+            a.get("qty_actual", 0) for a in actuals
+            if a.get("entity_type") == "SKU" and a.get("so_number")
+        )
+        excess_sku = sum(
+            a.get("qty_actual", 0) for a in actuals
+            if a.get("entity_type") == "SKU" and not a.get("so_number")
+        )
+        self.log_status.setText(
+            f"{len(actuals)} record(s) on {d}  ·  "
+            f"SKU allocated: {total_sku}  ·  Excess: {excess_sku}"
+        )
+
+    # ── Public ────────────────────────────────────────────────────────────
+
+    def refresh(self):
+        self._reload_codes()
+        self._refresh_log()
 
     def _open_sample_entry(self):
-        """Open LOT sample quantity entry dialog for recent actuals."""
         dlg = LotSampleDialog(self)
         dlg.exec()
 
@@ -541,6 +1555,17 @@ class AlertsTab(QWidget):
         d0 = date.today().strftime("%Y-%m-%d")
         d1 = (date.today() + timedelta(weeks=4)).strftime("%Y-%m-%d")
         conflicts = scheduler.detect_conflicts(d0, d1)
+        self.conflict_table.setRowCount(0)
+        if not conflicts:
+            self.conflict_grp.setTitle("✅ Capacity Conflicts — None detected")
+            self.conflict_table.setRowCount(1)
+            item = QTableWidgetItem("✅  No capacity conflicts in the next 4 weeks")
+            item.setForeground(QBrush(QColor("#2d7a2d")))
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self.conflict_table.setItem(0, 0, item)
+            self.conflict_table.setSpan(0, 0, 1, self.conflict_table.columnCount())
+            return
+        self.conflict_grp.setTitle(f"⚠ Capacity Conflicts ({len(conflicts)})")
         self.conflict_table.setRowCount(len(conflicts))
         for ri, c in enumerate(conflicts):
             for ci, val in enumerate([
@@ -582,15 +1607,26 @@ class AlertsTab(QWidget):
                     "reason": "Late" if due < today else "Plan exceeds due date"
                 })
 
-        self.late_table.setRowCount(len(late_rows))
-        for ri, r in enumerate(late_rows):
-            for ci, val in enumerate([
-                r["so"], r["sku"], r["li"], r["due"],
-                r["complete"], r["remaining"], r["reason"]
-            ]):
-                item = QTableWidgetItem(str(val))
-                item.setBackground(QBrush(QColor("#ffcccc")))
-                self.late_table.setItem(ri, ci, item)
+        self.late_table.setRowCount(0)
+        if not late_rows:
+            self.late_grp.setTitle("✅ Late / At-Risk SOs — None")
+            self.late_table.setRowCount(1)
+            item = QTableWidgetItem("✅  All open SOs are on track")
+            item.setForeground(QBrush(QColor("#2d7a2d")))
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self.late_table.setItem(0, 0, item)
+            self.late_table.setSpan(0, 0, 1, self.late_table.columnCount())
+        else:
+            self.late_grp.setTitle(f"🔴 Late / At-Risk SOs ({len(late_rows)})")
+            self.late_table.setRowCount(len(late_rows))
+            for ri, r in enumerate(late_rows):
+                for ci, val in enumerate([
+                    r["so"], r["sku"], r["li"], r["due"],
+                    r["complete"], r["remaining"], r["reason"]
+                ]):
+                    item = QTableWidgetItem(str(val))
+                    item.setBackground(QBrush(QColor("#ffcccc")))
+                    self.late_table.setItem(ri, ci, item)
 
         # QC shortfall section — SOs where net qty < SO qty after sample+reject
         self._load_qc_shortfall()
@@ -638,6 +1674,17 @@ class AlertsTab(QWidget):
             parent_layout = self.layout()
             parent_layout.addWidget(self.qc_grp)
 
+        self.qc_table.setRowCount(0)
+        if not shortfall_rows:
+            self.qc_grp.setTitle("✅ QC Shortfall — None")
+            self.qc_table.setRowCount(1)
+            item = QTableWidgetItem("✅  No QC shortfalls detected")
+            item.setForeground(QBrush(QColor("#2d7a2d")))
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self.qc_table.setItem(0, 0, item)
+            self.qc_table.setSpan(0, 0, 1, self.qc_table.columnCount())
+            return
+        self.qc_grp.setTitle(f"🔴 QC Shortfall — {len(shortfall_rows)} SO(s)")
         self.qc_table.setRowCount(len(shortfall_rows))
         for ri, r in enumerate(shortfall_rows):
             for ci, val in enumerate([
@@ -798,8 +1845,8 @@ class LotSampleDialog(QDialog):
 
         # Legend
         legend = QLabel(
-            "  🟡 Sample Qty — QC 샘플로 소모된 수량   "
-            "  🔴 Reject Qty — QC 부적합 판정 수량   "
+            "  🟡 Sample Qty — consumed for QC sampling   "
+            "  🔴 Reject Qty — QC-rejected units   "
             "  Net Qty = Actual − Sample − Reject")
         legend.setStyleSheet(
             "font-size:11px; color:var(--secondary); "
@@ -1140,7 +2187,7 @@ class InventoryTab(QWidget):
                 QAbstractItemView.EditTrigger.DoubleClicked |
                 QAbstractItemView.EditTrigger.EditKeyPressed)
             self._inv_status.setText(
-                "✏ 편집 모드 — Qty Available, Production Date, Expiry Date, Status 편집 가능")
+                "✏ Edit mode — Qty Available, Production Date, Expiry Date, Status are editable")
             self._inv_status.setStyleSheet(
                 "color:#7a5800; background:#fff9c4; padding:4px; border-radius:4px;")
         else:
@@ -1742,6 +2789,9 @@ class ReleaseReportTab(QWidget):
 
         self._render(filtered)
         self._update_summary(filtered)
+        if not filtered:
+            self.summary.setText(
+                "  <span style='color:#9aa1b3;'>No records match the current filter.</span>")
 
     def _render(self, rows: list):
         # Disable sorting while filling to avoid index issues
@@ -1918,10 +2968,9 @@ class HCDemandDialog(QDialog):
         layout = QVBoxLayout(self)
 
         info = QLabel(
-            "현재 생산계획 기반으로 Shift별 필요 총 인원을 계산합니다. "
-            "CRP Excel에는 생산실/공정별이 아닌 Shift 총원만 입력하면 "
-            "시스템이 자동으로 배분합니다.\n"
-            "적용할 행을 체크한 뒤 Apply를 누르면 CRP Excel에 반영됩니다.")
+            "Calculates required total HC per Shift based on the current production plan. "
+            "Enter only the Shift total in CRP Excel — the system distributes automatically.\n"
+            "Check the rows to apply, then click Apply to update CRP Excel.")
         info.setWordWrap(True)
         info.setStyleSheet("padding:6px; background:#e8f0fe; border-radius:4px;")
         layout.addWidget(info)
@@ -2028,7 +3077,7 @@ class HCDemandDialog(QDialog):
         layout.addLayout(bbar)
 
         if not rows:
-            info.setText("현재 생산계획이 없습니다. Auto-Plan을 먼저 실행하세요.")
+            info.setText("No production plans found. Run Auto-Plan first.")
 
     def _apply(self):
         self.to_apply = {}
@@ -2036,6 +3085,906 @@ class HCDemandDialog(QDialog):
             if cb.isChecked():
                 self.to_apply[(r["date"], r["shift"])] = r["req_hc"]
         if not self.to_apply:
-            QMessageBox.information(self, "Apply", "체크된 항목이 없습니다.")
+            QMessageBox.information(self, "Apply", "No items checked.")
             return
         self.accept()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# LOT Batch Input Dialog (Actuals Tab)
+# ════════════════════════════════════════════════════════════════════════════
+
+class _LOTBatchDialog(QDialog):
+    """Single dialog for entering LOT numbers for multiple actual entries at once."""
+
+    def __init__(self, pending: list, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Enter LOT Numbers")
+        self.resize(700, 300)
+        self.results = []  # [(plan, qty, lot_str), ...]
+        self._pending = pending
+        self._build_ui()
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("Enter LOT numbers for each actual entry, then click Confirm."))
+
+        self._tbl = QTableWidget(len(self._pending), 5)
+        self._tbl.setHorizontalHeaderLabels(
+            ["SO", "SKU", "Line", "Qty", "LOT Number"])
+        self._tbl.verticalHeader().setVisible(False)
+        self._tbl.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents)
+        self._tbl.horizontalHeader().setSectionResizeMode(
+            4, QHeaderView.ResizeMode.Stretch)
+
+        for ri, (plan, qty) in enumerate(self._pending):
+            for ci, val in enumerate([
+                plan["so_number"], plan["sku_code"], plan["line_item"], str(qty)
+            ]):
+                item = QTableWidgetItem(val)
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                self._tbl.setItem(ri, ci, item)
+            lot_item = QTableWidgetItem("")
+            lot_item.setBackground(QBrush(QColor("#fffde7")))
+            self._tbl.setItem(ri, 4, lot_item)
+
+        lay.addWidget(self._tbl)
+
+        bbar = QHBoxLayout()
+        bbar.addStretch()
+        btn_cancel = QPushButton("Cancel")
+        btn_ok = QPushButton("✅ Confirm")
+        btn_ok.setStyleSheet(
+            "background:#2e6fd8; color:white; font-weight:bold; padding:6px 18px;")
+        btn_cancel.clicked.connect(self.reject)
+        btn_ok.clicked.connect(self._accept)
+        bbar.addWidget(btn_cancel)
+        bbar.addWidget(btn_ok)
+        lay.addLayout(bbar)
+
+    def _accept(self):
+        self.results = []
+        for ri, (plan, qty) in enumerate(self._pending):
+            lot = self._tbl.item(ri, 4).text().strip() if self._tbl.item(ri, 4) else ""
+            self.results.append((plan, qty, lot))
+        self.accept()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Plan Change History Dialog
+# ════════════════════════════════════════════════════════════════════════════
+
+class PlanHistoryDialog(QDialog):
+    """Full plan change history viewer — moves, locks, deletes."""
+
+    _ACTION_COLOR = {
+        "MODIFIED":     QColor(255, 251, 210),
+        "DELETED":      QColor(255, 218, 218),
+        "LOCKED":       QColor(218, 236, 255),
+        "UNLOCKED":     QColor(220, 255, 224),
+        "BULK_CLEARED": QColor(255, 234, 200),
+    }
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Plan Change History")
+        self.resize(1200, 660)
+        self._all_rows: List[Dict] = []
+        self._build_ui()
+        self._load()
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(8)
+
+        fbar = QHBoxLayout()
+        fbar.addWidget(QLabel("Action:"))
+        self._act_combo = QComboBox()
+        self._act_combo.addItems(
+            ["ALL", "MODIFIED", "DELETED", "LOCKED", "UNLOCKED", "BULK_CLEARED"])
+        self._act_combo.currentTextChanged.connect(self._apply_filter)
+        fbar.addWidget(self._act_combo)
+        fbar.addStretch()
+        btn_refresh = QPushButton("🔄 Refresh")
+        btn_refresh.clicked.connect(self._load)
+        fbar.addWidget(btn_refresh)
+        btn_export = QPushButton("📥 Export")
+        btn_export.clicked.connect(self._export)
+        fbar.addWidget(btn_export)
+        lay.addLayout(fbar)
+
+        self._tbl = QTableWidget()
+        self._tbl.setColumnCount(7)
+        self._tbl.setHorizontalHeaderLabels(
+            ["Timestamp", "Action", "Plan ID", "SKU / Process",
+             "Before", "After", "Reason"])
+        self._tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._tbl.verticalHeader().setVisible(False)
+        self._tbl.setStyleSheet("QTableWidget { font-size:12px; }")
+        hdr = self._tbl.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
+        lay.addWidget(self._tbl)
+
+        self._count_lbl = QLabel("")
+        self._count_lbl.setStyleSheet("color:#6b7280; font-size:11px;")
+        lay.addWidget(self._count_lbl)
+
+    def _load(self):
+        self._all_rows = PlanRepo.plan_history()
+        self._apply_filter()
+
+    def _apply_filter(self):
+        f = self._act_combo.currentText()
+        rows = (self._all_rows if f == "ALL"
+                else [r for r in self._all_rows if r["action"] == f])
+
+        self._tbl.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            old = self._parse(r.get("old_value"))
+            new = self._parse(r.get("new_value"))
+
+            ref = old if isinstance(old, dict) else (new if isinstance(new, dict) else {})
+            sku_proc = " / ".join(filter(None, [
+                ref.get("sku_code") or ref.get("entity_code"),
+                ref.get("process_name"),
+            ]))
+
+            cells = [
+                r.get("changed_at", ""),
+                r.get("action", ""),
+                str(r.get("plan_id") or ""),
+                sku_proc,
+                self._fmt(old),
+                self._fmt(new),
+                r.get("reason") or "",
+            ]
+            bg = self._ACTION_COLOR.get(r.get("action", ""))
+            for j, v in enumerate(cells):
+                item = QTableWidgetItem(str(v))
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                if bg:
+                    item.setBackground(QBrush(bg))
+                self._tbl.setItem(i, j, item)
+
+        self._count_lbl.setText(
+            f"{len(rows)} record(s) shown  (total {len(self._all_rows)})")
+
+    def _parse(self, s):
+        if not s:
+            return None
+        try:
+            return json.loads(s)
+        except Exception:
+            return s
+
+    def _fmt(self, val) -> str:
+        if val is None:
+            return ""
+        if not isinstance(val, dict):
+            return str(val)
+        parts = []
+        if val.get("plan_date"):
+            parts.append(val["plan_date"])
+        if val.get("shift_no") is not None:
+            parts.append(f"Shift {val['shift_no']}")
+        if val.get("room_code"):
+            parts.append(val["room_code"])
+        if val.get("qty_planned") is not None:
+            parts.append(f"qty={val['qty_planned']}")
+        return " | ".join(parts) if parts else ""
+
+    def _export(self):
+        try:
+            from openpyxl import Workbook
+        except ImportError:
+            QMessageBox.warning(self, "Export", "openpyxl is not installed.")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Plan History", "plan_history.xlsx",
+            "Excel Files (*.xlsx)")
+        if not path:
+            return
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "PlanHistory"
+        ws.append(["Timestamp", "Action", "Plan ID", "SKU / Process",
+                   "Before", "After", "Reason"])
+        for row in range(self._tbl.rowCount()):
+            ws.append([
+                self._tbl.item(row, col).text() if self._tbl.item(row, col) else ""
+                for col in range(self._tbl.columnCount())
+            ])
+        wb.save(path)
+        QMessageBox.information(self, "Export", f"Saved to:\n{path}")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  IMPACT REPORT TAB  — Pull-in / Push-out vs plan
+# ════════════════════════════════════════════════════════════════════════════
+
+class ImpactReportTab(QWidget):
+    """Shows how actual production has shifted SO completion dates
+    relative to original plan dates (pull-in = early, push-out = late)."""
+
+    _STATUS_STYLE = {
+        "PULL-IN":     ("#E8F5E9", "#2E7D32"),
+        "ON TRACK":    ("#FFFFFF", "#555555"),
+        "PARTIAL":     ("#FFF8E1", "#F57F17"),
+        "NOT STARTED": ("#F5F5F5", "#9E9E9E"),
+        "PUSH-OUT":    ("#FFEBEE", "#C62828"),
+        "COMPLETE":    ("#F5F5F5", "#9E9E9E"),
+    }
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.main_window = parent
+        self._all_rows: List[Dict] = []
+        self._build_ui()
+
+    # ── Build ─────────────────────────────────────────────────────────────
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self)
+
+        # Header
+        hbar = QHBoxLayout()
+        title = QLabel("Production Impact Report")
+        title.setStyleSheet("font-size:14px; font-weight:bold;")
+        hbar.addWidget(title)
+        hbar.addStretch()
+        self._ts_label = QLabel("")
+        self._ts_label.setStyleSheet("color:#888; font-size:11px;")
+        hbar.addWidget(self._ts_label)
+        btn_refresh = QPushButton("Refresh")
+        btn_refresh.clicked.connect(self.refresh)
+        hbar.addWidget(btn_refresh)
+        lay.addLayout(hbar)
+
+        # KPI cards
+        kpi_lay = QHBoxLayout()
+        self._kpi_pull  = self._make_kpi("PULL-IN",   "#2E7D32", "#E8F5E9")
+        self._kpi_push  = self._make_kpi("PUSH-OUT",  "#C62828", "#FFEBEE")
+        self._kpi_track = self._make_kpi("ON TRACK",  "#37474F", "#ECEFF1")
+        for box, _, _ in [self._kpi_pull, self._kpi_push, self._kpi_track]:
+            kpi_lay.addWidget(box)
+        lay.addLayout(kpi_lay)
+
+        # Filter bar
+        fbar = QHBoxLayout()
+        fbar.addWidget(QLabel("SKU:"))
+        self._sku_combo = QComboBox(); self._sku_combo.setMinimumWidth(150)
+        self._sku_combo.currentIndexChanged.connect(self._apply_filters)
+        fbar.addWidget(self._sku_combo)
+        fbar.addWidget(QLabel("Status:"))
+        self._status_combo = QComboBox()
+        self._status_combo.addItems(["All", "PULL-IN", "ON TRACK", "PARTIAL",
+                                     "PUSH-OUT", "NOT STARTED"])
+        self._status_combo.currentIndexChanged.connect(self._apply_filters)
+        fbar.addWidget(self._status_combo)
+        fbar.addWidget(QLabel("Customer:"))
+        self._cust_combo = QComboBox(); self._cust_combo.setMinimumWidth(150)
+        self._cust_combo.currentIndexChanged.connect(self._apply_filters)
+        fbar.addWidget(self._cust_combo)
+        self._hide_complete_cb = QCheckBox("Hide completed")
+        self._hide_complete_cb.setChecked(True)
+        self._hide_complete_cb.toggled.connect(self._apply_filters)
+        fbar.addWidget(self._hide_complete_cb)
+        fbar.addStretch()
+        btn_csv = QPushButton("📥 Export CSV")
+        btn_csv.clicked.connect(self._export_csv)
+        fbar.addWidget(btn_csv)
+        lay.addLayout(fbar)
+
+        # Splitter: main table + detail panel
+        splitter = QSplitter(Qt.Orientation.Vertical)
+
+        self._table = QTableWidget()
+        self._table.setColumnCount(8)
+        self._table.setHorizontalHeaderLabels([
+            "SO#", "Customer", "SKU / Line",
+            "Produced / Total", "Planned Release", "Projected Release",
+            "Delta", "Status",
+        ])
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setAlternatingRowColors(False)
+        self._table.verticalHeader().setVisible(False)
+        hh = self._table.horizontalHeader()
+        hh.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._table.itemSelectionChanged.connect(self._on_row_selected)
+        splitter.addWidget(self._table)
+
+        # Detail panel
+        self._detail = QGroupBox("SO Detail")
+        self._detail.setVisible(False)
+        dl = QVBoxLayout(self._detail)
+        self._det_header = QLabel("")
+        self._det_header.setWordWrap(True)
+        self._det_header.setStyleSheet(
+            "font-weight:bold; padding:6px; background:#f0f4ff; border-radius:4px;")
+        dl.addWidget(self._det_header)
+
+        self._det_table = QTableWidget()
+        self._det_table.setColumnCount(6)
+        self._det_table.setHorizontalHeaderLabels([
+            "Process", "Seq", "Plan Date (max)",
+            "Actual Date (max)", "Qty Planned", "Qty Actual",
+        ])
+        self._det_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._det_table.verticalHeader().setVisible(False)
+        dhh = self._det_table.horizontalHeader()
+        dhh.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        dhh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        dl.addWidget(self._det_table)
+
+        self._det_footer = QLabel("")
+        self._det_footer.setStyleSheet("font-size:11px; color:#444; padding:4px;")
+        self._det_footer.setWordWrap(True)
+        dl.addWidget(self._det_footer)
+        splitter.addWidget(self._detail)
+        splitter.setSizes([500, 250])
+        lay.addWidget(splitter, stretch=1)
+
+        self._footer_lbl = QLabel("")
+        self._footer_lbl.setStyleSheet("color:#777; font-size:11px; padding:2px 4px;")
+        lay.addWidget(self._footer_lbl)
+
+        self.refresh()
+
+    # ── KPI factory ───────────────────────────────────────────────────────
+
+    def _make_kpi(self, title: str, fg: str, bg: str):
+        box = QGroupBox(title)
+        box.setStyleSheet(
+            f"QGroupBox{{background:{bg};border:1px solid {fg};"
+            f"border-radius:6px;margin-top:8px;padding:4px;}}"
+            f"QGroupBox::title{{color:{fg};font-weight:bold;"
+            f"subcontrol-origin:margin;left:10px;}}")
+        vl = QVBoxLayout(box)
+        cnt = QLabel("—")
+        cnt.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        cnt.setStyleSheet(f"font-size:26px;font-weight:bold;color:{fg};")
+        sub = QLabel("")
+        sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sub.setStyleSheet(f"color:{fg};font-size:11px;")
+        vl.addWidget(cnt)
+        vl.addWidget(sub)
+        return box, cnt, sub
+
+    def _set_kpi(self, card, count: int, sub: str = ""):
+        _, cnt, sub_lbl = card
+        cnt.setText(str(count))
+        sub_lbl.setText(sub)
+
+    # ── Data ──────────────────────────────────────────────────────────────
+
+    def refresh(self):
+        self._all_rows = PlanRepo.impact_summary()
+        self._rebuild_combos()
+        self._apply_filters()
+        self._ts_label.setText(
+            f"Last: {datetime.now().strftime('%H:%M:%S')}")
+
+    def _rebuild_combos(self):
+        skus  = sorted({r["sku_code"] for r in self._all_rows})
+        custs = sorted({r.get("customer_name") or "" for r in self._all_rows} - {""})
+        for combo, header, items in [
+            (self._sku_combo,  "All SKUs",       skus),
+            (self._cust_combo, "All Customers",  custs),
+        ]:
+            prev = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem(header)
+            combo.addItems(items)
+            idx = combo.findText(prev)
+            combo.setCurrentIndex(max(0, idx))
+            combo.blockSignals(False)
+
+    # ── Filters ───────────────────────────────────────────────────────────
+
+    def _apply_filters(self):
+        sku_f    = self._sku_combo.currentText()
+        status_f = self._status_combo.currentText()
+        cust_f   = self._cust_combo.currentText()
+        hide_done = self._hide_complete_cb.isChecked()
+
+        visible = []
+        for r in self._all_rows:
+            if hide_done and r["impact_status"] == "COMPLETE":
+                continue
+            if not sku_f.startswith("All") and r["sku_code"] != sku_f:
+                continue
+            if status_f != "All" and r["impact_status"] != status_f:
+                continue
+            if not cust_f.startswith("All"):
+                if (r.get("customer_name") or "") != cust_f:
+                    continue
+            visible.append(r)
+
+        self._render_table(visible)
+
+        pull  = [r for r in self._all_rows if r["impact_status"] == "PULL-IN"]
+        push  = [r for r in self._all_rows if r["impact_status"] == "PUSH-OUT"]
+        track = [r for r in self._all_rows if r["impact_status"] == "ON TRACK"]
+        best  = min((r["delta_days"] for r in pull), default=0)
+        worst = max((r["delta_days"] for r in push), default=0)
+        self._set_kpi(self._kpi_pull,  len(pull),
+                      f"Best: {best:+d}d" if pull else "")
+        self._set_kpi(self._kpi_push,  len(push),
+                      f"Worst: {worst:+d}d" if push else "")
+        self._set_kpi(self._kpi_track, len(track))
+
+    # ── Table rendering ───────────────────────────────────────────────────
+
+    def _render_table(self, rows: List[Dict]):
+        self._table.setRowCount(len(rows))
+        self._table.setProperty("_rows", rows)
+
+        for ri, r in enumerate(rows):
+            status = r["impact_status"]
+            delta  = r.get("delta_days")
+            bg, fg = self._STATUS_STYLE.get(status, ("#FFFFFF", "#333"))
+            if status == "PUSH-OUT" and delta is not None and delta > 5:
+                bg, fg = "#FFCDD2", "#B71C1C"
+
+            prefix = {"PULL-IN": ">> ", "PUSH-OUT": "!! "}.get(status, "")
+            delta_str = f"{delta:+d}d" if delta is not None else "—"
+
+            vals = [
+                prefix + r["so_number"],
+                r.get("customer_name") or "",
+                f"{r['sku_code']} / {r['line_item']}",
+                f"{r['qty_produced']} / {r['qty']}",
+                r.get("planned_release", ""),
+                r.get("projected_release", ""),
+                delta_str,
+                status,
+            ]
+            for ci, val in enumerate(vals):
+                item = QTableWidgetItem(val)
+                item.setBackground(QBrush(QColor(bg)))
+                if ci == 6:
+                    item.setForeground(QBrush(QColor(fg)))
+                    item.setTextAlignment(
+                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                    f2 = item.font(); f2.setBold(bool(delta)); item.setFont(f2)
+                if ci == 5 and status in ("PARTIAL", "NOT STARTED"):
+                    item.setToolTip("Estimated — production not yet complete")
+                    item.setForeground(QBrush(QColor("#999")))
+                self._table.setItem(ri, ci, item)
+
+        self._footer_lbl.setText(f"{len(rows)} SO(s) shown")
+        self._detail.setVisible(False)
+
+    # ── Detail panel ──────────────────────────────────────────────────────
+
+    def _on_row_selected(self):
+        rows = self._table.property("_rows") or []
+        sel = self._table.currentRow()
+        if sel < 0 or sel >= len(rows):
+            self._detail.setVisible(False)
+            return
+        self._show_detail(rows[sel])
+
+    def _show_detail(self, r: Dict):
+        so, sku, li = r["so_number"], r["sku_code"], r["line_item"]
+        post = r.get("post_lead_days") or 0
+
+        self._det_header.setText(
+            f"SO: {so}  ·  Customer: {r.get('customer_name') or '—'}  ·  "
+            f"SKU: {sku} / {li}  ·  "
+            f"Priority: {r.get('priority', '—')}  ·  Due: {r.get('due_date', '—')}"
+        )
+
+        plans = PlanRepo.for_so(so, sku, li)
+        actuals = ActualRepo.for_so(so, sku, li)
+        total_actual = sum(a["qty_actual"] for a in actuals)
+        max_actual_date = max((a["actual_date"] for a in actuals), default="")
+
+        # Group plans by process_seq
+        steps: Dict[int, Dict] = {}
+        for p in plans:
+            if p.get("entity_type", "SKU") != "SKU":
+                continue
+            seq = p["process_seq"]
+            if seq not in steps:
+                steps[seq] = {
+                    "name":      p["process_name"],
+                    "is_final":  p.get("is_final_seq", 0),
+                    "dates":     [],
+                    "qty":       0,
+                }
+            steps[seq]["dates"].append(p["plan_date"])
+            steps[seq]["qty"] += p["qty_planned"]
+
+        step_list = sorted(steps.values(), key=lambda s: s["name"])
+        self._det_table.setRowCount(len(step_list))
+        for ri, s in enumerate(step_list):
+            max_plan = max(s["dates"]) if s["dates"] else ""
+            is_final = s["is_final"]
+            vals = [
+                ("⭐ " if is_final else "") + s["name"],
+                str(min(
+                    p["process_seq"] for p in plans
+                    if p["process_name"] == s["name"]
+                ) if plans else ""),
+                max_plan,
+                max_actual_date if is_final else "—",
+                str(s["qty"]),
+                str(total_actual) if is_final else "—",
+            ]
+            for ci, val in enumerate(vals):
+                item = QTableWidgetItem(val)
+                if is_final:
+                    item.setBackground(QBrush(QColor("#FFF8E1")))
+                self._det_table.setItem(ri, ci, item)
+
+        delta = r.get("delta_days")
+        delta_txt = ""
+        if delta is not None:
+            if delta < -1:
+                delta_txt = f" → PULL-IN {abs(delta)}d ahead of plan"
+            elif delta > 1:
+                delta_txt = f" → PUSH-OUT {delta}d behind plan"
+            else:
+                delta_txt = " → ON TRACK"
+
+        self._det_footer.setText(
+            f"Planned Release: {r.get('planned_release', '—')} "
+            f"(final plan + {post} post-lead day(s))  ·  "
+            f"Projected Release: {r.get('projected_release', '—')}"
+            f"{delta_txt}  ·  "
+            f"Inventory Allocated: {r.get('qty_inv_allocated', 0)}  ·  "
+            f"Status: {r['impact_status']}"
+        )
+        self._detail.setVisible(True)
+
+    # ── Export ────────────────────────────────────────────────────────────
+
+    def _export_csv(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Impact Report", "impact_report.csv",
+            "CSV Files (*.csv)")
+        if not path:
+            return
+        import csv
+        rows = self._table.property("_rows") or []
+        with open(path, "w", encoding="utf-8-sig", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["SO#", "Customer", "SKU", "Line Item",
+                        "Produced", "Total Qty", "Planned Release",
+                        "Projected Release", "Delta (days)", "Status"])
+            for r in rows:
+                w.writerow([
+                    r["so_number"], r.get("customer_name", ""),
+                    r["sku_code"], r["line_item"],
+                    r["qty_produced"], r["qty"],
+                    r.get("planned_release", ""),
+                    r.get("projected_release", ""),
+                    r.get("delta_days", ""),
+                    r["impact_status"],
+                ])
+        QMessageBox.information(self, "Export", f"Saved to:\n{path}")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  SCENARIO PLANNER TAB
+# ════════════════════════════════════════════════════════════════════════════
+
+class ScenarioTab(QWidget):
+    """
+    Scenario Planner: bottleneck detection + stepped HC scenario simulation.
+    Scenarios are saved to DB for decision-making.
+    """
+    HC_STEP = 5
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._bottlenecks: List[Dict] = []
+        self._max_hc: int = 0
+        self._build_ui()
+        self._load_saved()
+
+    def _build_ui(self):
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # ── Left panel: controls + bottlenecks ──────────────────────────────
+        left = QWidget()
+        left.setFixedWidth(320)
+        left.setStyleSheet("background:#f4f5f8; border-right:1px solid #dde3ed;")
+        lv = QVBoxLayout(left)
+        lv.setContentsMargins(12, 12, 12, 12)
+        lv.setSpacing(8)
+
+        lv.addWidget(self._section_label("ANALYSIS PERIOD"))
+        dr = QHBoxLayout()
+        self._d_from = QDateEdit(QDate.currentDate())
+        self._d_from.setDisplayFormat("yyyy-MM-dd")
+        self._d_to = QDateEdit(QDate.currentDate().addDays(83))
+        self._d_to.setDisplayFormat("yyyy-MM-dd")
+        dr.addWidget(QLabel("From:")); dr.addWidget(self._d_from)
+        dr.addWidget(QLabel("To:"));   dr.addWidget(self._d_to)
+        lv.addLayout(dr)
+
+        self._name_edit = QLineEdit("Scenario")
+        self._name_edit.setPlaceholderText("Scenario name")
+        lv.addWidget(self._name_edit)
+
+        btn_detect = QPushButton("🔍 Detect Bottlenecks")
+        btn_detect.setStyleSheet(
+            "background:#2563EB;color:white;font-weight:bold;"
+            "border:none;border-radius:5px;padding:6px 12px;")
+        btn_detect.clicked.connect(self._detect)
+        lv.addWidget(btn_detect)
+
+        lv.addWidget(self._section_label("BOTTLENECKS"))
+        self._bn_tbl = QTableWidget(0, 4)
+        self._bn_tbl.setHorizontalHeaderLabels(["Room", "Process", "Unmet Qty", "Rec. HC"])
+        self._bn_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self._bn_tbl.verticalHeader().setVisible(False)
+        self._bn_tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._bn_tbl.setFixedHeight(140)
+        lv.addWidget(self._bn_tbl)
+
+        self._max_hc_lbl = QLabel("Max recommended HC: —")
+        self._max_hc_lbl.setStyleSheet("font-size:11px;font-weight:bold;color:#1e293b;")
+        lv.addWidget(self._max_hc_lbl)
+
+        btn_sim = QPushButton("▶ Run Stepped Scenarios")
+        btn_sim.setStyleSheet(
+            "background:#16A34A;color:white;font-weight:bold;"
+            "border:none;border-radius:5px;padding:6px 12px;")
+        btn_sim.clicked.connect(self._run_scenarios)
+        lv.addWidget(btn_sim)
+
+        lv.addWidget(self._section_label("SAVED SCENARIOS"))
+        self._saved_list = QListWidget()
+        self._saved_list.setFixedHeight(160)
+        self._saved_list.currentRowChanged.connect(self._load_scenario)
+        lv.addWidget(self._saved_list)
+
+        btn_del = QPushButton("🗑 Delete Selected")
+        btn_del.setStyleSheet(
+            "background:#DC2626;color:white;border:none;border-radius:4px;padding:4px 10px;")
+        btn_del.clicked.connect(self._delete_scenario)
+        lv.addWidget(btn_del, alignment=Qt.AlignmentFlag.AlignLeft)
+        lv.addStretch()
+
+        # ── Right panel: results ─────────────────────────────────────────────
+        right = QWidget()
+        rv = QVBoxLayout(right)
+        rv.setContentsMargins(12, 12, 12, 12)
+        rv.setSpacing(8)
+
+        rv.addWidget(self._section_label("SCENARIO COMPARISON"))
+
+        self._cmp_tbl = QTableWidget(0, 5)
+        self._cmp_tbl.setHorizontalHeaderLabels(
+            ["HC Added", "LATE Before", "LATE After", "Resolved", "Resolution Rate"])
+        self._cmp_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self._cmp_tbl.verticalHeader().setVisible(False)
+        self._cmp_tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._cmp_tbl.setAlternatingRowColors(True)
+        self._cmp_tbl.setFixedHeight(160)
+        rv.addWidget(self._cmp_tbl)
+
+        rv.addWidget(self._section_label("RESOLVED ORDERS (selected scenario step)"))
+        self._detail_tbl = QTableWidget(0, 3)
+        self._detail_tbl.setHorizontalHeaderLabels(["SO Number", "Status", "Note"])
+        self._detail_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._detail_tbl.verticalHeader().setVisible(False)
+        self._detail_tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._detail_tbl.setAlternatingRowColors(True)
+        self._cmp_tbl.itemSelectionChanged.connect(self._on_step_selected)
+        rv.addWidget(self._detail_tbl, 1)
+
+        self._note_lbl = QLabel("")
+        self._note_lbl.setWordWrap(True)
+        self._note_lbl.setStyleSheet("color:#6b7280;font-size:10px;padding:4px;")
+        rv.addWidget(self._note_lbl)
+
+        outer.addWidget(left)
+        outer.addWidget(right, 1)
+
+        self._current_results: List[Dict] = []
+
+    @staticmethod
+    def _section_label(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(
+            "color:#6b7aa3;font-size:10px;font-weight:bold;"
+            "padding:4px 0 2px 0;letter-spacing:0.05em;")
+        return lbl
+
+    def _detect(self):
+        from core.scheduler import scheduler as _sched
+        d0 = self._d_from.date().toString("yyyy-MM-dd")
+        d1 = self._d_to.date().toString("yyyy-MM-dd")
+        try:
+            self._bottlenecks = _sched.detect_bottlenecks(d0, d1)
+        except Exception as e:
+            QMessageBox.warning(self, "Error", str(e))
+            return
+
+        self._bn_tbl.setRowCount(len(self._bottlenecks))
+        total_rec = 0
+        for ri, bn in enumerate(self._bottlenecks):
+            for ci, val in enumerate([
+                bn["room_code"], bn["process_name"],
+                f"{bn['unmet_qty']:,.0f}", str(bn["recommended_hc"])
+            ]):
+                it = QTableWidgetItem(val)
+                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._bn_tbl.setItem(ri, ci, it)
+            total_rec += bn["recommended_hc"]
+
+        step = self.HC_STEP
+        self._max_hc = ((total_rec + step - 1) // step) * step
+        if self._max_hc == 0:
+            self._max_hc = step
+        self._max_hc_lbl.setText(f"Max recommended HC: {self._max_hc} people")
+
+        if not self._bottlenecks:
+            self._note_lbl.setText(
+                "No bottlenecks found — all MANUAL rooms have sufficient capacity.")
+
+    def _run_scenarios(self):
+        if not self._bottlenecks:
+            QMessageBox.information(self, "Detect First",
+                                    "Click '🔍 Detect Bottlenecks' first.")
+            return
+        from core.scheduler import scheduler as _sched
+        from data.repositories import ScenarioRepo
+        d0 = self._d_from.date().toString("yyyy-MM-dd")
+        d1 = self._d_to.date().toString("yyyy-MM-dd")
+        name = self._name_edit.text().strip() or "Scenario"
+
+        step = self.HC_STEP
+        max_hc = self._max_hc
+        hc_steps = []
+        v = step
+        while v <= max_hc:
+            hc_steps.append(v)
+            v += step
+        if not hc_steps or hc_steps[-1] < max_hc:
+            hc_steps.append(max_hc)
+        hc_steps = sorted(set(hc_steps))
+
+        bn_json = json.dumps(self._bottlenecks)
+        scen_id = ScenarioRepo.insert(name, d0, d1, max_hc, step, bn_json)
+
+        results = []
+        for hc in hc_steps:
+            try:
+                res = _sched.simulate_hc_scenario(d0, d1, self._bottlenecks, hc)
+            except Exception:
+                res = {"late_before": 0, "late_after": 0, "resolved_sos": [], "detail": {}}
+            ScenarioRepo.insert_result(
+                scen_id, hc,
+                res["late_before"], res["late_after"],
+                json.dumps(res["resolved_sos"]),
+                json.dumps(res["detail"]))
+            results.append({"hc_added": hc, **res})
+
+        self._current_results = results
+        self._populate_cmp_table(results)
+        self._load_saved()
+        for i in range(self._saved_list.count()):
+            item = self._saved_list.item(i)
+            if item and item.data(Qt.ItemDataRole.UserRole) == scen_id:
+                self._saved_list.setCurrentRow(i)
+                break
+
+    def _populate_cmp_table(self, results: List[Dict]):
+        self._cmp_tbl.setRowCount(len(results))
+        for ri, r in enumerate(results):
+            lb = r["late_before"]
+            la = r["late_after"]
+            resolved = len(r["resolved_sos"])
+            rate = f"{resolved / lb * 100:.0f}%" if lb > 0 else "N/A"
+            vals = [f"+{r['hc_added']} ppl", str(lb), str(la), str(resolved), rate]
+            colors = [None, "#fee2e2", "#dcfce7" if la < lb else "#fee2e2",
+                      "#dcfce7" if resolved > 0 else None,
+                      "#dcfce7" if resolved > 0 else None]
+            for ci, (val, bg) in enumerate(zip(vals, colors)):
+                it = QTableWidgetItem(val)
+                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if bg:
+                    it.setBackground(QBrush(QColor(bg)))
+                self._cmp_tbl.setItem(ri, ci, it)
+        self._cmp_tbl.resizeColumnsToContents()
+
+    def _on_step_selected(self):
+        row = self._cmp_tbl.currentRow()
+        if row < 0 or row >= len(self._current_results):
+            self._detail_tbl.setRowCount(0)
+            return
+        r = self._current_results[row]
+        sos = r["resolved_sos"]
+        self._detail_tbl.setRowCount(len(sos))
+        for ri, so_no in enumerate(sos):
+            for ci, val in enumerate([so_no, "RESOLVED", "Expected to meet due date"]):
+                it = QTableWidgetItem(val)
+                if ci == 1:
+                    it.setForeground(QBrush(QColor("#16A34A")))
+                self._detail_tbl.setItem(ri, ci, it)
+
+    def _load_saved(self):
+        from data.repositories import ScenarioRepo
+        scenarios = ScenarioRepo.all()
+        self._saved_list.clear()
+        for s in scenarios:
+            item = QListWidgetItem(
+                f"{s['name']}  ({s['date_from']}~{s['date_to']})  +{s['max_hc_add']}ppl")
+            item.setData(Qt.ItemDataRole.UserRole, s["scenario_id"])
+            self._saved_list.addItem(item)
+
+    def _load_scenario(self, row: int):
+        if row < 0:
+            return
+        item = self._saved_list.item(row)
+        if not item:
+            return
+        scen_id = item.data(Qt.ItemDataRole.UserRole)
+        from data.repositories import ScenarioRepo
+        results_raw = ScenarioRepo.results_for(scen_id)
+        results = []
+        for r in results_raw:
+            sos = json.loads(r.get("resolved_sos") or "[]")
+            results.append({
+                "hc_added":     r["hc_added"],
+                "late_before":  r["late_before"],
+                "late_after":   r["late_after"],
+                "resolved_sos": sos,
+                "detail":       json.loads(r.get("detail") or "{}"),
+            })
+        self._current_results = results
+        self._populate_cmp_table(results)
+
+        scen = ScenarioRepo.get(scen_id)
+        if scen:
+            bns = json.loads(scen.get("bottlenecks") or "[]")
+            self._bottlenecks = bns
+            self._bn_tbl.setRowCount(len(bns))
+            for ri, bn in enumerate(bns):
+                for ci, val in enumerate([
+                    bn.get("room_code", ""), bn.get("process_name", ""),
+                    f"{bn.get('unmet_qty', 0):,.0f}", str(bn.get("recommended_hc", 0))
+                ]):
+                    it = QTableWidgetItem(val)
+                    it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    self._bn_tbl.setItem(ri, ci, it)
+            self._max_hc_lbl.setText(f"Max recommended HC: {scen['max_hc_add']} people")
+
+    def _delete_scenario(self):
+        row = self._saved_list.currentRow()
+        if row < 0:
+            return
+        item = self._saved_list.item(row)
+        if not item:
+            return
+        scen_id = item.data(Qt.ItemDataRole.UserRole)
+        if QMessageBox.question(
+                self, "Delete", "Delete this scenario?",
+                QMessageBox.StandardButton.Yes |
+                QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+            from data.repositories import ScenarioRepo
+            ScenarioRepo.delete(scen_id)
+            self._load_saved()
+            self._cmp_tbl.setRowCount(0)
+            self._detail_tbl.setRowCount(0)
+            self._current_results = []
+
+    def refresh(self):
+        self._load_saved()

@@ -37,7 +37,8 @@ from ui.crp_tab import CRPTab
 from ui.actuals_tab import ActualsTab
 from ui.alerts_tab import AlertsTab
 from ui.dashboard_tab import DashboardTab
-from ui.remaining_tabs import InventoryTab, ReleaseReportTab
+from ui.remaining_tabs import InventoryTab, ReleaseReportTab, ImpactReportTab, ScenarioTab
+from ui.help_tab import HelpTab
 
 
 # ─── SVG icon helpers ────────────────────────────────────────────────────────
@@ -105,6 +106,10 @@ _IC_DASHBOARD= ('<line x1="6" y1="20" x2="6" y2="10"/>'
                 '<line x1="12" y1="20" x2="12" y2="4"/>'
                 '<line x1="18" y1="20" x2="18" y2="14"/>')
 
+_IC_HELP     = ('<circle cx="12" cy="12" r="10"/>'
+                '<path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>'
+                '<line x1="12" y1="17" x2="12.01" y2="17"/>')
+
 _IC_MASTERS  = ('<line x1="4" y1="21" x2="4" y2="14"/>'
                 '<line x1="4" y1="10" x2="4" y2="3"/>'
                 '<line x1="12" y1="21" x2="12" y2="12"/>'
@@ -154,14 +159,30 @@ class NavSidebar(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # Brand strip
-        brand = QLabel("  📅  Production Planner")
-        brand.setFixedHeight(52)
-        brand.setStyleSheet(
-            "background:#16213d; color:#ffffff; font-size:13.5px; font-weight:700;"
-            "padding-left:16px; border-bottom:1px solid rgba(255,255,255,0.08);"
+        # Brand strip — SVG calendar icon + text
+        brand_w = QWidget()
+        brand_w.setFixedHeight(52)
+        brand_w.setStyleSheet(
+            "QWidget { background:#16213d; border-bottom:1px solid rgba(255,255,255,0.08); }"
         )
-        outer.addWidget(brand)
+        brand_lay = QHBoxLayout(brand_w)
+        brand_lay.setContentsMargins(16, 0, 16, 0)
+        brand_lay.setSpacing(8)
+
+        icon_lbl = QLabel()
+        icon_lbl.setPixmap(_svg_pixmap(_IC_GANTT, "#7eb8ff", 16))
+        icon_lbl.setFixedSize(16, 16)
+        icon_lbl.setStyleSheet("background:transparent; border:none;")
+        brand_lay.addWidget(icon_lbl)
+
+        text_lbl = QLabel("Production Planner")
+        text_lbl.setStyleSheet(
+            "color:#ffffff; font-size:13.5px; font-weight:700;"
+            " background:transparent; border:none;"
+        )
+        brand_lay.addWidget(text_lbl)
+        brand_lay.addStretch()
+        outer.addWidget(brand_w)
 
         self._item_layout = QVBoxLayout()
         self._item_layout.setContentsMargins(0, 6, 0, 6)
@@ -291,6 +312,9 @@ class DetachedWindow(QMainWindow):
         self.dashboard_tab   = DashboardTab(self)
         self.inventory_tab   = InventoryTab(self)
         self.release_tab     = ReleaseReportTab(self)
+        self.impact_tab      = ImpactReportTab(self)
+        self.scenario_tab    = ScenarioTab(self)
+        self.help_tab        = HelpTab(self)
 
         _tab_defs = [
             (self.gantt_tab,     "📅  Gantt Planner"),
@@ -302,6 +326,9 @@ class DetachedWindow(QMainWindow):
             (self.dashboard_tab, "📊  Dashboard"),
             (self.inventory_tab, "📦  Inventory"),
             (self.release_tab,   "🚀  Release Report"),
+            (self.impact_tab,    "📈  Impact Report"),
+            (self.scenario_tab,  "🎯  Scenario Planner"),
+            (self.help_tab,      "❓  Help"),
         ]
         for widget, title in _tab_defs:
             self.tabs.addTab(widget, title)
@@ -356,8 +383,8 @@ class DetachedWindow(QMainWindow):
         if hasattr(tab, "refresh"):
             try:
                 tab.refresh()
-            except Exception:
-                pass
+            except Exception as e:
+                import traceback; traceback.print_exc()
 
     def _on_tab_changed(self, idx: int):
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -401,7 +428,7 @@ class DetachedWindow(QMainWindow):
                 self.conflict_label.setText("  ✅ No conflicts")
                 self.conflict_label.setStyleSheet("color: green;")
         except Exception:
-            pass
+            import traceback; traceback.print_exc()
 
     def notify(self, msg: str, level: str = "info"):
         self._status.showMessage(msg, 5000)
@@ -446,6 +473,7 @@ class MainWindow(QMainWindow):
         self._detached_windows: set = set()
         self._init_db()
         self._build_ui()
+        self._build_toolbar()
         self._build_statusbar()
         self._start_conflict_timer()
         self._setup_shortcuts()
@@ -471,21 +499,27 @@ class MainWindow(QMainWindow):
         self.dashboard_tab   = DashboardTab(self)
         self.inventory_tab   = InventoryTab(self)
         self.release_tab     = ReleaseReportTab(self)
+        self.impact_tab      = ImpactReportTab(self)
+        self.scenario_tab    = ScenarioTab(self)
+        self.help_tab        = HelpTab(self)
 
         # ── Stack widget (content area) ───────────────────────────────────────
         self._stack = QStackedWidget()
         self.tabs = _TabbedStack(self._stack)   # backward-compat proxy
 
         self._tab_defs = [
-            (self.gantt_tab,     "📅  Gantt Planner",  0),
-            (self.so_tab,        "📋  Sales Orders",   1),
-            (self.master_tab,    "🗂  Masters",         2),
-            (self.crp_tab,       "👥  CRP",             3),
-            (self.actuals_tab,   "✅  Actuals",         4),
-            (self.alerts_tab,    "⚠️  Alerts",          5),
-            (self.dashboard_tab, "📊  Dashboard",       6),
-            (self.inventory_tab, "📦  Inventory",       7),
-            (self.release_tab,   "🚀  Release Report",  8),
+            (self.gantt_tab,     "📅  Gantt Planner",    0),
+            (self.so_tab,        "📋  Sales Orders",     1),
+            (self.master_tab,    "🗂  Masters",           2),
+            (self.crp_tab,       "👥  CRP",               3),
+            (self.actuals_tab,   "✅  Actuals",           4),
+            (self.alerts_tab,    "⚠️  Alerts",            5),
+            (self.dashboard_tab, "📊  Dashboard",         6),
+            (self.inventory_tab, "📦  Inventory",         7),
+            (self.release_tab,   "🚀  Release Report",    8),
+            (self.impact_tab,    "📈  Impact Report",     9),
+            (self.scenario_tab,  "🎯  Scenario Planner", 10),
+            (self.help_tab,      "❓  Help",              11),
         ]
         for widget, title, _ in self._tab_defs:
             self.tabs.addTab(widget, title)
@@ -493,18 +527,21 @@ class MainWindow(QMainWindow):
         # ── Sidebar ───────────────────────────────────────────────────────────
         self._sidebar = NavSidebar(self)
         self._sidebar.add_group("Plan")
-        self._sidebar.add_item(_IC_GANTT,     "Gantt Planner",  0)
-        self._sidebar.add_item(_IC_SO,        "Sales Orders",   1)
-        self._sidebar.add_item(_IC_RELEASE,   "Release Report", 8)
+        self._sidebar.add_item(_IC_GANTT,     "Gantt Planner",    0)
+        self._sidebar.add_item(_IC_SO,        "Sales Orders",     1)
+        self._sidebar.add_item(_IC_RELEASE,   "Release Report",   8)
         self._sidebar.add_group("Capacity")
-        self._sidebar.add_item(_IC_CRP,       "CRP",            3)
-        self._sidebar.add_item(_IC_INVENTORY, "Inventory",      7)
+        self._sidebar.add_item(_IC_CRP,       "CRP",              3)
+        self._sidebar.add_item(_IC_INVENTORY, "Inventory",        7)
+        self._sidebar.add_item(_IC_DASHBOARD, "Scenario Planner", 10)
         self._sidebar.add_group("Track")
-        self._sidebar.add_item(_IC_ACTUALS,   "Actuals",        4)
-        self._sidebar.add_item(_IC_ALERTS,    "Alerts",         5)
-        self._sidebar.add_item(_IC_DASHBOARD, "Dashboard",      6)
+        self._sidebar.add_item(_IC_ACTUALS,   "Actuals",          4)
+        self._sidebar.add_item(_IC_ALERTS,    "Alerts",           5)
+        self._sidebar.add_item(_IC_DASHBOARD, "Dashboard",        6)
+        self._sidebar.add_item(_IC_RELEASE,   "Impact Report",    9)
         self._sidebar.add_group("Setup")
-        self._sidebar.add_item(_IC_MASTERS,   "Masters",        2)
+        self._sidebar.add_item(_IC_MASTERS,   "Masters",          2)
+        self._sidebar.add_item(_IC_HELP,      "Help",            11)
 
         self._sidebar.set_current(0)
         self._sidebar.tabRequested.connect(self._on_sidebar_nav)
@@ -523,43 +560,32 @@ class MainWindow(QMainWindow):
     def _build_toolbar(self):
         tb = QToolBar("Main Toolbar")
         tb.setMovable(False)
+        tb.setStyleSheet(
+            "QToolBar { background:#f7f8fc; border-bottom:1px solid #e2e4ea; spacing:4px; }"
+            "QToolButton { padding:4px 10px; font-size:11px; border-radius:4px; }"
+            "QToolButton:hover { background:#edeef3; }"
+        )
         self.addToolBar(tb)
-
-        act_replan = QAction("🔄  Re-Plan", self)
-        act_replan.setToolTip("Run auto-planning for the current horizon")
-        act_replan.triggered.connect(self.gantt_tab.run_auto_plan)
-        tb.addAction(act_replan)
-
-        act_pull = QAction("⬅  Pull Forward", self)
-        act_pull.setToolTip("Pull unscheduled capacity forward")
-        act_pull.triggered.connect(self.gantt_tab.run_pull_forward)
-        tb.addAction(act_pull)
-
-        act_clear_plan = QAction("🗑  Clear Plan", self)
-        act_clear_plan.setToolTip(
-            "Delete ALL production plans (SKU + MATERIAL). Asks to confirm first.")
-        act_clear_plan.triggered.connect(self.gantt_tab.run_clear_plan)
-        tb.addAction(act_clear_plan)
-
-        tb.addSeparator()
 
         act_crp_refresh = QAction("♻  Refresh CRP", self)
         act_crp_refresh.setToolTip("Reload CRP data from Excel")
         act_crp_refresh.triggered.connect(self._refresh_crp)
         tb.addAction(act_crp_refresh)
 
-        tb.addSeparator()
-
         act_conflicts = QAction("🔍  Check Conflicts", self)
+        act_conflicts.setToolTip("Detect capacity overruns and multi-process room-shift violations")
         act_conflicts.triggered.connect(self._check_conflicts)
         tb.addAction(act_conflicts)
+
+        act_history = QAction("📜  Plan History", self)
+        act_history.setToolTip("View full plan change history (moves, locks, deletes)")
+        act_history.triggered.connect(self._show_plan_history)
+        tb.addAction(act_history)
 
         tb.addSeparator()
 
         act_new_win = QAction("🗗  New Window  (Ctrl+N)", self)
-        act_new_win.setToolTip(
-            "Open current tab in a new window\n"
-            "Or right-click any tab header")
+        act_new_win.setToolTip("Open current view in a new window (Ctrl+N)")
         act_new_win.triggered.connect(self._detach_current_tab)
         tb.addAction(act_new_win)
 
@@ -679,6 +705,11 @@ class MainWindow(QMainWindow):
         self._on_sidebar_nav(5)
         self.alerts_tab.refresh()
 
+    def _show_plan_history(self):
+        from ui.remaining_tabs import PlanHistoryDialog
+        dlg = PlanHistoryDialog(self)
+        dlg.exec()
+
     def _check_conflicts_silent(self):
         from core.scheduler import scheduler
         from datetime import date, timedelta
@@ -700,7 +731,7 @@ class MainWindow(QMainWindow):
                     "color:#1d8a4a; font-weight:600; font-size:10.5px;")
                 self._sidebar.update_badge(5, "")
         except Exception:
-            pass
+            import traceback; traceback.print_exc()
 
     def notify(self, msg: str, level: str = "info"):
         self.status.showMessage(msg, 5000)
@@ -708,7 +739,7 @@ class MainWindow(QMainWindow):
             try:
                 win.notify(msg)
             except Exception:
-                pass
+                import traceback; traceback.print_exc()
 
     def refresh_all(self):
         """Refresh all tabs (main + secondary windows)."""
@@ -718,12 +749,12 @@ class MainWindow(QMainWindow):
                 try:
                     w.refresh()
                 except Exception:
-                    pass
+                    import traceback; traceback.print_exc()
         for win in list(self._detached_windows):
             try:
                 win._auto_refresh()
             except Exception:
-                pass
+                import traceback; traceback.print_exc()
 
     def closeEvent(self, event):
         event.accept()

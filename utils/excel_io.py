@@ -258,8 +258,8 @@ def upload_sku(path: str) -> Tuple[bool, str]:
 # ─── Room Master Template & Upload ────────────────────────────────────────────
 
 ROOM_HEADERS = ["RoomCode", "ProcessName", "ProcessType", "RoomType", "UPPH", "UPH_Fixed",
-                "HC_Min", "HC_Max", "HC_Fixed", "Note"]
-ROOM_COL_WIDTHS = [12, 20, 12, 12, 10, 10, 8, 8, 10, 30]
+                "HC_Min", "HC_Max", "HC_Fixed", "Changeover_Shifts", "Note"]
+ROOM_COL_WIDTHS = [12, 20, 12, 12, 10, 10, 8, 8, 10, 14, 30]
 
 def download_room_template(path: str) -> Tuple[bool, str]:
     if not HAS_OPENPYXL:
@@ -269,8 +269,8 @@ def download_room_template(path: str) -> Tuple[bool, str]:
     ws.title = "RoomMaster"
     _write_header(ws, ROOM_HEADERS)
     _col_widths(ws, ROOM_COL_WIDTHS)
-    ws.append(["ROOM-A", "PROCESS-1", "MANUAL", "TYPE-A", 50, "", 2, 6, "", ""])
-    ws.append(["ROOM-A", "PROCESS-2", "AUTO",   "TYPE-A", "", 200, "", "", 1, ""])
+    ws.append(["ROOM-A", "PROCESS-1", "MANUAL", "TYPE-A", 50, "", 2, 6, "", 1, ""])
+    ws.append(["ROOM-A", "PROCESS-2", "AUTO",   "TYPE-A", "", 200, "", "", 1, 0, ""])
     wb.save(path)
     return True, path
 
@@ -280,21 +280,32 @@ def upload_room(path: str) -> Tuple[bool, str]:
     try:
         wb = load_workbook(path, data_only=True)
         ws = wb["RoomMaster"] if "RoomMaster" in wb.sheetnames else wb.active
+        headers = [str(c.value).strip() if c.value else "" for c in next(ws.iter_rows(min_row=1, max_row=1))]
+        has_co = "Changeover_Shifts" in headers
         count = 0
         for row in ws.iter_rows(min_row=2, values_only=True):
             if not row[0]:
                 continue
+            if has_co:
+                # 11-column format (new)
+                co = int(row[9]) if row[9] is not None else 0
+                note = str(row[10]) if row[10] else None
+            else:
+                # 10-column legacy format — default changeover to 0
+                co = 0
+                note = str(row[9]) if row[9] else None
             RoomRepo.upsert({
-                "room_code":    str(row[0]).strip(),
-                "process_name": str(row[1]).strip(),
-                "process_type": str(row[2]).strip().upper(),
-                "room_type":    str(row[3]).strip() if row[3] else "TYPE-A",
-                "upph":         float(row[4]) if row[4] else None,
-                "uph_fixed":    float(row[5]) if row[5] else None,
-                "hc_min":       int(row[6]) if row[6] else None,
-                "hc_max":       int(row[7]) if row[7] else None,
-                "hc_fixed":     int(row[8]) if row[8] else None,
-                "note":         str(row[9]) if row[9] else None,
+                "room_code":         str(row[0]).strip(),
+                "process_name":      str(row[1]).strip(),
+                "process_type":      str(row[2]).strip().upper(),
+                "room_type":         str(row[3]).strip() if row[3] else "TYPE-A",
+                "upph":              float(row[4]) if row[4] else None,
+                "uph_fixed":         float(row[5]) if row[5] else None,
+                "hc_min":            int(row[6]) if row[6] else None,
+                "hc_max":            int(row[7]) if row[7] else None,
+                "hc_fixed":          int(row[8]) if row[8] else None,
+                "changeover_shifts": co,
+                "note":              note,
             })
             count += 1
         return True, f"Imported {count} room/process rows"

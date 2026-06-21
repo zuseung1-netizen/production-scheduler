@@ -261,7 +261,7 @@ class SOTab(QWidget):
                 QAbstractItemView.EditTrigger.DoubleClicked |
                 QAbstractItemView.EditTrigger.EditKeyPressed)
             self._status_label.setText(
-                "✏ 편집 모드 — Customer, Qty, Due Date, Priority, Status, Note 편집 가능")
+                "✏ Edit mode — Customer, Qty, Due Date, Priority, Status, Note are editable")
             self._status_label.setStyleSheet(
                 "color:#7a5800; background:#fff9c4; padding:4px; border-radius:4px;")
         else:
@@ -342,6 +342,8 @@ class SOTab(QWidget):
         self._status_label.setText(f"✅ Saved {saved} row(s)")
         self._status_label.setStyleSheet("color:green; padding:4px;")
         self._load_table()
+        if self.main_window and hasattr(self.main_window, "gantt_tab"):
+            self.main_window.gantt_tab.refresh()
 
     def _set_hold(self, so_no, sku, li, hold: bool):
         SORepo.hold(so_no, sku, li, hold)

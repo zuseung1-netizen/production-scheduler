@@ -20,19 +20,20 @@ from PyQt6.QtWidgets import (
     QMessageBox, QMenu, QDialog, QDialogButtonBox, QTextEdit,
     QApplication, QDateEdit, QFormLayout, QSpinBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QFrame,
-    QLineEdit, QButtonGroup
+    QLineEdit, QButtonGroup, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, pyqtSignal, QTimer, QThread
 from PyQt6.QtGui import (
     QPainter, QPainterPath, QColor, QFont, QFontMetrics, QPen, QBrush, QCursor
 )
 
 from data.repositories import (
     PlanRepo, SORepo, SKURepo, ShiftRepo, RoomRepo,
-    CalendarRepo, ConfigRepo, MaterialDemandRepo
+    CalendarRepo, ConfigRepo, MaterialDemandRepo, CompanyHolidayRepo
 )
 from core.scheduler import scheduler, sku_to_inner, shift_capacity_inner
 from utils.excel_io import export_gantt_plan
+from utils.korean_holidays import is_holiday, holiday_name
 
 
 # ─── Visual constants ─────────────────────────────────────────────────────────
@@ -44,7 +45,10 @@ PALETTE = [
 CONSOL_BORDER   = QColor(255, 205, 0)
 CONFLICT_DOT    = QColor(210, 30,  30)
 GRID_LINE       = QColor(218, 220, 230)
-GRID_WEEKEND    = QColor(245, 240, 240)
+GRID_WEEKEND    = QColor(245, 243, 249)
+GRID_HOLIDAY    = QColor(255, 237, 237)
+TODAY_COL_TINT  = QColor(240, 245, 255)
+HEADER_HOLIDAY  = QColor(148, 40,  40)
 DUE_LINE        = QColor(205, 50,  50)
 TODAY_LINE      = QColor(24,  128, 255)
 HEADER_BG       = QColor(38,  68,  128)
@@ -57,7 +61,7 @@ MAT_ACCENT      = QColor(108, 68,  168)   # material plan accent
 LATE_ACCENT     = QColor(192, 40,  40)    # late plan accent
 
 ROW_BG_A        = QColor(255, 255, 255)
-ROW_BG_B        = QColor(246, 248, 254)
+ROW_BG_B        = QColor(249, 250, 252)
 
 # ── New card design (white card + coloured left strip) ────────────────────────
 CARD_BG         = QColor(255, 255, 255)
@@ -71,15 +75,15 @@ DUE_TAG_LATE_BG = QColor(251, 231, 231)
 DUE_TAG_LATE_FG = QColor(194, 52,  47)
 CHECK_FILL      = QColor(63,  124, 196, 30)
 
-CARD_H     = 68   # card slot height (was 84)
-DAY_W      = 84
+CARD_H     = 72   # row slot height — matches mockup 72px body row
+DAY_W      = 88   # day column width
 SHIFT_W    = DAY_W
-HEADER_H   = 52
-UTIL_ROW_H = 18
-UTIL_H     = UTIL_ROW_H   # single cap-row (was × 2)
-DIM_COL_W  = 110
+HEADER_H   = 40   # date-header height (mockup: 40px)
+UTIL_ROW_H = 20
+UTIL_H     = UTIL_ROW_H * 2   # cap-row height: 2 rows × 20px = 40px
+DIM_COL_W  = 124  # Y-label width per dimension (mockup: 124px)
 SKU_COL_W  = 72
-Y_LABEL_W  = DIM_COL_W  # kept for any external references; canvas uses _y_label_w property
+Y_LABEL_W  = DIM_COL_W
 
 # ─── Y-axis dimension helpers ──────────────────────────────────────────────────
 # Available dim names (shown in toolbar dropdowns)
@@ -237,28 +241,36 @@ class ConsolidationEngine:
 # ─── Frozen date-axis header ──────────────────────────────────────────────────
 
 class GanttHeaderWidget(QWidget):
-    """Fixed header that stays at the top when the Gantt scrolls vertically.
-    Horizontal scroll is synced with the QScrollArea scrollbar so dates pan
-    correctly, while the Y-label corner remains anchored."""
+    """Fixed header (date row + cap row) stays visible during vertical scroll.
+    Horizontal scroll is synced with the QScrollArea scrollbar."""
+
+    _TOTAL_H = HEADER_H + UTIL_H   # 40 + 20 = 60px
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(HEADER_H)
-        # Data references — set by GanttTab.refresh()
-        self.shift_view   : bool       = False
-        self.horizon_days : int        = 28
-        self.start_date   : date       = date.today()
-        self._shifts      : list       = []
-        self._scroll_h    : int        = 0    # horizontal scrollbar value
-        self._y_label_w   : int        = DIM_COL_W
+        self.setFixedHeight(self._TOTAL_H)
+        self.shift_view      : bool = False
+        self.horizon_days    : int  = 28
+        self.start_date      : date = date.today()
+        self._shifts         : list = []
+        self._scroll_h       : int  = 0
+        self._y_label_w      : int  = DIM_COL_W
+        self._cap_map        : dict = {}
+        self._company_holidays: set = set()
+        self._hc_util_data   : dict = {}
+
+    def _is_holiday(self, d: date) -> bool:
+        return is_holiday(d) or d.isoformat() in self._company_holidays
 
     def sync_from(self, canvas: 'GanttCanvas'):
-        """Copy display parameters from the canvas and repaint."""
-        self.shift_view   = canvas.shift_view
-        self.horizon_days = canvas.horizon_days
-        self.start_date   = canvas.start_date
-        self._shifts      = canvas._shifts
-        self._y_label_w   = canvas._y_label_w
+        self.shift_view        = canvas.shift_view
+        self.horizon_days      = canvas.horizon_days
+        self.start_date        = canvas.start_date
+        self._shifts           = canvas._shifts
+        self._y_label_w        = canvas._y_label_w
+        self._cap_map          = canvas._cap_map
+        self._company_holidays = canvas._company_holidays
+        self._hc_util_data     = canvas._hc_util_by_date
         self.update()
 
     def set_scroll_h(self, val: int):
@@ -269,68 +281,340 @@ class GanttHeaderWidget(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         vw = self.width()
-
-        bold9 = QFont(); bold9.setBold(True); bold9.setPointSize(9)
-        f8    = QFont(); f8.setPointSize(8)
-
         yw = self._y_label_w
+        total_col_w = self._col_count() * self._col_w()
 
-        # ── Date columns (clipped to right of Y-label, panned by scroll) ──
+        # ── Scrolling date + cap section ──────────────────────────────────────
         p.save()
-        p.setClipRect(yw, 0, max(0, vw - yw), HEADER_H)
+        p.setClipRect(yw, 0, max(0, vw - yw), self._TOTAL_H)
         p.translate(-self._scroll_h, 0)
 
-        # Background
-        p.fillRect(0, 0, yw + self.horizon_days * self._col_w() + 200,
-                   HEADER_H, HEADER_BG)
+        total_w = yw + total_col_w + 200
+
+        # Date header background (#26447f)
+        p.fillRect(yw, 0, total_col_w + 200, HEADER_H, HEADER_BG)
+        # Cap row background (#1e3a6e)
+        cap_bg = QColor(30, 58, 110)
+        p.fillRect(yw, HEADER_H, total_col_w + 200, UTIL_H, cap_bg)
+
+        f_dd  = QFont("Segoe UI", 10, QFont.Weight.Bold)
+        f_dow = QFont("Segoe UI", 8)
+        f_cap = QFont("Segoe UI", 7, QFont.Weight.Bold)
 
         if not self.shift_view:
+            # Aggregate cap data per column
+            col_cap: dict = {}
+            for (ds, room, proc, sno), (used, cap) in self._cap_map.items():
+                col = self._date_to_col(ds, sno)
+                if col is not None:
+                    cu, cc = col_cap.get(col, (0.0, 0.0))
+                    col_cap[col] = (cu + used, cc + cap)
+
             for col in range(self.horizon_days):
                 d  = self.start_date + timedelta(days=col)
                 x  = yw + col * DAY_W
-                if d.weekday() >= 5:
+                is_weekend = d.weekday() >= 5
+                is_today   = d == date.today()
+                is_hday    = self._is_holiday(d)
+
+                if is_today:
+                    p.fillRect(x, 0, DAY_W, HEADER_H, QColor(30, 74, 142))
+                elif is_hday:
+                    p.fillRect(x, 0, DAY_W, HEADER_H, HEADER_HOLIDAY)
+                elif is_weekend:
                     p.fillRect(x, 0, DAY_W, HEADER_H, HEADER_WEEKEND)
-                p.setPen(QPen(QColor(255, 255, 255, 30)))
-                p.drawLine(x, 4, x, HEADER_H - 4)
-                p.setPen(QPen(HEADER_FG))
-                p.setFont(bold9)
-                p.drawText(QRect(x + 2, 2, DAY_W - 4, HEADER_H // 2 - 1),
-                           Qt.AlignmentFlag.AlignCenter, d.strftime("%m/%d"))
-                p.setFont(f8)
-                p.setPen(QPen(QColor(200, 215, 240)))
-                p.drawText(QRect(x + 2, HEADER_H // 2, DAY_W - 4, HEADER_H // 2 - 2),
-                           Qt.AlignmentFlag.AlignCenter, d.strftime("%a"))
+
+                # Date divider
+                p.setPen(QPen(QColor(255, 255, 255, 25)))
+                p.drawLine(x, 2, x, HEADER_H - 2)
+
+                # Date number
+                p.setPen(QPen(QColor(100, 160, 255) if is_today else HEADER_FG))
+                p.setFont(f_dd)
+                date_label = d.strftime("%m/%d")
+                p.drawText(QRect(x, 2, DAY_W, 22),
+                           Qt.AlignmentFlag.AlignCenter,
+                           date_label)
+                # Day of week
+                p.setPen(QPen(QColor(174, 191, 230)))
+                p.setFont(f_dow)
+                p.drawText(QRect(x, 24, DAY_W, 14),
+                           Qt.AlignmentFlag.AlignCenter,
+                           d.strftime("%a").upper())
+
+                # Cap bar — Row 1 (7px height, centered in top UTIL_ROW_H)
+                used, cap = col_cap.get(col, (0.0, 0.0))
+                ratio = (used / cap) if cap > 0 else 0
+                bar_h  = 7
+                bar_y  = HEADER_H + (UTIL_ROW_H - bar_h) // 2
+                cw_    = DAY_W - 4
+                fill_w = int(cw_ * min(ratio, 1.0))
+                color  = (UTIL_HIGH if ratio > 0.9 else
+                          UTIL_MED  if ratio > 0.6 else
+                          (UTIL_LOW if ratio > 0 else QColor(214, 218, 227)))
+                p.setBrush(QBrush(color))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.drawRoundedRect(QRect(x + 2, bar_y, max(fill_w, 0), bar_h), 2, 2)
+                # Cap tag badge (red background when over 90%)
+                if ratio > 0.9:
+                    tag_txt = f"{int(ratio * 100)}%"
+                    p.setFont(f_cap)
+                    from PyQt6.QtGui import QFontMetrics
+                    tag_w = QFontMetrics(f_cap).horizontalAdvance(tag_txt) + 6
+                    tag_h = 10
+                    tag_x = x + DAY_W - tag_w - 2
+                    tag_y_pos = HEADER_H + (UTIL_ROW_H - tag_h) // 2
+                    p.setBrush(QBrush(QColor(194, 52, 47)))
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.drawRoundedRect(QRect(tag_x, tag_y_pos, tag_w, tag_h), 2, 2)
+                    p.setPen(QPen(Qt.GlobalColor.white))
+                    p.drawText(QRect(tag_x, tag_y_pos, tag_w, tag_h),
+                               Qt.AlignmentFlag.AlignCenter, tag_txt)
+
+                # HC% bar — Row 2 (7px height, centered in bottom UTIL_ROW_H)
+                ds_str = (self.start_date + timedelta(days=col)).strftime("%Y-%m-%d")
+                hc_pct = self._hc_util_data.get(ds_str, 0.0)
+                hc_ratio = hc_pct / 100.0
+                hc_bar_y = HEADER_H + UTIL_ROW_H + (UTIL_ROW_H - bar_h) // 2
+                hc_fill_w = int(cw_ * min(hc_ratio, 1.0))
+                hc_color = (UTIL_HIGH if hc_ratio > 0.9 else
+                            UTIL_MED  if hc_ratio > 0.6 else
+                            (UTIL_LOW if hc_ratio > 0 else QColor(214, 218, 227)))
+                p.setBrush(QBrush(hc_color))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.drawRoundedRect(QRect(x + 2, hc_bar_y, max(hc_fill_w, 0), bar_h), 2, 2)
+
+                # Row separator between Cap% and HC% rows
+                p.setPen(QPen(QColor(255, 255, 255, 20)))
+                p.drawLine(x, HEADER_H + UTIL_ROW_H, x + DAY_W, HEADER_H + UTIL_ROW_H)
+
+                # Cap divider
+                p.setPen(QPen(QColor(255, 255, 255, 15)))
+                p.drawLine(x, HEADER_H, x, HEADER_H + UTIL_H)
         else:
             n = len(self._shifts)
             if n:
                 for day in range(self.horizon_days):
                     d  = self.start_date + timedelta(days=day)
                     x0 = yw + day * n * SHIFT_W
-                    p.setFont(bold9); p.setPen(QPen(HEADER_FG))
-                    p.drawText(QRect(x0, 2, n * SHIFT_W, HEADER_H // 2 - 2),
-                               Qt.AlignmentFlag.AlignCenter, d.strftime("%m/%d"))
-                    p.setFont(f8)
+                    p.setFont(f_dd); p.setPen(QPen(HEADER_FG))
+                    p.drawText(QRect(x0, 2, n * SHIFT_W, 22),
+                               Qt.AlignmentFlag.AlignCenter,
+                               d.strftime("%m/%d"))
+                    p.setFont(f_dow)
                     for si, shift in enumerate(self._shifts):
                         sx = x0 + si * SHIFT_W
-                        p.setPen(QPen(QColor(255, 255, 255, 30)))
+                        p.setPen(QPen(QColor(255, 255, 255, 25)))
                         p.drawLine(sx, HEADER_H // 2, sx, HEADER_H - 2)
-                        p.setPen(QPen(QColor(200, 215, 240)))
-                        p.drawText(QRect(sx, HEADER_H // 2, SHIFT_W, HEADER_H // 2),
+                        p.setPen(QPen(QColor(174, 191, 230)))
+                        p.drawText(QRect(sx, 24, SHIFT_W, 14),
                                    Qt.AlignmentFlag.AlignCenter,
                                    f"S{shift['shift_no']}")
 
         p.restore()
 
-        # ── Y-label corner (always fixed at x=0) ──
-        p.fillRect(0, 0, yw, HEADER_H, QColor(50, 82, 148))
-        # Thin separator between corner and date columns
-        p.setPen(QPen(QColor(255, 255, 255, 60)))
-        p.drawLine(yw, 0, yw, HEADER_H)
-
+        # ── Fixed Y-label corner ──────────────────────────────────────────────
+        p.fillRect(0, 0, yw, HEADER_H, QColor(38, 68, 128))
+        p.fillRect(0, HEADER_H, yw, UTIL_H, QColor(30, 58, 110))
+        # "Cap%" label in Row 1 center, "HC%" label in Row 2 center
+        p.setPen(QPen(QColor(174, 191, 230)))
+        p.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+        cap_lbl_y = HEADER_H + (UTIL_ROW_H - 10) // 2
+        p.drawText(QRect(2, cap_lbl_y, yw - 4, 12),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   "Cap%")
+        hc_lbl_y = HEADER_H + UTIL_ROW_H + (UTIL_ROW_H - 10) // 2
+        p.drawText(QRect(2, hc_lbl_y, yw - 4, 12),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   "HC%")
+        p.setPen(QPen(QColor(255, 255, 255, 40)))
+        p.drawLine(yw, 0, yw, self._TOTAL_H)
         p.end()
 
     def _col_w(self) -> int:
         return SHIFT_W if self.shift_view else DAY_W
+
+    def _col_count(self) -> int:
+        return self.horizon_days * len(self._shifts) if self.shift_view else self.horizon_days
+
+    def _date_to_col(self, d: str, shift_no: int = 1):
+        try:
+            delta = (datetime.strptime(d, "%Y-%m-%d").date() - self.start_date).days
+        except ValueError:
+            return None
+        if delta < 0 or delta >= self.horizon_days:
+            return None
+        if self.shift_view and self._shifts:
+            idx = next((i for i, s in enumerate(self._shifts)
+                        if s["shift_no"] == shift_no), 0)
+            return delta * len(self._shifts) + idx
+        return delta
+
+
+# ─── Frozen Y-axis label column ───────────────────────────────────────────────
+
+class GanttYLabelWidget(QWidget):
+    """Frozen Y-axis sidebar. Lives outside QScrollArea; syncs with vertical scroll."""
+
+    YLBL_BG      = QColor(240, 242, 248)
+    YLBL_GRP_BG  = QColor(228, 232, 243)
+    YLBL_GRP_FG  = QColor(30,  41,  59)
+    YLBL_ROW_A   = QColor(247, 248, 251)
+    YLBL_ROW_B   = QColor(239, 241, 246)
+    YLBL_SUB_FG  = QColor(100, 116, 139)
+    YLBL_SEP_MAJ = QColor(200, 206, 223)
+    YLBL_SEP_MIN = QColor(221, 226, 238)
+    YLBL_BORDER  = QColor(192, 200, 220)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._rows         : List[str] = []
+        self._row_heights  : List[int] = []
+        self._row_y_list   : List[int] = []
+        self._total_body_h : int       = 0
+        self._y_label_w    : int       = DIM_COL_W
+        self._y_dims       : List[str] = ["Room"]
+        self._scroll_v     : int       = 0
+        self.setFixedWidth(DIM_COL_W)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+
+    def sync_from(self, canvas: 'GanttCanvas'):
+        self._rows         = canvas._rows
+        self._row_heights  = canvas._row_heights
+        self._row_y_list   = canvas._row_y_list
+        self._total_body_h = canvas._total_body_h
+        self._y_label_w    = canvas._y_label_w
+        self._y_dims       = canvas.y_dims[:]
+        self.setFixedWidth(self._y_label_w)
+        self.update()
+
+    def set_scroll_v(self, val: int):
+        self._scroll_v = val
+        self.update()
+
+    def _y_sub_label(self, row_key: str) -> str:
+        dim = self._y_dims[0] if self._y_dims else ""
+        val = row_key.split("|")[0]
+        if dim == "Room":
+            try:
+                from data.repositories import RoomRepo as _RR
+                procs = [r["process_name"] for r in _RR.all() if r["room_code"] == val]
+                unique = list(dict.fromkeys(procs))
+                return " · ".join(unique[:2]) if unique else ""
+            except Exception:
+                return ""
+        return ""
+
+    def paintEvent(self, event):
+        if not self._rows:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+        yw    = self._y_label_w
+        ndims = len(self._y_dims)
+        cw    = yw // ndims if ndims else yw
+        vh    = self.height()
+
+        p.save()
+        p.setClipRect(0, 0, yw - 1, vh)
+        p.translate(0, -self._scroll_v)
+
+        full_h = self._total_body_h + self._scroll_v + vh
+        p.fillRect(0, 0, yw, max(self._total_body_h, full_h), self.YLBL_BG)
+
+        if ndims == 1:
+            f_pri  = QFont("Segoe UI", 10, QFont.Weight.DemiBold)
+            f_sub  = QFont("Segoe UI", 8)
+            fm_pri = QFontMetrics(f_pri)
+            fm_sub = QFontMetrics(f_sub)
+
+            for ri, rk in enumerate(self._rows):
+                y  = self._row_y_list[ri]
+                rh = self._row_heights[ri]
+                p.fillRect(0, y, yw, rh,
+                           self.YLBL_ROW_A if ri % 2 == 0 else self.YLBL_ROW_B)
+                p.fillRect(0, y, 3, rh, _color_for_key(rk.split("|")[0]))
+                p.setPen(QPen(self.YLBL_SEP_MAJ, 1))
+                p.drawLine(0, y, yw, y)
+
+                label = _dim_label(self._y_dims[0], rk.split("|")[0])
+                sub   = self._y_sub_label(rk)
+                mid   = y + rh // 2
+                tx, tw = 9, yw - 13
+
+                if sub:
+                    p.setPen(QPen(self.YLBL_GRP_FG))
+                    p.setFont(f_pri)
+                    p.drawText(QRect(tx, mid - 13, tw, 14),
+                               Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                               fm_pri.elidedText(label, Qt.TextElideMode.ElideRight, tw))
+                    p.setPen(QPen(self.YLBL_SUB_FG))
+                    p.setFont(f_sub)
+                    p.drawText(QRect(tx, mid + 2, tw, 12),
+                               Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                               fm_sub.elidedText(sub, Qt.TextElideMode.ElideRight, tw))
+                else:
+                    p.setPen(QPen(self.YLBL_GRP_FG))
+                    p.setFont(f_pri)
+                    p.drawText(QRect(tx, y + 2, tw, rh - 4),
+                               Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                               fm_pri.elidedText(label, Qt.TextElideMode.ElideRight, tw))
+        else:
+            f_grp  = QFont("Segoe UI", 10, QFont.Weight.Bold)
+            f_lf   = QFont("Segoe UI", 9)
+            fm_grp = QFontMetrics(f_grp)
+            fm_lf  = QFontMetrics(f_lf)
+
+            for d in range(ndims):
+                x_col   = d * cw
+                is_last = (d == ndims - 1)
+
+                groups: List[Tuple] = []
+                for ri, rk in enumerate(self._rows):
+                    parts  = rk.split("|")
+                    prefix = tuple(parts[:d + 1])
+                    if not groups or groups[-1][0] != prefix:
+                        groups.append((prefix, []))
+                    groups[-1][1].append(ri)
+
+                for gi, (prefix, row_idxs) in enumerate(groups):
+                    y_top = self._row_y_list[row_idxs[0]]
+                    grp_h = sum(self._row_heights[ri] for ri in row_idxs)
+                    if is_last:
+                        bg = self.YLBL_ROW_A if gi % 2 == 0 else self.YLBL_ROW_B
+                    else:
+                        bg = self.YLBL_GRP_BG
+                    p.fillRect(x_col, y_top, cw, grp_h, bg)
+                    if not is_last:
+                        p.fillRect(x_col, y_top, 3, grp_h, _color_for_key(prefix[0]))
+
+                    label = _dim_label(self._y_dims[d], prefix[d])
+                    fm    = fm_lf if is_last else fm_grp
+                    align = (Qt.AlignmentFlag.AlignCenter if not is_last
+                             else Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                    p.setPen(QPen(self.YLBL_GRP_FG))
+                    p.setFont(f_grp if not is_last else f_lf)
+                    p.drawText(QRect(x_col + 10, y_top + 2, cw - 14, grp_h - 4),
+                               align,
+                               fm.elidedText(label, Qt.TextElideMode.ElideRight, cw - 14))
+
+                    p.setPen(QPen(self.YLBL_SEP_MAJ, 1))
+                    p.drawLine(x_col, y_top, x_col + cw, y_top)
+
+                    if is_last:
+                        for ri in row_idxs[1:]:
+                            y = self._row_y_list[ri]
+                            p.setPen(QPen(self.YLBL_SEP_MIN, 1, Qt.PenStyle.DotLine))
+                            p.drawLine(x_col, y, x_col + cw, y)
+
+            p.setPen(QPen(self.YLBL_BORDER, 1))
+            for d in range(1, ndims):
+                p.drawLine(d * cw, 0, d * cw, self._total_body_h)
+
+        p.restore()
+        p.setPen(QPen(self.YLBL_BORDER, 1))
+        p.drawLine(yw - 1, 0, yw - 1, vh)
 
 
 # ─── Gantt Canvas ─────────────────────────────────────────────────────────────
@@ -376,7 +660,8 @@ class GanttCanvas(QWidget):
         self._drag_invalid  : bool             = False
         self._drag_split    : bool             = False   # Ctrl+drag → split mode
         # (room_code, process_name) pairs that are valid — populated in load_data
-        self._room_proc_set: set               = set()
+        self._room_proc_set   : set = set()
+        self._company_holidays: set = set()   # date ISO strings from DB
 
         self._cell_map      : Dict[int, QRect] = {}
         self._check_rects   : Dict[int, QRect] = {}
@@ -384,6 +669,8 @@ class GanttCanvas(QWidget):
         self._cap_map     : Dict[Tuple, Tuple] = {}
         # headcount util: (date_str, shift_no) -> (alloc, crp_total)
         self._hc_map      : Dict[Tuple, Tuple] = {}
+        # HC utilisation by date: date_str -> pct (0-100)
+        self._hc_util_by_date: Dict[str, float] = {}
         # plan_id -> (slot_index, total_in_slot) for vertical stacking
         self._plan_layout : Dict[int, Tuple[int, int]] = {}
         # O(1) row lookup built in _build_rows()
@@ -413,7 +700,8 @@ class GanttCanvas(QWidget):
         self._conflicts = conflicts
         valid_ids = {p["plan_id"] for p in plans}
         self._checked = self._checked & valid_ids
-        self._room_proc_set = {(r["room_code"], r["process_name"]) for r in RoomRepo.all()}
+        self._room_proc_set    = {(r["room_code"], r["process_name"]) for r in RoomRepo.all()}
+        self._company_holidays = CompanyHolidayRepo.date_set()
         self._build_rows()
         # Precompute SO -> row indices for O(1) lookup in _draw_due_lines
         so_rows_tmp: Dict[Tuple, set] = {}
@@ -429,6 +717,13 @@ class GanttCanvas(QWidget):
         self._build_layout_and_heights()
         self._build_hc_map()
         self._build_closed_map()
+        # Populate HC utilisation by date for the header second row
+        try:
+            d0_str = self.start_date.strftime("%Y-%m-%d")
+            d1_str = (self.start_date + timedelta(days=self.horizon_days - 1)).strftime("%Y-%m-%d")
+            self._hc_util_by_date = scheduler.compute_hc_utilization_by_date(d0_str, d1_str)
+        except Exception:
+            self._hc_util_by_date = {}
         self._update_size()
         self.update()
 
@@ -436,15 +731,19 @@ class GanttCanvas(QWidget):
         self._search_filter = text
         self.update()
 
+    def _is_holiday(self, d: date) -> bool:
+        return is_holiday(d) or d.isoformat() in self._company_holidays
+
     def _plan_row_key(self, plan: Dict) -> str:
         """Return the pipe-joined row key for a plan based on current y_dims."""
         return "|".join(_dim_key(d, plan) for d in self.y_dims)
 
     def _build_rows(self):
         keys = {self._plan_row_key(p) for p in self._plans}
-        # When single Room dim and no plans, show all configured rooms
-        if self.y_dims == ["Room"] and not keys:
-            keys = {r for r in RoomRepo.rooms()}
+        # Room mode: always show all configured rooms so empty rooms are visible
+        # and drag-to-unsupported validation can work
+        if self.y_dims == ["Room"]:
+            keys |= set(RoomRepo.rooms())
         self._rows = sorted(keys)
         # O(1) lookup dict
         self._row_index = {r: i for i, r in enumerate(self._rows)}
@@ -561,7 +860,7 @@ class GanttCanvas(QWidget):
         return SHIFT_W if self.shift_view else DAY_W
 
     def _total_w(self):
-        return self._y_label_w + self._col_count() * self._col_w()
+        return self._col_count() * self._col_w()
 
     def _total_h(self):
         return self._body_top() + self._total_body_h + 20
@@ -577,8 +876,8 @@ class GanttCanvas(QWidget):
         self.setMinimumSize(self._total_w(), max(400, self._total_h()))
 
     def _body_top(self):
-        """Y pixel where gantt body starts (below header + util bars)."""
-        return HEADER_H + UTIL_H
+        """Canvas body starts at y=0 — header/util are in the frozen widget above."""
+        return 0
 
     def _date_to_col(self, d: str, shift_no: int = 1) -> Optional[int]:
         try:
@@ -622,7 +921,7 @@ class GanttCanvas(QWidget):
             return None
         slot_idx = self._plan_layout.get(plan["plan_id"], (0, 1))[0]
         col_w = self._col_w()
-        x = self._y_label_w + col * col_w + 1
+        x = col * col_w + 1
         w = col_w - 2
         y = self._row_y_list[row] + slot_idx * CARD_H + 2
         return QRect(x, y, w, CARD_H - 4)
@@ -639,9 +938,6 @@ class GanttCanvas(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         self._draw_grid(p)
-        self._draw_header(p)
-        self._draw_util_bars(p)
-        self._draw_y_labels(p)
         self._draw_due_lines(p)
         self._draw_today_line(p)
         self._draw_plans(p)
@@ -650,145 +946,129 @@ class GanttCanvas(QWidget):
         p.end()
 
     def _draw_grid(self, p: QPainter):
-        yw = self._y_label_w
         w, h = self._total_w(), self._total_h()
-        # Alternating row backgrounds (variable height)
+        cw_  = self._col_w()
+        # Alternating row backgrounds
         for ri in range(len(self._rows)):
             y  = self._row_y_list[ri]
             rh = self._row_heights[ri]
             bg = ROW_BG_A if ri % 2 == 0 else ROW_BG_B
-            p.fillRect(yw, y, w - yw, rh, bg)
-        # Weekend column tint
+            p.fillRect(0, y, w, rh, bg)
+        # Weekend + today column tints
         if not self.shift_view:
+            today_col_idx = self._date_to_col(date.today().strftime("%Y-%m-%d"))
             for col in range(self.horizon_days):
                 d = self.start_date + timedelta(days=col)
+                x = col * DAY_W
                 if d.weekday() >= 5:
-                    x = yw + col * DAY_W
-                    p.fillRect(x, self._body_top(), DAY_W, h - self._body_top(),
-                               GRID_WEEKEND)
+                    p.fillRect(x, 0, DAY_W, h, GRID_WEEKEND)
+                if self._is_holiday(d):
+                    p.fillRect(x, 0, DAY_W, h, GRID_HOLIDAY)
+                if col == today_col_idx:
+                    p.fillRect(x, 0, DAY_W, h, TODAY_COL_TINT)
         # Unavailable cells: closed=gray hatch, hold=orange hatch
         if self._closed_map:
-            cw = self._col_w()
-            bt = self._body_top()
             for (ri, col), status in self._closed_map.items():
                 if ri >= len(self._row_y_list):
                     continue
                 cy  = self._row_y_list[ri]
                 crh = self._row_heights[ri]
-                cx  = yw + col * cw
+                cx  = col * cw_
                 if status == "hold":
                     base  = QColor(255, 160, 40, 55)
                     hatch = QColor(210, 120, 20, 110)
                 else:
                     base  = QColor(160, 160, 165, 60)
                     hatch = QColor(120, 120, 128, 120)
-                p.fillRect(cx, cy, cw, crh, base)
+                p.fillRect(cx, cy, cw_, crh, base)
                 old_pen = p.pen()
                 p.setPen(QPen(hatch, 1))
                 step = 8
-                x0, y0, x1, y1 = cx, cy, cx + cw, cy + crh
-                # diagonal lines top-left → bottom-right
-                diag_range = range(-(crh), cw, step)
-                for offset in diag_range:
+                x0, y0, x1, y1 = cx, cy, cx + cw_, cy + crh
+                for offset in range(-(crh), cw_, step):
                     ax = x0 + offset
                     p.drawLine(max(ax, x0), y0 if ax >= x0 else y0 + (x0 - ax),
                                min(ax + crh, x1), y0 + crh if ax + crh <= x1 else y1 - ((ax + crh) - x1))
                 p.setPen(old_pen)
-        # Grid lines
+        # Vertical column dividers
         p.setPen(QPen(GRID_LINE, 1))
         for col in range(self._col_count() + 1):
-            x = self._y_label_w + col * self._col_w()
-            p.drawLine(x, HEADER_H, x, h)
+            x = col * cw_
+            p.drawLine(x, 0, x, h)
+        # Horizontal row dividers
         for ri in range(len(self._rows)):
             y = self._row_y_list[ri]
             p.drawLine(0, y, w, y)
-        y_end = self._body_top() + self._total_body_h
-        p.drawLine(0, y_end, w, y_end)
-
-    def _draw_header(self, p: QPainter):
-        # Header background only — date text is rendered by GanttHeaderWidget
-        # (the fixed overlay above the scroll area) so it stays frozen on scroll.
-        p.fillRect(0, 0, self._total_w(), HEADER_H, HEADER_BG)
-        p.fillRect(0, 0, self._y_label_w, HEADER_H, QColor(50, 82, 148))
-
-    def _draw_util_bars(self, p: QPainter):
-        """Draw single capacity-utilisation row below the date header."""
-        y0 = HEADER_H
-        yw = self._y_label_w
-
-        # Background strip
-        p.fillRect(yw, y0, self._col_count() * self._col_w(), UTIL_ROW_H,
-                   QColor(30, 58, 110))
-
-        col_cap: Dict[int, Tuple[float, float]] = {}
-        for (ds, room, proc, sno), (used, cap) in self._cap_map.items():
-            col = self._date_to_col(ds, sno)
-            if col is None:
-                continue
-            cu, cc = col_cap.get(col, (0.0, 0.0))
-            col_cap[col] = (cu + used, cc + cap)
-
-        f7 = QFont("Segoe UI", 7)
-        p.setFont(f7)
-        for col, (used, cap) in col_cap.items():
-            ratio = (used / cap) if cap > 0 else 0
-            x     = yw + col * self._col_w()
-            color = UTIL_HIGH if ratio > 0.9 else UTIL_MED if ratio > 0.6 else UTIL_LOW
-            fill  = min(ratio, 1.0)
-            bar_h = UTIL_ROW_H - 2
-            p.fillRect(x + 1, y0 + 1, int((self._col_w() - 2) * fill), bar_h, color)
-            if ratio > 0.9:
-                label = f"{int(ratio*100)}%"
-                p.setPen(QPen(Qt.GlobalColor.white))
-                p.drawText(QRect(x+1, y0, self._col_w()-2, UTIL_ROW_H),
-                           Qt.AlignmentFlag.AlignCenter, label)
+        p.drawLine(0, self._total_body_h, w, self._total_body_h)
 
     def _draw_y_labels(self, p: QPainter):
-        """Draw Y-axis labels with N-depth spanning columns."""
+        """Y-axis labels — mockup style: #f7f8fb bg, bold name + muted sub-label."""
         yw    = self._y_label_w
         ndims = len(self.y_dims)
-        cw    = yw // ndims if ndims else yw   # width per dim column
+        cw    = yw // ndims if ndims else yw
 
-        sep_group = QColor(185, 190, 208)
-        sep_inner = QColor(215, 218, 230)
-        grp_bgs   = [QColor(228, 237, 255), QColor(225, 244, 228)]
-        fg_bold   = QColor(25, 45, 100)
-        fg_normal = QColor(48, 52, 72)
+        BG_A   = QColor(247, 248, 251)   # #f7f8fb
+        BG_B   = QColor(243, 244, 247)   # slightly darker alt row
+        FG_PRI = QColor(22,  33,  61)    # #16213d bold
+        FG_SUB = QColor(139, 147, 168)   # #8b93a8 muted
+        SEP    = QColor(233, 234, 240)   # #e9eaf0 row divider
+        COL_SEP= QColor(200, 203, 215)   # dim column divider
 
-        p.fillRect(0, self._body_top(), yw, self._total_body_h, QColor(245, 245, 250))
+        f_pri = QFont("Segoe UI", 12, QFont.Weight.Bold)
+        f_sub = QFont("Segoe UI", 10)
+
+        total_h = self._total_body_h
+        p.fillRect(0, 0, yw, total_h, BG_A)
 
         if ndims == 1:
-            # Simple flat list — no spanning needed
-            f9 = QFont("Arial", 9)
-            p.setFont(f9)
             for ri, rk in enumerate(self._rows):
                 y  = self._row_y_list[ri]
                 rh = self._row_heights[ri]
-                bg = grp_bgs[ri % len(grp_bgs)]
+                bg = BG_A if ri % 2 == 0 else BG_B
                 p.fillRect(0, y, yw, rh, bg)
-                p.setPen(QPen(sep_inner))
+
+                # Row divider
+                p.setPen(QPen(SEP, 1))
                 p.drawLine(0, y, yw, y)
-                p.setPen(QPen(fg_normal))
+
                 label = _dim_label(self.y_dims[0], rk.split("|")[0])
-                p.drawText(QRect(6, y + 4, yw - 10, rh - 8),
-                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                           label)
-            y_end = self._body_top() + self._total_body_h
-            p.setPen(QPen(sep_group, 1))
-            p.drawLine(0, y_end, yw, y_end)
-            p.drawLine(yw - 1, self._body_top(), yw - 1, y_end)
+                # Try to get a sub-label
+                sub = self._y_sub_label(rk, 0)
+
+                cx_pad, cy_pad = 14, 0
+                text_w = yw - cx_pad - 6
+                mid = y + rh // 2
+                if sub:
+                    p.setPen(QPen(FG_PRI))
+                    p.setFont(f_pri)
+                    p.drawText(QRect(cx_pad, mid - 14, text_w, 16),
+                               Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                               label)
+                    p.setPen(QPen(FG_SUB))
+                    p.setFont(f_sub)
+                    p.drawText(QRect(cx_pad, mid + 2, text_w, 14),
+                               Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                               sub)
+                else:
+                    p.setPen(QPen(FG_PRI))
+                    p.setFont(f_pri)
+                    p.drawText(QRect(cx_pad, y + 2, text_w, rh - 4),
+                               Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                               label)
+
+            # Right border
+            p.setPen(QPen(COL_SEP, 1))
+            p.drawLine(yw - 1, 0, yw - 1, total_h)
             return
 
-        # Multi-depth: for each depth d draw spanning group labels
-        fb = QFont("Arial", 9); fb.setBold(True)
-        f8 = QFont("Arial", 8)
+        # Multi-depth spanning groups
+        f_grp = QFont("Segoe UI", 10, QFont.Weight.Bold)
+        f_lf  = QFont("Segoe UI", 9)
 
         for d in range(ndims):
             x_col   = d * cw
             is_last = (d == ndims - 1)
-            p.setFont(f8 if is_last else fb)
 
-            # Group consecutive rows sharing the same prefix up to depth d
             groups: List[Tuple[tuple, List[int]]] = []
             for ri, rk in enumerate(self._rows):
                 parts  = rk.split("|")
@@ -798,42 +1078,51 @@ class GanttCanvas(QWidget):
                 groups[-1][1].append(ri)
 
             for gi, (prefix, row_idxs) in enumerate(groups):
-                bg    = grp_bgs[gi % len(grp_bgs)]
+                bg    = BG_A if gi % 2 == 0 else BG_B
                 y_top = self._row_y_list[row_idxs[0]]
                 grp_h = sum(self._row_heights[ri] for ri in row_idxs)
-
                 p.fillRect(x_col, y_top, cw, grp_h, bg)
 
                 label = _dim_label(self.y_dims[d], prefix[d])
-                p.setPen(QPen(fg_bold if not is_last else fg_normal))
-                align = (Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap
+                p.setPen(QPen(FG_PRI))
+                p.setFont(f_grp if not is_last else f_lf)
+                align = (Qt.AlignmentFlag.AlignCenter
                          if not is_last
                          else Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-                p.drawText(QRect(x_col + 5, y_top + 4, cw - 8, grp_h - 8), align, label)
+                p.drawText(QRect(x_col + 10, y_top + 2, cw - 14, grp_h - 4),
+                           align, label)
 
-                # Top border for this group
-                pen_style = sep_group if not is_last else sep_inner
-                p.setPen(QPen(pen_style, 1))
+                p.setPen(QPen(SEP, 1))
                 p.drawLine(x_col, y_top, x_col + cw, y_top)
 
-                # Dotted separators within the last depth
                 if is_last:
                     for ri in row_idxs[1:]:
                         y = self._row_y_list[ri]
-                        p.setPen(QPen(sep_inner, 1, Qt.PenStyle.DotLine))
+                        p.setPen(QPen(SEP, 1, Qt.PenStyle.DotLine))
                         p.drawLine(x_col, y, x_col + cw, y)
 
-        # Bottom border across full width
-        y_end = self._body_top() + self._total_body_h
-        p.setPen(QPen(sep_group, 1))
-        p.drawLine(0, y_end, yw, y_end)
-
-        # Vertical column dividers
-        p.setPen(QPen(QColor(195, 198, 215), 1))
+        # Column dividers and right border
+        p.setPen(QPen(COL_SEP, 1))
         for d in range(1, ndims):
             x = d * cw
-            p.drawLine(x, self._body_top(), x, y_end)
-        p.drawLine(yw - 1, self._body_top(), yw - 1, y_end)
+            p.drawLine(x, 0, x, total_h)
+        p.drawLine(yw - 1, 0, yw - 1, total_h)
+
+    def _y_sub_label(self, row_key: str, dim_idx: int) -> str:
+        """Return a muted sub-label for single-depth Y rows."""
+        dim = self.y_dims[dim_idx] if dim_idx < len(self.y_dims) else ""
+        val = row_key.split("|")[0] if "|" not in row_key else ""
+        if dim == "Room":
+            # Show process name(s) assigned to this room
+            try:
+                from data.repositories import RoomRepo as _RR
+                procs = [r["process_name"] for r in _RR.all()
+                         if r["room_code"] == val]
+                unique_procs = list(dict.fromkeys(procs))
+                return " · ".join(unique_procs[:2]) if unique_procs else ""
+            except Exception:
+                return ""
+        return ""
 
     def _draw_due_lines(self, p: QPainter):
         """
@@ -852,7 +1141,7 @@ class GanttCanvas(QWidget):
             if not rows:
                 continue
 
-            x = self._y_label_w + col * self._col_w() + self._col_w() // 2
+            x = col * self._col_w() + self._col_w() // 2
 
             for ri in rows:
                 y_top = self._row_y_list[ri]
@@ -871,10 +1160,11 @@ class GanttCanvas(QWidget):
         col = self._date_to_col(date.today().strftime("%Y-%m-%d"))
         if col is None:
             return
-        x = self._y_label_w + col * self._col_w()
-        p.setPen(QPen(TODAY_LINE, 3))
-        # Today line also starts at body_top
+        x = col * self._col_w()
+        p.setOpacity(0.6)
+        p.setPen(QPen(TODAY_LINE, 2))
         p.drawLine(x, self._body_top(), x, self._total_h())
+        p.setOpacity(1.0)
 
     def _draw_plans(self, p: QPainter):
         self._cell_map.clear()
@@ -929,6 +1219,14 @@ class GanttCanvas(QWidget):
             accent = (MAT_ACCENT if is_mat
                       else LATE_ACCENT if is_late
                       else _color_for_key(plan["sku_code"]))
+
+            # ── Late glow (soft red halo drawn behind card) ───────────────────
+            if is_late:
+                p.setPen(Qt.PenStyle.NoPen)
+                for spread, alpha in [(9, 10), (7, 18), (5, 30), (3, 48), (1, 68)]:
+                    g = QRectF(rect.adjusted(-spread, -spread, spread, spread))
+                    p.setBrush(QBrush(QColor(220, 38, 38, alpha)))
+                    p.drawRoundedRect(g, CARD_RADIUS + spread, CARD_RADIUS + spread)
 
             # ── White card background ─────────────────────────────────────────
             card_path = QPainterPath()
@@ -1055,6 +1353,22 @@ class GanttCanvas(QWidget):
                            QFontMetrics(f_l3).elidedText(
                                so_str, Qt.TextElideMode.ElideRight, tw))
 
+            if not is_mat and due:
+                due_dt_card = datetime.strptime(due, "%Y-%m-%d").date()
+                days_left = (due_dt_card - date.today()).days
+                due_label = f"Due {due_dt_card.strftime('%m/%d')}"
+                if days_left < 0:
+                    due_clr = DUE_TAG_LATE_FG
+                elif days_left <= 3:
+                    due_clr = DUE_TAG_FG
+                else:
+                    due_clr = CARD_TEXT_L3
+                p.setPen(QPen(due_clr))
+                p.setFont(f_l3)
+                p.drawText(QRect(tx, ty + 35, tw, 10),
+                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                           due_label)
+
             if plan.get("consolidation_group"):
                 consol_groups.setdefault(plan["consolidation_group"], []).append(rect)
 
@@ -1127,7 +1441,17 @@ class GanttCanvas(QWidget):
                                 parts = rk.split("|")
                                 target_room = parts[room_idx] if room_idx < len(parts) else ""
                                 proc = plan.get("process_name") or ""
+                                # Check 1: room doesn't support the process
                                 self._drag_invalid = bool(target_room) and (target_room, proc) not in self._room_proc_set
+                                # Check 2: target slot is CLOSED or HOLD in calendar
+                                if not self._drag_invalid and target_room:
+                                    ghost_cx = self._drag_rect.center().x()
+                                    col = ghost_cx // self._col_w()
+                                    if 0 <= col < self._col_count():
+                                        t_date, t_shift = self._col_to_date_shift(col)
+                                        t_date_str = t_date.strftime("%Y-%m-%d") if hasattr(t_date, "strftime") else str(t_date)
+                                        if self._slot_closed.get((target_room, t_date_str, t_shift)):
+                                            self._drag_invalid = True
                             else:
                                 self._drag_invalid = False
                         else:
@@ -1179,7 +1503,7 @@ class GanttCanvas(QWidget):
                         f"Cannot move here.")
                 else:
                     center = self._drag_rect.center()
-                    col    = (center.x() - self._y_label_w) // self._col_w()
+                    col    = center.x() // self._col_w()
                     if 0 <= col < self._col_count():
                         new_date, new_shift = self._col_to_date_shift(col)
                         plan = next((p for p in self._plans
@@ -1239,27 +1563,49 @@ class GanttCanvas(QWidget):
             value=orig_qty // 2, min=1, max=orig_qty - 1)
         if not ok:
             return
-        # Reduce original
-        PlanRepo.update(plan["plan_id"],
-                        {"qty_planned": orig_qty - split_qty},
-                        reason=f"split {split_qty} off to {new_date} S{new_shift}")
-        # Create new plan at drop location (copy of original minus a few fields)
+
+        # Verify the plan still exists in the DB before making changes
+        current = PlanRepo.get(plan["plan_id"])
+        if current is None:
+            QMessageBox.warning(self, "Split Failed",
+                                f"Plan #{plan['plan_id']} no longer exists in the database.\n"
+                                "The view may be stale — please refresh.")
+            if self.parent_tab:
+                self.parent_tab.refresh()
+            return
+
+        # Build new plan dict (same slot, same attributes — except for the split fields)
         new_plan = {k: plan[k] for k in plan if k not in
                     ("plan_id", "qty_planned", "qty_produced",
                      "plan_date", "shift_no", "room_code",
                      "created_at", "updated_at",
                      "is_locked", "is_consolidated", "consolidation_group",
                      "memo")}
-        new_plan["qty_planned"]  = split_qty
-        new_plan["qty_produced"] = 0
-        new_plan["plan_date"]    = new_date.strftime("%Y-%m-%d")
-        new_plan["shift_no"]     = new_shift
-        new_plan["room_code"]    = new_room
-        new_plan["is_locked"]    = 0
-        new_plan["is_consolidated"] = 0
+        new_plan["qty_planned"]       = split_qty
+        new_plan["qty_produced"]      = 0
+        new_plan["plan_date"]         = new_date.strftime("%Y-%m-%d")
+        new_plan["shift_no"]          = new_shift
+        new_plan["room_code"]         = new_room
+        new_plan["is_locked"]         = 0
+        new_plan["is_consolidated"]   = 0
         new_plan["consolidation_group"] = None
-        new_plan["memo"]         = f"Split from plan #{plan['plan_id']}"
-        PlanRepo.insert(new_plan)
+        new_plan["memo"]              = f"Split from plan #{plan['plan_id']}"
+
+        try:
+            # Reduce original qty (raises ValueError if 0 rows affected)
+            PlanRepo.update(plan["plan_id"],
+                            {"qty_planned": orig_qty - split_qty},
+                            reason=f"split {split_qty} off to {new_date} S{new_shift}")
+            # Create new plan at the drop location
+            PlanRepo.insert(new_plan)
+        except Exception as e:
+            QMessageBox.critical(self, "Split Error",
+                                 f"Failed to save split:\n{e}\n\n"
+                                 "No changes were saved.")
+            if self.parent_tab:
+                self.parent_tab.refresh()
+            return
+
         if self.parent_tab:
             self.parent_tab.refresh()
 
@@ -1298,7 +1644,7 @@ class GanttCanvas(QWidget):
             menu.addAction("📝 Edit Memo",  lambda: self._edit_memo(plan))
             menu.addAction("🗑 Delete Plan", lambda: self._delete_plan(pid))
         else:
-            col = (pos.x() - self._y_label_w) // self._col_w()
+            col = pos.x() // self._col_w()
             row = self._row_at_y(pos.y())
             if ("Room" in self.y_dims
                     and 0 <= col < self._col_count()
@@ -1330,13 +1676,26 @@ class GanttCanvas(QWidget):
         split_qty, ok = QInputDialog.getInt(
             self, "Split", f"First half qty (total {qty}):", qty//2, 1, qty-1)
         if not ok: return
-        PlanRepo.update(plan["plan_id"], {"qty_planned": split_qty}, reason="split")
-        # Remainder stays in the same slot — planner drags it to the desired position
+
+        current = PlanRepo.get(plan["plan_id"])
+        if current is None:
+            QMessageBox.warning(self, "Split Failed",
+                                f"Plan #{plan['plan_id']} no longer exists in the database.\n"
+                                "Please refresh the view.")
+            if self.parent_tab: self.parent_tab.refresh()
+            return
+
         new_plan = {**plan, "qty_planned": qty - split_qty,
                     "is_locked": 0, "memo": "split-remainder",
                     "is_consolidated": 0, "consolidation_group": None}
         for k in ("plan_id", "created_at", "updated_at"): new_plan.pop(k, None)
-        PlanRepo.insert(new_plan)
+        try:
+            PlanRepo.update(plan["plan_id"], {"qty_planned": split_qty}, reason="split")
+            PlanRepo.insert(new_plan)
+        except Exception as e:
+            QMessageBox.critical(self, "Split Error", f"Failed to save split:\n{e}")
+            if self.parent_tab: self.parent_tab.refresh()
+            return
         if self.parent_tab: self.parent_tab.refresh()
 
     def _pull_out(self, plan):
@@ -1509,6 +1868,10 @@ class GanttTab(QWidget):
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
 
+        # Frozen Y-axis sidebar (stays fixed during horizontal scroll)
+        self.gantt_y_label = GanttYLabelWidget(self)
+        body.addWidget(self.gantt_y_label)
+
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(False)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
@@ -1524,6 +1887,8 @@ class GanttTab(QWidget):
 
         self.scroll.horizontalScrollBar().valueChanged.connect(
             self.gantt_header.set_scroll_h)
+        self.scroll.verticalScrollBar().valueChanged.connect(
+            self.gantt_y_label.set_scroll_v)
 
         body.addWidget(self.scroll, stretch=1)
 
@@ -1584,10 +1949,10 @@ class GanttTab(QWidget):
         sfl.addWidget(self.search_edit)
         lay.addWidget(sf)
 
-        # KPI pills
-        self._pill_ok   = self._make_kpi_pill("#e6f4ea", "#1d8a4a")
-        self._pill_risk = self._make_kpi_pill("#fef3e0", "#b9760a")
-        self._pill_late = self._make_kpi_pill("#fbe7e7", "#c2342f")
+        # KPI pills (frame + inner text label)
+        self._pill_ok,   self._pill_ok_lbl   = self._make_kpi_pill("#e6f4ea", "#1d8a4a", "#2bab5e")
+        self._pill_risk, self._pill_risk_lbl = self._make_kpi_pill("#fef3e0", "#b9760a", "#e09a1f")
+        self._pill_late, self._pill_late_lbl = self._make_kpi_pill("#fbe7e7", "#c2342f", "#e0413a")
         lay.addWidget(self._pill_ok)
         lay.addWidget(self._pill_risk)
         lay.addWidget(self._pill_late)
@@ -1670,14 +2035,24 @@ class GanttTab(QWidget):
         return outer
 
     @staticmethod
-    def _make_kpi_pill(bg: str, fg: str) -> QLabel:
-        lbl = QLabel("—")
-        lbl.setStyleSheet(
-            f"QLabel {{ background:{bg}; color:{fg}; border-radius:10px;"
-            f" padding:3px 9px; font-size:10px; font-weight:700; }}"
-        )
-        lbl.setFixedHeight(22)
-        return lbl
+    def _make_kpi_pill(bg: str, fg: str, dot_clr: str):
+        """Returns (container_frame, text_label) for a KPI pill with colored dot."""
+        frame = QFrame()
+        frame.setFixedHeight(22)
+        frame.setStyleSheet(f"QFrame {{ background:{bg}; border-radius:10px; border:none; }}")
+        lay = QHBoxLayout(frame)
+        lay.setContentsMargins(9, 0, 10, 0)
+        lay.setSpacing(5)
+
+        dot = QLabel("●")
+        dot.setStyleSheet(f"color:{dot_clr}; font-size:7px; background:transparent; border:none;")
+        lay.addWidget(dot)
+
+        txt = QLabel("—")
+        txt.setStyleSheet(
+            f"color:{fg}; font-size:10px; font-weight:700; background:transparent; border:none;")
+        lay.addWidget(txt)
+        return frame, txt
 
     def _update_kpi_pills(self):
         """Count OPEN SOs by schedule status and update KPI pill labels."""
@@ -1701,9 +2076,9 @@ class GanttTab(QWidget):
                     at_risk += 1
                 else:
                     on_time += 1
-            self._pill_ok.setText(f"On time  {on_time}")
-            self._pill_risk.setText(f"At risk  {at_risk}")
-            self._pill_late.setText(f"Late  {late}")
+            self._pill_ok_lbl.setText(f"On time  {on_time}")
+            self._pill_risk_lbl.setText(f"At risk  {at_risk}")
+            self._pill_late_lbl.setText(f"Late  {late}")
         except Exception:
             pass
 
@@ -1735,8 +2110,7 @@ class GanttTab(QWidget):
         lay.setContentsMargins(14, 0, 12, 0)
         lay.setSpacing(8)
 
-        # "Y축" label
-        lbl_y = QLabel("Y축")
+        lbl_y = QLabel("Y-axis")
         lbl_y.setStyleSheet("font-size:11px; color:#6b7280; font-weight:600;")
         lay.addWidget(lbl_y)
 
@@ -1809,9 +2183,11 @@ class GanttTab(QWidget):
         hz_lay.setContentsMargins(2, 2, 2, 2)
         hz_lay.setSpacing(1)
         _HZ_BTN_CSS = (
-            "QPushButton { font-size:10px; font-weight:600; padding:2px 8px;"
-            " border-radius:4px; border:none; color:#6b7280; background:transparent; }"
-            "QPushButton:checked { background:#fff; color:#16213d; }"
+            "QPushButton { font-size:10px; font-weight:600; padding:3px 10px;"
+            " min-width:32px; border-radius:4px; border:none;"
+            " color:#6b7280; background:transparent; }"
+            "QPushButton:checked { background:#fff; color:#16213d;"
+            " border:1px solid #cbd5e1; }"
         )
         self._horizon_btns: Dict[str, QPushButton] = {}
         hz_grp = QButtonGroup(self)
@@ -2115,13 +2491,9 @@ class GanttTab(QWidget):
                                     "Nothing to plan (already fully planned or no capacity).")
 
     def _date_range(self) -> Tuple[str, str]:
-        from PyQt6.QtCore import QDate
         d0 = self.date_edit.date().toPyDate()
-        try:
-            weeks = int(ConfigRepo.get("plan_horizon_weeks", "4"))
-        except Exception:
-            weeks = 4
-        d1 = d0 + timedelta(weeks=weeks)
+        days = getattr(self.canvas, "horizon_days", 28)
+        d1 = d0 + timedelta(days=days)
         return d0.strftime("%Y-%m-%d"), d1.strftime("%Y-%m-%d")
 
     def refresh(self):
@@ -2143,8 +2515,9 @@ class GanttTab(QWidget):
             datetime.strptime(d0, "%Y-%m-%d").date()).days
         self.canvas.load_data(plans, sos, skus, shifts, conflicts, mat_groups)
 
-        # Sync frozen header with canvas data
+        # Sync frozen header and Y-axis sidebar with canvas data
         self.gantt_header.sync_from(self.canvas)
+        self.gantt_y_label.sync_from(self.canvas)
 
         # Update topbar KPI pills
         self._update_kpi_pills()
@@ -2164,9 +2537,36 @@ class GanttTab(QWidget):
 
     def run_auto_plan(self):
         d0, d1 = self._date_range()
-        try:
-            scheduler._reload_masters()
-            report = scheduler.auto_plan(d0, d1)
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtGui import QCursor
+
+        # Disable button and show busy cursor while planning
+        sender = self.sender()
+        if sender:
+            sender.setEnabled(False)
+            sender.setText("⏳  Planning…")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+
+        class _Worker(QThread):
+            done = pyqtSignal(dict)
+            error = pyqtSignal(str)
+            def __init__(self, d0, d1):
+                super().__init__()
+                self._d0, self._d1 = d0, d1
+            def run(self):
+                try:
+                    scheduler._reload_masters()
+                    self.done.emit(scheduler.auto_plan(self._d0, self._d1))
+                except Exception as exc:
+                    self.error.emit(str(exc))
+
+        worker = _Worker(d0, d1)
+
+        def _on_done(report):
+            QApplication.restoreOverrideCursor()
+            if sender:
+                sender.setEnabled(True)
+                sender.setText("▶  Execute Plan")
             self.refresh()
             msg = (f"Auto-plan: {report['planned']} slots, "
                    f"{len(report['late'])} late, "
@@ -2174,8 +2574,20 @@ class GanttTab(QWidget):
             if self.main_window:
                 self.main_window.notify(msg)
                 self.main_window._check_conflicts_silent()
-        except Exception as e:
-            QMessageBox.warning(self, "Auto Plan Error", str(e))
+
+        def _on_error(msg):
+            QApplication.restoreOverrideCursor()
+            if sender:
+                sender.setEnabled(True)
+                sender.setText("▶  Execute Plan")
+            QMessageBox.warning(self, "Auto Plan Error", msg)
+
+        worker.done.connect(_on_done)
+        worker.error.connect(_on_error)
+        worker.finished.connect(worker.deleteLater)
+        # Keep reference so GC doesn't collect it
+        self._plan_worker = worker
+        worker.start()
 
     def run_pull_forward(self):
         d0, d1 = self._date_range()
@@ -2365,7 +2777,7 @@ class AddPlanDialog(QDialog):
         so = self._so_combo.currentData()
         rp = self._proc_combo.currentData()
         if not so or not rp:
-            QMessageBox.warning(self, "Add Plan", "SO 또는 공정을 선택하세요.")
+            QMessageBox.warning(self, "Add Plan", "Please select an SO and a process.")
             return
         proc_name = rp["process_name"]
         steps = ProcessRoutingRepo.for_entity("SKU", so["sku_code"])

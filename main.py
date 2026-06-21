@@ -66,9 +66,10 @@ init_db()
 
 from PyQt6.QtWidgets import QApplication, QMessageBox
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QPalette, QColor
 
 from ui.main_window import MainWindow
+from ui.app_style import APP_QSS
 
 
 def main():
@@ -118,6 +119,24 @@ def main():
         app.setStyle("Fusion")
         font = QFont("Segoe UI", 9)
         app.setFont(font)
+
+        # Modern palette (base colors for Fusion renderer)
+        pal = QPalette()
+        pal.setColor(QPalette.ColorRole.Window,          QColor("#ECEEF3"))
+        pal.setColor(QPalette.ColorRole.WindowText,      QColor("#1E293B"))
+        pal.setColor(QPalette.ColorRole.Base,            QColor("#FFFFFF"))
+        pal.setColor(QPalette.ColorRole.AlternateBase,   QColor("#F8FAFC"))
+        pal.setColor(QPalette.ColorRole.Text,            QColor("#1E293B"))
+        pal.setColor(QPalette.ColorRole.Button,          QColor("#FFFFFF"))
+        pal.setColor(QPalette.ColorRole.ButtonText,      QColor("#374151"))
+        pal.setColor(QPalette.ColorRole.Highlight,       QColor("#2563EB"))
+        pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
+        pal.setColor(QPalette.ColorRole.PlaceholderText, QColor("#94A3B8"))
+        pal.setColor(QPalette.ColorRole.ToolTipBase,     QColor("#1E293B"))
+        pal.setColor(QPalette.ColorRole.ToolTipText,     QColor("#F8FAFC"))
+        app.setPalette(pal)
+
+        app.setStyleSheet(APP_QSS)
 
         window = MainWindow()
         window.show()
