@@ -2953,15 +2953,18 @@ class PullForwardDialog(QDialog):
             self.table.setItem(ri, self.C_COMP, _ro(cur_comp))
             self.table.setItem(ri, self.C_EARL, _ro("—"))
 
-            # Target date widget
+            # Target date widget — placed directly (no container) to avoid popup clipping
             from PyQt6.QtCore import QDate
             tgt_edit = QDateEdit()
             tgt_edit.setDisplayFormat("yyyy-MM-dd")
             tgt_edit.setCalendarPopup(True)
+            # Force the calendar popup to be wide enough; default inherits the widget's
+            # narrow column width and clips day columns 4-7 (shows only up to ~9th)
+            tgt_edit.calendarWidget().setMinimumWidth(265)
             tgt_ref = cdue if cdue else rdue
             tgt_edit.setDate(QDate.fromString(tgt_ref, "yyyy-MM-dd")
                              if tgt_ref else QDate.currentDate())
-            self.table.setCellWidget(ri, self.C_TGT, _cell_center(tgt_edit))
+            self.table.setCellWidget(ri, self.C_TGT, tgt_edit)
 
             # Calc button — calculator icon
             btn_calc = QPushButton()
@@ -3058,7 +3061,7 @@ class PullForwardDialog(QDialog):
         w.start()
 
     def _apply_row(self, row: int, so_no: str, sku: str, li: str):
-        tgt_widget = self._inner_btn(row, self.C_TGT)   # QDateEdit inside _cell_center
+        tgt_widget = self.table.cellWidget(row, self.C_TGT)  # QDateEdit placed directly
         if not tgt_widget:
             return
         target_date = tgt_widget.date().toString("yyyy-MM-dd")
