@@ -701,7 +701,7 @@ class SplitSODialog(QDialog):
     def __init__(self, so: Dict, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Split SO — {so['so_number']} / {so['sku_code']} / {so['line_item']}")
-        self.setMinimumSize(900, 380)
+        self.setMinimumSize(1060, 380)
         self.so = so
         self.split_results: List[Dict] = []
         self._loading = False
@@ -723,18 +723,19 @@ class SplitSODialog(QDialog):
         layout.addWidget(info)
 
         # ── split table ──
-        # cols: 0=Line Item, 1=Qty, 2=Due Date, 3=Start No Earlier, 4=Priority, 5=Note
+        # cols: 0=Line Item, 1=Qty, 2=Due Date, 3=Committed Due, 4=Start No Earlier, 5=Priority, 6=Note
         self.table = QTableWidget()
-        self.table.setColumnCount(6)
+        self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(
-            ["Line Item", "Qty", "Due Date", "Start No Earlier", "Priority", "Note"])
+            ["Line Item", "Qty", "Due Date", "Committed Due", "Start No Earlier", "Priority", "Note"])
         hdr = self.table.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
         self.table.itemChanged.connect(self._on_changed)
         layout.addWidget(self.table)
 
@@ -743,6 +744,7 @@ class SplitSODialog(QDialog):
             self.so["line_item"],
             self.so["qty"],
             self.so["due_date"],
+            self.so.get("committed_due_date") or "",
             self.so.get("start_no_earlier") or "",
             self.so.get("priority") or "",
             self.so.get("note") or "",
@@ -752,6 +754,7 @@ class SplitSODialog(QDialog):
             self._next_line_item(0),
             0,
             self.so["due_date"],
+            "",
             "",
             self.so.get("priority") or "",
             "",
@@ -787,7 +790,7 @@ class SplitSODialog(QDialog):
         base = self.so["line_item"]
         return f"{base}-{2 + extra_count}"
 
-    def _add_row(self, line_item, qty, due_date, start_no_earlier, priority, note, original=False):
+    def _add_row(self, line_item, qty, due_date, committed_due, start_no_earlier, priority, note, original=False):
         self._loading = True
         ri = self.table.rowCount()
         self.table.insertRow(ri)
@@ -799,16 +802,17 @@ class SplitSODialog(QDialog):
         self.table.setItem(ri, 0, li_item)
         self.table.setItem(ri, 1, QTableWidgetItem(str(qty)))
         self.table.setItem(ri, 2, QTableWidgetItem(str(due_date)))
-        self.table.setItem(ri, 3, QTableWidgetItem(str(start_no_earlier)))
-        self.table.setItem(ri, 4, QTableWidgetItem(str(priority)))
-        self.table.setItem(ri, 5, QTableWidgetItem(str(note)))
+        self.table.setItem(ri, 3, QTableWidgetItem(str(committed_due)))
+        self.table.setItem(ri, 4, QTableWidgetItem(str(start_no_earlier)))
+        self.table.setItem(ri, 5, QTableWidgetItem(str(priority)))
+        self.table.setItem(ri, 6, QTableWidgetItem(str(note)))
         self._loading = False
 
     def _add_empty_row(self):
         extras = self.table.rowCount() - 1
         self._add_row(
             self._next_line_item(extras), 0,
-            self.so["due_date"], "", self.so.get("priority") or "", "", original=False)
+            self.so["due_date"], "", "", self.so.get("priority") or "", "", original=False)
         self._refresh_remaining()
 
     def _on_changed(self, _item):
@@ -844,11 +848,12 @@ class SplitSODialog(QDialog):
         rows = []
         line_items_seen = set()
         for ri in range(self.table.rowCount()):
-            li              = (self.table.item(ri, 0).text() or "").strip()
-            due             = (self.table.item(ri, 2).text() or "").strip()
-            start_no_earlier = (self.table.item(ri, 3).text() or "").strip() or None
-            pri_text        = (self.table.item(ri, 4).text() or "").strip()
-            note            = (self.table.item(ri, 5).text() or "").strip()
+            li               = (self.table.item(ri, 0).text() or "").strip()
+            due              = (self.table.item(ri, 2).text() or "").strip()
+            committed_due    = (self.table.item(ri, 3).text() or "").strip() or None
+            start_no_earlier = (self.table.item(ri, 4).text() or "").strip() or None
+            pri_text         = (self.table.item(ri, 5).text() or "").strip()
+            note             = (self.table.item(ri, 6).text() or "").strip()
             try:
                 qty = int(self.table.item(ri, 1).text() or 0)
             except ValueError:
@@ -866,27 +871,30 @@ class SplitSODialog(QDialog):
             if li in line_items_seen:
                 QMessageBox.warning(self, "Validation", f"Duplicate Line Item: {li}")
                 return
-            if start_no_earlier:
-                try:
-                    datetime.strptime(start_no_earlier, "%Y-%m-%d")
-                except ValueError:
-                    QMessageBox.warning(
-                        self, "Validation",
-                        f"Row {ri+1}: Start No Earlier format must be YYYY-MM-DD.")
-                    return
+            for field_name, field_val in [("Committed Due", committed_due),
+                                           ("Start No Earlier", start_no_earlier)]:
+                if field_val:
+                    try:
+                        datetime.strptime(field_val, "%Y-%m-%d")
+                    except ValueError:
+                        QMessageBox.warning(
+                            self, "Validation",
+                            f"Row {ri+1}: {field_name} format must be YYYY-MM-DD.")
+                        return
             line_items_seen.add(li)
             rows.append({
-                "so_number":        self.so["so_number"],
-                "sku_code":         self.so["sku_code"],
-                "line_item":        li,
-                "customer_name":    self.so.get("customer_name"),
-                "qty":              qty,
-                "due_date":         due,
-                "priority":         pri,
-                "status":           self.so.get("status", "OPEN"),
-                "start_no_earlier": start_no_earlier,
-                "note":             note or None,
-                "received_at":      self.so.get("received_at"),
+                "so_number":          self.so["so_number"],
+                "sku_code":           self.so["sku_code"],
+                "line_item":          li,
+                "customer_name":      self.so.get("customer_name"),
+                "qty":                qty,
+                "due_date":           due,
+                "committed_due_date": committed_due,
+                "priority":           pri,
+                "status":             self.so.get("status", "OPEN"),
+                "start_no_earlier":   start_no_earlier,
+                "note":               note or None,
+                "received_at":        self.so.get("received_at"),
             })
 
         if len(rows) < 2:
