@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, pyqtSignal, QTimer, QThread, QByteArray, QSize
 from PyQt6.QtGui import (
     QPainter, QPainterPath, QColor, QFont, QFontMetrics, QPen, QBrush, QCursor,
-    QPixmap, QIcon
+    QPixmap, QIcon, QShortcut, QKeySequence
 )
 from PyQt6.QtSvg import QSvgRenderer
 
@@ -1583,6 +1583,15 @@ class GanttCanvas(QWidget):
                                     self, "Move Reason",
                                     f"Reason for moving plan #{self._drag_plan_id}?")
                                 if ok:
+                                    if self.parent_tab:
+                                        self.parent_tab.push_undo({
+                                            "type":     "move",
+                                            "label":    f"Move Plan #{self._drag_plan_id}",
+                                            "plan_id":  self._drag_plan_id,
+                                            "plan_date": plan["plan_date"],
+                                            "shift_no":  plan["shift_no"],
+                                            "room_code": plan["room_code"],
+                                        })
                                     fields: Dict = {
                                         "plan_date": new_date.strftime("%Y-%m-%d"),
                                         "shift_no":  new_shift,
@@ -1721,8 +1730,17 @@ class GanttCanvas(QWidget):
     def _toggle_lock(self, plan_id):
         plan = PlanRepo.get(plan_id)
         if plan:
-            PlanRepo.lock(plan_id, not plan["is_locked"])
-            if self.parent_tab: self.parent_tab.refresh()
+            was_locked = bool(plan["is_locked"])
+            PlanRepo.lock(plan_id, not was_locked)
+            if self.parent_tab:
+                action_label = "Unlock" if was_locked else "Lock"
+                self.parent_tab.push_undo({
+                    "type":       "lock",
+                    "label":      f"{action_label} Plan #{plan_id}",
+                    "plan_id":    plan_id,
+                    "was_locked": was_locked,
+                })
+                self.parent_tab.refresh()
 
     def _split_plan(self, plan):
         qty = plan["qty_planned"]
@@ -1784,13 +1802,28 @@ class GanttCanvas(QWidget):
         text, ok = QInputDialog.getText(
             self, "Memo", "Memo:", text=plan.get("memo", ""))
         if ok:
+            old_memo = plan.get("memo") or ""
             PlanRepo.update(plan["plan_id"], {"memo": text})
-            if self.parent_tab: self.parent_tab.refresh()
+            if self.parent_tab:
+                self.parent_tab.push_undo({
+                    "type":     "memo",
+                    "label":    f"Memo on Plan #{plan['plan_id']}",
+                    "plan_id":  plan["plan_id"],
+                    "old_memo": old_memo,
+                })
+                self.parent_tab.refresh()
 
     def _delete_plan(self, plan_id):
         reason, ok = QInputDialog.getText(self, "Delete Plan", "Reason:")
         if ok:
+            plan_data = PlanRepo.get(plan_id)
             PlanRepo.delete(plan_id, reason=reason)
+            if plan_data and self.parent_tab:
+                self.parent_tab.push_undo({
+                    "type":      "delete",
+                    "label":     f"Delete Plan #{plan_id} ({plan_data.get('sku_code','')})",
+                    "plan_data": plan_data,
+                })
             if self.parent_tab: self.parent_tab.refresh()
 
     def _add_plan(self, plan_date: str, shift_no: int, room_code: str):
@@ -1905,6 +1938,8 @@ class GanttTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.main_window = parent
+        self._undo_stack: List[Dict] = []
+        self._btn_undo: Optional[QPushButton] = None
         self._build_ui()
 
     def _build_ui(self):
@@ -1959,6 +1994,8 @@ class GanttTab(QWidget):
         self.detail_label.setWordWrap(True)
         self.detail_label.setMaximumHeight(48)
         layout.addWidget(self.detail_label)
+
+        QShortcut(QKeySequence("Ctrl+Z"), self).activated.connect(self._undo_last)
 
         self.refresh()
 
@@ -2051,6 +2088,20 @@ class GanttTab(QWidget):
         sep.setStyleSheet("background:#e2e4ea; border:none;")
         sep.setFixedWidth(1)
         lay.addWidget(sep)
+
+        # Icon: Undo
+        self._btn_undo = QPushButton("↩")
+        self._btn_undo.setFixedSize(32, 32)
+        self._btn_undo.setToolTip("Undo last action (Ctrl+Z)")
+        self._btn_undo.setEnabled(False)
+        self._btn_undo.setStyleSheet(
+            "QPushButton { border:1px solid #e2e4ea; border-radius:5px; background:#fff;"
+            " font-size:14px; }"
+            "QPushButton:hover:enabled { background:#f5f6fa; }"
+            "QPushButton:disabled { color:#bbb; }"
+        )
+        self._btn_undo.clicked.connect(self._undo_last)
+        lay.addWidget(self._btn_undo)
 
         # Icon: Refresh CRP
         btn_crp = QPushButton("♻")
@@ -2688,6 +2739,53 @@ class GanttTab(QWidget):
         if self.main_window:
             self.main_window.notify(f"Plan #{plan_id} moved. Reason: {reason}")
             self.main_window._check_conflicts_silent()
+
+    # ─── Undo stack ───────────────────────────────────────────────────────────
+
+    def push_undo(self, action: Dict):
+        self._undo_stack.append(action)
+        if len(self._undo_stack) > 50:
+            self._undo_stack.pop(0)
+        if self._btn_undo:
+            self._btn_undo.setEnabled(True)
+            n = len(self._undo_stack)
+            self._btn_undo.setToolTip(f"Undo: {action.get('label','last action')}  ({n} in stack)  Ctrl+Z")
+
+    def _undo_last(self):
+        if not self._undo_stack:
+            return
+        action = self._undo_stack.pop()
+        try:
+            if action["type"] == "move":
+                PlanRepo.update(action["plan_id"], {
+                    "plan_date": action["plan_date"],
+                    "shift_no":  action["shift_no"],
+                    "room_code": action["room_code"],
+                }, reason="undo-move")
+            elif action["type"] == "delete":
+                pd = {k: v for k, v in action["plan_data"].items()
+                      if k not in ("plan_id", "created_at", "updated_at")}
+                PlanRepo.insert(pd)
+            elif action["type"] == "lock":
+                PlanRepo.lock(action["plan_id"], action["was_locked"])
+            elif action["type"] == "memo":
+                PlanRepo.update(action["plan_id"], {"memo": action["old_memo"]},
+                                reason="undo-memo")
+        except Exception as e:
+            QMessageBox.warning(self, "Undo Failed", str(e))
+        self.refresh()
+        if self._btn_undo:
+            has = bool(self._undo_stack)
+            self._btn_undo.setEnabled(has)
+            if has:
+                top = self._undo_stack[-1]
+                self._btn_undo.setToolTip(
+                    f"Undo: {top.get('label','last action')}  "
+                    f"({len(self._undo_stack)} in stack)  Ctrl+Z")
+            else:
+                self._btn_undo.setToolTip("Undo last action (Ctrl+Z)")
+        if self.main_window:
+            self.main_window.notify(f"Undo: {action.get('label', action['type'])}")
 
     def _on_plan_selected(self, plan: Dict):
         so  = SORepo.get(plan["so_number"], plan["sku_code"], plan["line_item"])
