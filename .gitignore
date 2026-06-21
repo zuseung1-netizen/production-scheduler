@@ -6,3 +6,8 @@ planner.db
 *.log
 .pytest_cache/
 .planner.pid
+
+# Development artifacts (screenshots, mockups, exported plans)
+*.png
+*.html
+GanttPlan_*.xlsx
