@@ -9,5 +9,8 @@ planner.db
 
 # Development artifacts (screenshots, mockups, exported plans)
 *.png
-*.html
 GanttPlan_*.xlsx
+
+# HTML — exclude mockups but track WI docs
+*.html
+!WI_*.html
