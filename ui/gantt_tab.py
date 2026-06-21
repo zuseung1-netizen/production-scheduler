@@ -40,6 +40,19 @@ from utils.korean_holidays import is_holiday, holiday_name
 
 # ─── Icon helpers ─────────────────────────────────────────────────────────────
 
+def _cell_center(widget: "QWidget") -> "QWidget":
+    """Wrap a widget with padding margins; widget expands to fill horizontally."""
+    from PyQt6.QtWidgets import QWidget as _W, QHBoxLayout as _H, QSizePolicy as _SP
+    container = _W()
+    container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+    lay = _H(container)
+    lay.setContentsMargins(4, 3, 4, 3)
+    lay.setSpacing(0)
+    widget.setSizePolicy(_SP.Policy.Expanding, _SP.Policy.Expanding)
+    lay.addWidget(widget)
+    return container
+
+
 def _svg_icon(svg_body: str, color: str = "#3730a3", size: int = 16) -> QIcon:
     svg = (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"'
@@ -2860,7 +2873,9 @@ class PullForwardDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Pull Forward — Per-Line Scheduling")
-        self.resize(1100, 560)
+        # Size to 90 % of the available screen width so all columns fit
+        screen_w = QApplication.primaryScreen().availableGeometry().width()
+        self.resize(int(screen_w * 0.90), 620)
         self._workers: list = []
         self._build_ui()
         self._load()
@@ -2869,7 +2884,7 @@ class PullForwardDialog(QDialog):
         lay = QVBoxLayout(self)
 
         # info bar
-        info = QLabel("Select a row, set a Target Date, then click Calc Earliest or Apply.")
+        info = QLabel("Select a row, set a Target Date, then click  or Pull Forward.")
         info.setStyleSheet("color:#64748b; font-size:11px; padding:4px;")
         lay.addWidget(info)
 
@@ -2879,9 +2894,17 @@ class PullForwardDialog(QDialog):
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setDefaultSectionSize(38)
+        self.table.verticalHeader().setVisible(False)
         hdr = self.table.horizontalHeader()
+        hdr.setMinimumSectionSize(40)
         hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(self.C_CUST, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(self.C_CUST,  QHeaderView.ResizeMode.Stretch)
+        # Widget columns: Fixed with generous widths that survive DPI scaling
+        for col, w in [(self.C_LINE, 55), (self.C_TGT, 135),
+                       (self.C_CALC, 52), (self.C_APPLY, 140)]:
+            hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
+            self.table.setColumnWidth(col, w)
         lay.addWidget(self.table)
 
         btns = QHBoxLayout()
@@ -2931,39 +2954,41 @@ class PullForwardDialog(QDialog):
             self.table.setItem(ri, self.C_EARL, _ro("—"))
 
             # Target date widget
+            from PyQt6.QtCore import QDate
             tgt_edit = QDateEdit()
             tgt_edit.setDisplayFormat("yyyy-MM-dd")
             tgt_edit.setCalendarPopup(True)
-            from PyQt6.QtCore import QDate
             tgt_ref = cdue if cdue else rdue
             tgt_edit.setDate(QDate.fromString(tgt_ref, "yyyy-MM-dd")
                              if tgt_ref else QDate.currentDate())
-            self.table.setCellWidget(ri, self.C_TGT, tgt_edit)
+            self.table.setCellWidget(ri, self.C_TGT, _cell_center(tgt_edit))
 
-            # Calc button — calculator icon only
+            # Calc button — calculator icon
             btn_calc = QPushButton()
-            btn_calc.setIcon(_svg_icon(_IC_CALC, "#3730a3", 16))
-            btn_calc.setIconSize(QSize(16, 16))
-            btn_calc.setFixedSize(30, 26)
+            btn_calc.setIcon(_svg_icon(_IC_CALC, "#3730a3", 18))
+            btn_calc.setIconSize(QSize(18, 18))
             btn_calc.setToolTip("Calc Earliest completion date")
             btn_calc.setStyleSheet(
-                "background:#e0e7ff; border:1px solid #a5b4fc;"
-                " border-radius:4px;")
+                "QPushButton { background:#e0e7ff; border:1px solid #a5b4fc;"
+                " border-radius:4px; }"
+                "QPushButton:disabled { background:#f1f5f9; border-color:#cbd5e1; }")
             btn_calc.clicked.connect(lambda _, r=ri, s=so_no, k=sku, l=li:
                                      self._calc_earliest(r, s, k, l))
-            self.table.setCellWidget(ri, self.C_CALC, btn_calc)
+            self.table.setCellWidget(ri, self.C_CALC, _cell_center(btn_calc))
 
-            # Apply button — arrow icon only
-            btn_apply = QPushButton()
-            btn_apply.setIcon(_svg_icon(_IC_APPLY, "#ffffff", 16))
-            btn_apply.setIconSize(QSize(16, 16))
-            btn_apply.setFixedSize(30, 26)
+            # Pull Forward button
+            btn_apply = QPushButton("Pull Forward")
             btn_apply.setToolTip("Apply pull-forward to this SO")
             btn_apply.setStyleSheet(
-                "background:#2563eb; border:none; border-radius:4px;")
+                "QPushButton { background:#2563eb; color:white; border:none;"
+                " border-radius:4px; padding:3px 6px;"
+                " font-size:9pt; font-weight:600; }"
+                "QPushButton:hover { background:#1d4ed8; }"
+                "QPushButton:pressed { background:#1e40af; }"
+                "QPushButton:disabled { background:#93c5fd; color:#eff6ff; border:none; }")
             btn_apply.clicked.connect(lambda _, r=ri, s=so_no, k=sku, l=li:
                                       self._apply_row(r, s, k, l))
-            self.table.setCellWidget(ri, self.C_APPLY, btn_apply)
+            self.table.setCellWidget(ri, self.C_APPLY, _cell_center(btn_apply))
 
             # Colour current completion vs committed/requested due
             check = cdue if cdue else rdue
@@ -2973,8 +2998,16 @@ class PullForwardDialog(QDialog):
                     if it:
                         it.setBackground(QBrush(QColor("#ffebee")))
 
+    def _inner_btn(self, row: int, col: int):
+        """Return the inner widget from a _cell_center container."""
+        container = self.table.cellWidget(row, col)
+        if not container:
+            return None
+        lay = container.layout()
+        return lay.itemAt(0).widget() if lay and lay.count() > 0 else None
+
     def _calc_earliest(self, row: int, so_no: str, sku: str, li: str):
-        btn = self.table.cellWidget(row, self.C_CALC)
+        btn = self._inner_btn(row, self.C_CALC)
         if btn:
             btn.setEnabled(False)
             btn.setIcon(QIcon())   # clear icon while calculating
@@ -2999,21 +3032,23 @@ class PullForwardDialog(QDialog):
             it = self.table.item(r, self.C_EARL)
             if it:
                 it.setText(dt)
-            b = self.table.cellWidget(r, self.C_CALC)
+            b = self._inner_btn(r, self.C_CALC)
             if b:
                 b.setEnabled(True)
                 b.setText("")
-                b.setIcon(_svg_icon(_IC_CALC, "#3730a3", 16))
+                b.setIcon(_svg_icon(_IC_CALC, "#3730a3", 18))
+                b.setIconSize(QSize(18, 18))
 
         def _on_err(msg, r=row):
             it = self.table.item(r, self.C_EARL)
             if it:
                 it.setText("Error")
-            b = self.table.cellWidget(r, self.C_CALC)
+            b = self._inner_btn(r, self.C_CALC)
             if b:
                 b.setEnabled(True)
                 b.setText("")
-                b.setIcon(_svg_icon(_IC_CALC, "#3730a3", 16))
+                b.setIcon(_svg_icon(_IC_CALC, "#3730a3", 18))
+                b.setIconSize(QSize(18, 18))
             QMessageBox.warning(self, "Calc Error", msg)
 
         w.done.connect(_on_done)
@@ -3023,7 +3058,7 @@ class PullForwardDialog(QDialog):
         w.start()
 
     def _apply_row(self, row: int, so_no: str, sku: str, li: str):
-        tgt_widget = self.table.cellWidget(row, self.C_TGT)
+        tgt_widget = self._inner_btn(row, self.C_TGT)   # QDateEdit inside _cell_center
         if not tgt_widget:
             return
         target_date = tgt_widget.date().toString("yyyy-MM-dd")
