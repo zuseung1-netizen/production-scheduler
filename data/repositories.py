@@ -445,14 +445,15 @@ class SORepo:
             data.setdefault("status", "OPEN")
             data.setdefault("customer_name", None)
             data.setdefault("committed_due_date", None)
+            data.setdefault("split_from", None)
             with get_connection() as conn:
                 conn.execute("""
                     INSERT INTO sales_order
                         (so_number,sku_code,line_item,customer_name,qty,due_date,
-                         committed_due_date,priority,received_at,status,start_no_earlier,note)
+                         committed_due_date,priority,received_at,status,start_no_earlier,note,split_from)
                     VALUES
                         (:so_number,:sku_code,:line_item,:customer_name,:qty,:due_date,
-                         :committed_due_date,:priority,:received_at,:status,:start_no_earlier,:note)
+                         :committed_due_date,:priority,:received_at,:status,:start_no_earlier,:note,:split_from)
                 """, data)
             if batch_id:
                 _log_so_history(batch_id, data, "NEW", None, data)
@@ -480,6 +481,16 @@ class SORepo:
         return "MODIFIED"
 
     @staticmethod
+    def splits_of(so_number: str, sku_code: str, line_item: str) -> List[Dict]:
+        """Return all split children whose split_from matches line_item."""
+        with get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM sales_order "
+                "WHERE so_number=? AND sku_code=? AND split_from=?",
+                (so_number, sku_code, line_item)).fetchall()
+        return _rows_to_dicts(rows)
+
+    @staticmethod
     def close(so_number: str, sku_code: str, line_item: str,
               batch_id: str = None):
         existing = SORepo.get(so_number, sku_code, line_item)
@@ -496,6 +507,11 @@ class SORepo:
                 {"so_number": so_number, "sku_code": sku_code,
                  "line_item": line_item},
                 "CLOSED", existing, {**existing, "status": "CLOSED"})
+        # Cascade: close split children when parent closes
+        for child in SORepo.splits_of(so_number, sku_code, line_item):
+            if child["status"] != "CLOSED":
+                SORepo.close(child["so_number"], child["sku_code"],
+                             child["line_item"], batch_id=batch_id)
 
     @staticmethod
     def hold(so_number: str, sku_code: str, line_item: str, hold: bool):

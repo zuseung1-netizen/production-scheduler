@@ -153,14 +153,17 @@ def init_db():
         status              TEXT NOT NULL DEFAULT 'OPEN',
         start_no_earlier    TEXT,
         note                TEXT,
+        split_from          TEXT,
         PRIMARY KEY (so_number, sku_code, line_item),
         FOREIGN KEY (sku_code) REFERENCES sku_master(sku_code)
     )""")
 
-    # Migration: add committed_due_date to existing DBs
+    # Migration: add columns to existing DBs
     so_cols = [r[1] for r in c.execute("PRAGMA table_info(sales_order)").fetchall()]
     if "committed_due_date" not in so_cols:
         c.execute("ALTER TABLE sales_order ADD COLUMN committed_due_date TEXT")
+    if "split_from" not in so_cols:
+        c.execute("ALTER TABLE sales_order ADD COLUMN split_from TEXT")
 
     # ── SO Change History ────────────────────────────────────────────────────
     c.execute("""

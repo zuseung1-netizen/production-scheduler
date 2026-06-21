@@ -92,8 +92,10 @@ def preview_so_upload(path: str) -> Tuple[bool, str, Dict]:
                "start_no_earlier", "note", "customer_name")
 
     preview_rows, uploaded_keys, errors = [], set(), []
+    upload_status_map: dict = {}  # key -> status in uploaded Excel
     summary = {"new": 0, "modified": 0, "unchanged": 0, "closed": 0}
 
+    from data.repositories import SORepo as _SORepo
     for row in excel_rows:
         if not row[0]:
             continue
@@ -113,16 +115,23 @@ def preview_so_upload(path: str) -> Tuple[bool, str, Dict]:
             }
             key = (nd["so_number"], nd["sku_code"], nd["line_item"])
             uploaded_keys.add(key)
+            upload_status_map[key] = nd["status"]
             old = existing_map.get(key)
 
             if old is None:
-                preview_rows.append({"change_type": "NEW",      "new": nd, "old": None,  "changed_fields": []})
+                preview_rows.append({"change_type": "NEW", "new": nd, "old": None, "changed_fields": []})
                 summary["new"] += 1
             else:
                 changed = [f for f in COMPARE
                            if str(old.get(f) or "") != str(nd.get(f) or "")]
                 if changed:
-                    preview_rows.append({"change_type": "MODIFIED",  "new": nd, "old": old, "changed_fields": changed})
+                    # Warn if qty changed and this parent has split children
+                    split_children = _SORepo.splits_of(nd["so_number"], nd["sku_code"], nd["line_item"])
+                    preview_rows.append({
+                        "change_type": "MODIFIED", "new": nd, "old": old,
+                        "changed_fields": changed,
+                        "split_children": len(split_children),
+                    })
                     summary["modified"] += 1
                 else:
                     preview_rows.append({"change_type": "UNCHANGED", "new": nd, "old": old, "changed_fields": []})
@@ -131,9 +140,19 @@ def preview_so_upload(path: str) -> Tuple[bool, str, Dict]:
             errors.append(f"Row parse error: {e}")
 
     for key, so in existing_map.items():
-        if key not in uploaded_keys and so["status"] != "CLOSED":
-            preview_rows.append({"change_type": "CLOSED", "new": {**so, "status": "CLOSED"}, "old": so, "changed_fields": ["status"]})
-            summary["closed"] += 1
+        if key in uploaded_keys or so["status"] == "CLOSED":
+            continue
+        # Split children: only close if their parent is also closing (not in Excel,
+        # or explicitly CLOSED in Excel). Otherwise protect them.
+        if so.get("split_from"):
+            parent_key = (so["so_number"], so["sku_code"], so["split_from"])
+            if parent_key in uploaded_keys and upload_status_map.get(parent_key) != "CLOSED":
+                continue  # parent is alive in Excel → protect this split child
+        preview_rows.append({
+            "change_type": "CLOSED",
+            "new": {**so, "status": "CLOSED"}, "old": so, "changed_fields": ["status"],
+        })
+        summary["closed"] += 1
 
     return True, "", {"rows": preview_rows, "summary": summary, "errors": errors}
 
@@ -162,6 +181,7 @@ def upload_so(path: str) -> Tuple[bool, str, Dict]:
     existing_keys = {(so["so_number"], so["sku_code"], so["line_item"])
                      for so in SORepo.all()}
     uploaded_keys = set()
+    upload_status_map: dict = {}  # key -> status in uploaded Excel
     summary = {"new": 0, "modified": 0, "unchanged": 0, "closed": 0, "errors": []}
 
     for row in rows:
@@ -183,16 +203,25 @@ def upload_so(path: str) -> Tuple[bool, str, Dict]:
             }
             change = SORepo.upsert(data, batch_id=batch_id)
             summary[change.lower()] = summary.get(change.lower(), 0) + 1
-            uploaded_keys.add((data["so_number"], data["sku_code"], data["line_item"]))
+            key = (data["so_number"], data["sku_code"], data["line_item"])
+            uploaded_keys.add(key)
+            upload_status_map[key] = data["status"]
         except Exception as e:
             summary["errors"].append(str(e))
 
-    # Mark keys present in DB but absent in upload as CLOSED
+    # Mark keys present in DB but absent in upload as CLOSED.
+    # Split children (split_from IS NOT NULL) are protected unless their parent
+    # is also closing — SORepo.close() cascades to children automatically.
     for key in existing_keys - uploaded_keys:
         so = SORepo.get(*key)
-        if so and so["status"] not in ("CLOSED",):
-            SORepo.close(*key, batch_id=batch_id)
-            summary["closed"] += 1
+        if not so or so["status"] == "CLOSED":
+            continue
+        if so.get("split_from"):
+            parent_key = (so["so_number"], so["sku_code"], so["split_from"])
+            if parent_key in uploaded_keys and upload_status_map.get(parent_key) != "CLOSED":
+                continue  # parent is alive → skip; parent.close() cascades if needed
+        SORepo.close(*key, batch_id=batch_id)
+        summary["closed"] += 1
 
     msg = (f"Upload complete [batch {batch_id}]: "
            f"{summary['new']} new, {summary['modified']} modified, "

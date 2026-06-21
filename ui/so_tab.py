@@ -599,8 +599,10 @@ class SOUploadPreviewDialog(QDialog):
             bg  = self._BG[ct]
             changed = set(r["changed_fields"])
 
+            n_splits = r.get("split_children", 0)
+            change_label = ct if not n_splits else f"{ct} ⚠ ({n_splits} splits)"
             vals = [
-                ct,
+                change_label,
                 nd.get("so_number", ""),
                 nd.get("sku_code", ""),
                 nd.get("line_item", ""),
@@ -622,6 +624,11 @@ class SOUploadPreviewDialog(QDialog):
                 else:
                     item = QTableWidgetItem(val)
                     item.setBackground(QBrush(bg))
+                if ci == 0 and n_splits:
+                    item.setToolTip(
+                        f"This SO has {n_splits} split child(ren).\n"
+                        "Split children are NOT auto-closed by upload.\n"
+                        "Review and adjust split quantities manually if needed.")
                 self._table.setItem(ri, ci, item)
 
     def _confirm(self):
@@ -922,6 +929,7 @@ class SplitSODialog(QDialog):
                             f"Row {ri+1}: {field_name} format must be YYYY-MM-DD.")
                         return
             line_items_seen.add(li)
+            is_original = (li == self.so["line_item"])
             rows.append({
                 "so_number":          self.so["so_number"],
                 "sku_code":           self.so["sku_code"],
@@ -935,6 +943,7 @@ class SplitSODialog(QDialog):
                 "start_no_earlier":   start_no_earlier,
                 "note":               note or None,
                 "received_at":        self.so.get("received_at"),
+                "split_from":         None if is_original else self.so["line_item"],
             })
 
         if len(rows) < 2:
