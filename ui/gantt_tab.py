@@ -22,10 +22,12 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QFrame,
     QLineEdit, QButtonGroup, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, pyqtSignal, QTimer, QThread
+from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, pyqtSignal, QTimer, QThread, QByteArray, QSize
 from PyQt6.QtGui import (
-    QPainter, QPainterPath, QColor, QFont, QFontMetrics, QPen, QBrush, QCursor
+    QPainter, QPainterPath, QColor, QFont, QFontMetrics, QPen, QBrush, QCursor,
+    QPixmap, QIcon
 )
+from PyQt6.QtSvg import QSvgRenderer
 
 from data.repositories import (
     PlanRepo, SORepo, SKURepo, ShiftRepo, RoomRepo,
@@ -34,6 +36,42 @@ from data.repositories import (
 from core.scheduler import scheduler, sku_to_inner, shift_capacity_inner
 from utils.excel_io import export_gantt_plan
 from utils.korean_holidays import is_holiday, holiday_name
+
+
+# ─── Icon helpers ─────────────────────────────────────────────────────────────
+
+def _svg_icon(svg_body: str, color: str = "#3730a3", size: int = 16) -> QIcon:
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"'
+        f' stroke="{color}" fill="none" stroke-width="2"'
+        f' stroke-linecap="round" stroke-linejoin="round">'
+        f'{svg_body}</svg>'
+    )
+    renderer = QSvgRenderer(QByteArray(svg.encode()))
+    px = QPixmap(size, size)
+    px.fill(Qt.GlobalColor.transparent)
+    p = QPainter(px)
+    renderer.render(p)
+    p.end()
+    return QIcon(px)
+
+
+_IC_CALC = (
+    '<rect x="4" y="2" width="16" height="20" rx="2"/>'
+    '<rect x="7" y="5" width="10" height="4" rx="1"/>'
+    '<line x1="8" y1="13" x2="8.01" y2="13" stroke-width="3"/>'
+    '<line x1="12" y1="13" x2="12.01" y2="13" stroke-width="3"/>'
+    '<line x1="16" y1="13" x2="16.01" y2="13" stroke-width="3"/>'
+    '<line x1="8" y1="17" x2="8.01" y2="17" stroke-width="3"/>'
+    '<line x1="12" y1="17" x2="12.01" y2="17" stroke-width="3"/>'
+    '<line x1="14" y1="17" x2="18" y2="17" stroke-width="2"/>'
+    '<line x1="16" y1="15" x2="16" y2="19" stroke-width="2"/>'
+)
+
+_IC_APPLY = (
+    '<line x1="5" y1="12" x2="19" y2="12"/>'
+    '<polyline points="12 5 19 12 12 19"/>'
+)
 
 
 # ─── Visual constants ─────────────────────────────────────────────────────────
@@ -2902,20 +2940,27 @@ class PullForwardDialog(QDialog):
                              if tgt_ref else QDate.currentDate())
             self.table.setCellWidget(ri, self.C_TGT, tgt_edit)
 
-            # Calc button
-            btn_calc = QPushButton("Calc Earliest")
+            # Calc button — calculator icon only
+            btn_calc = QPushButton()
+            btn_calc.setIcon(_svg_icon(_IC_CALC, "#3730a3", 16))
+            btn_calc.setIconSize(QSize(16, 16))
+            btn_calc.setFixedSize(30, 26)
+            btn_calc.setToolTip("Calc Earliest completion date")
             btn_calc.setStyleSheet(
-                "background:#e0e7ff; color:#3730a3; border:1px solid #a5b4fc;"
-                " border-radius:4px; padding:3px 8px; font-size:11px;")
+                "background:#e0e7ff; border:1px solid #a5b4fc;"
+                " border-radius:4px;")
             btn_calc.clicked.connect(lambda _, r=ri, s=so_no, k=sku, l=li:
                                      self._calc_earliest(r, s, k, l))
             self.table.setCellWidget(ri, self.C_CALC, btn_calc)
 
-            # Apply button
-            btn_apply = QPushButton("Apply")
+            # Apply button — arrow icon only
+            btn_apply = QPushButton()
+            btn_apply.setIcon(_svg_icon(_IC_APPLY, "#ffffff", 16))
+            btn_apply.setIconSize(QSize(16, 16))
+            btn_apply.setFixedSize(30, 26)
+            btn_apply.setToolTip("Apply pull-forward to this SO")
             btn_apply.setStyleSheet(
-                "background:#2563eb; color:white; border:none;"
-                " border-radius:4px; padding:3px 8px; font-size:11px; font-weight:600;")
+                "background:#2563eb; border:none; border-radius:4px;")
             btn_apply.clicked.connect(lambda _, r=ri, s=so_no, k=sku, l=li:
                                       self._apply_row(r, s, k, l))
             self.table.setCellWidget(ri, self.C_APPLY, btn_apply)
@@ -2932,7 +2977,8 @@ class PullForwardDialog(QDialog):
         btn = self.table.cellWidget(row, self.C_CALC)
         if btn:
             btn.setEnabled(False)
-            btn.setText("...")
+            btn.setIcon(QIcon())   # clear icon while calculating
+            btn.setText("…")
 
         class _Worker(QThread):
             done  = pyqtSignal(str)
@@ -2956,7 +3002,8 @@ class PullForwardDialog(QDialog):
             b = self.table.cellWidget(r, self.C_CALC)
             if b:
                 b.setEnabled(True)
-                b.setText("Calc Earliest")
+                b.setText("")
+                b.setIcon(_svg_icon(_IC_CALC, "#3730a3", 16))
 
         def _on_err(msg, r=row):
             it = self.table.item(r, self.C_EARL)
@@ -2965,7 +3012,8 @@ class PullForwardDialog(QDialog):
             b = self.table.cellWidget(r, self.C_CALC)
             if b:
                 b.setEnabled(True)
-                b.setText("Calc Earliest")
+                b.setText("")
+                b.setIcon(_svg_icon(_IC_CALC, "#3730a3", 16))
             QMessageBox.warning(self, "Calc Error", msg)
 
         w.done.connect(_on_done)
