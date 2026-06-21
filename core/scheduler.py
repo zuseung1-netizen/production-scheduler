@@ -262,6 +262,262 @@ class Scheduler:
                 moved += 1
         return {"moved": moved}
 
+    # ── Per-line Pull Forward ────────────────────────────────────────────────
+
+    def _dry_run_plan_so(
+        self, so: Dict, sim_slot_map: Dict[SlotKey, float],
+        d0: date, d1: date,
+    ) -> List[Dict]:
+        """Simulate _plan_so without DB writes. sim_slot_map is mutated in-place."""
+        sku_code = so["sku_code"]
+        sku = self.sku_map.get(sku_code)
+        if not sku:
+            return []
+        valid, _ = ProcessRoutingRepo.validate("SKU", sku_code)
+        if not valid:
+            return []
+        steps = ProcessRoutingRepo.for_entity("SKU", sku_code)
+        uom = int(sku.get("uom") or 1)
+        from data.repositories import AllocationRepo
+        prod_needed = AllocationRepo.production_needed(
+            so["so_number"], sku_code, so["line_item"])
+        if prod_needed <= 0:
+            return []
+
+        shift_max = max((sh["shift_no"] for sh in self.shifts), default=1)
+        step_slots: Dict[int, List[Tuple]] = {}
+        result: List[Dict] = []
+        qty_to_plan = prod_needed
+
+        for si in range(len(steps) - 1, -1, -1):
+            step = steps[si]
+            seq = step["process_seq"]
+            is_final = bool(step["is_final_seq"])
+            allowed = [t.strip() for t in step["allowed_room_types"].split(",") if t.strip()]
+            eligible = RoomRepo.rooms_for_process(step["process_name"], allowed)
+            if not eligible:
+                return []
+
+            if si == len(steps) - 1:
+                upper_d, upper_s = d1, shift_max
+            else:
+                nxt = step_slots.get(steps[si + 1]["process_seq"], [])
+                if nxt:
+                    fd, fs = min(nxt, key=lambda x: (x[0], x[1]))[:2]
+                    min_gap_s = int(steps[si + 1].get("min_gap_shifts") or 0)
+                    upper_d, upper_s = self._find_pre_cutoff(
+                        fd if isinstance(fd, str) else _ds(fd), fs, min_gap_s)
+                else:
+                    upper_d, upper_s = d1, shift_max
+
+            candidates = self._candidates(
+                sim_slot_map, step["process_name"], eligible, d0, upper_d, upper_s)
+
+            step_allocated: List[Tuple] = []
+            step_rem = qty_to_plan
+            proc_name = step["process_name"]
+
+            for ds, sno, room_code, rp in candidates:
+                if step_rem <= 0:
+                    break
+                co = self._changeover_shifts.get((room_code, proc_name), 0)
+                if co > 0 and self._has_changeover_conflict(
+                        room_code, proc_name, ds, sno, co, sku_code):
+                    continue
+                key: SlotKey = (ds, room_code, proc_name, sno)
+                avail_inner = sim_slot_map.get(key, 0.0)
+                avail_sku = inner_to_sku(avail_inner, uom)
+                if avail_sku <= 0:
+                    continue
+                qty_this = min(step_rem, avail_sku)
+                result.append({
+                    "date": ds, "shift_no": sno, "room_code": room_code,
+                    "process_name": proc_name, "process_seq": seq,
+                    "is_final": is_final, "qty": qty_this,
+                })
+                sim_slot_map[key] = max(0.0, avail_inner - sku_to_inner(qty_this, uom))
+                self._block_room_shift(sim_slot_map, ds, room_code, proc_name, sno)
+                step_allocated.append((ds, sno, room_code, rp))
+                step_rem -= qty_this
+
+            if step_rem > 0 and is_final:
+                return []  # could not fully schedule final step
+
+            step_slots[seq] = step_allocated
+
+        return result
+
+    def _find_earliest_completion(
+        self, so_no: str, sku_code: str, line_item: str
+    ) -> Optional[str]:
+        """
+        Find the earliest date the SO can complete given current free capacity.
+        Builds slot_map once for today→today+90 and iterates day-by-day.
+        Returns date string or None if not schedulable within 90 days.
+        """
+        self._reload_masters()
+        d0 = date.today()
+        horizon = _ds(d0 + timedelta(days=90))
+        so = SORepo.get(so_no, sku_code, line_item)
+        if not so:
+            return None
+
+        slot_map = self._build_slot_map(_ds(d0), horizon)
+        # Return own plans' capacity to the pool
+        for p in PlanRepo.for_so(so_no, sku_code, line_item):
+            if p["is_locked"]:
+                continue
+            uom = self._entity_uom(p)
+            key: SlotKey = (p["plan_date"], p["room_code"],
+                            p["process_name"], p["shift_no"])
+            slot_map[key] = slot_map.get(key, 0.0) + sku_to_inner(p["qty_planned"], uom)
+
+        for days in range(1, 91):
+            d1 = d0 + timedelta(days=days)
+            sim_so = {**so, "due_date": _ds(d1)}
+            sim_map = dict(slot_map)
+            slots = self._dry_run_plan_so(sim_so, sim_map, d0, d1)
+            if slots:
+                final = [s for s in slots if s["is_final"]]
+                return max(s["date"] for s in final) if final else _ds(d1)
+        return None
+
+    def simulate_single_pull_forward(
+        self, so_no: str, sku_code: str, line_item: str,
+        target_date: str, allow_push: bool,
+    ) -> Dict:
+        """
+        Dry-run: backward-schedule so_no/sku/li to finish by target_date.
+        allow_push=True: also counts capacity occupied by other unlocked plans.
+        Returns {feasible, final_date, displaced, error}.
+        """
+        self._reload_masters()
+        so = SORepo.get(so_no, sku_code, line_item)
+        if not so:
+            return {"feasible": False, "final_date": None,
+                    "displaced": [], "error": "SO not found"}
+
+        d0 = date.today()
+        d1 = _date(target_date)
+        if d1 < d0:
+            return {"feasible": False, "final_date": None,
+                    "displaced": [], "error": "Target date is in the past"}
+
+        horizon = _ds(d1 + timedelta(days=1))
+        slot_map = self._build_slot_map(_ds(d0), horizon)
+
+        # Return this SO's own unlocked plans to the pool
+        own_plans = [p for p in PlanRepo.for_so(so_no, sku_code, line_item)
+                     if not p["is_locked"]]
+        for p in own_plans:
+            uom = self._entity_uom(p)
+            key: SlotKey = (p["plan_date"], p["room_code"],
+                            p["process_name"], p["shift_no"])
+            slot_map[key] = slot_map.get(key, 0.0) + sku_to_inner(p["qty_planned"], uom)
+
+        # For allow_push: also return other unlocked plans to pool (can be displaced)
+        other_plans: List[Dict] = []
+        if allow_push:
+            for p in PlanRepo.all(_ds(d0), horizon):
+                if p["is_locked"]:
+                    continue
+                if (p["so_number"] == so_no and p["sku_code"] == sku_code
+                        and p["line_item"] == line_item):
+                    continue
+                other_plans.append(p)
+                uom = self._entity_uom(p)
+                key = (p["plan_date"], p["room_code"],
+                       p["process_name"], p["shift_no"])
+                slot_map[key] = slot_map.get(key, 0.0) + sku_to_inner(p["qty_planned"], uom)
+
+        sim_so = {**so, "due_date": target_date}
+        sim_map = dict(slot_map)
+        slots = self._dry_run_plan_so(sim_so, sim_map, d0, d1)
+
+        if not slots:
+            return {"feasible": False, "final_date": None,
+                    "displaced": [],
+                    "error": "Cannot fit in available capacity before target date"}
+
+        final_slots = [s for s in slots if s["is_final"]]
+        final_date = max(s["date"] for s in final_slots) if final_slots else None
+
+        # Identify displaced plans
+        displaced: List[Dict] = []
+        if allow_push and other_plans:
+            used_keys = {(s["date"], s["room_code"], s["process_name"], s["shift_no"])
+                         for s in slots}
+            seen_so_keys: set = set()
+            for p in other_plans:
+                pk = (p["plan_date"], p["room_code"],
+                      p["process_name"], p["shift_no"])
+                if pk not in used_keys:
+                    continue
+                so_key = (p["so_number"], p["sku_code"], p["line_item"])
+                if so_key in seen_so_keys:
+                    continue
+                seen_so_keys.add(so_key)
+                d_so = SORepo.get(p["so_number"], p["sku_code"], p["line_item"])
+                if not d_so:
+                    continue
+                d_plans = [x for x in PlanRepo.for_so(
+                    p["so_number"], p["sku_code"], p["line_item"])
+                    if x.get("is_final_seq")]
+                cur_comp = (max(x["plan_date"] for x in d_plans)
+                            if d_plans else None)
+                due = d_so.get("due_date", "")
+                cdd = d_so.get("committed_due_date") or ""
+                check = cdd if cdd else due
+                status_before = ("LATE" if cur_comp and check and cur_comp > check
+                                 else "ON TIME")
+                displaced.append({
+                    "so_number":          p["so_number"],
+                    "sku_code":           p["sku_code"],
+                    "line_item":          p["line_item"],
+                    "customer_name":      d_so.get("customer_name") or "",
+                    "due_date":           due,
+                    "committed_due_date": cdd,
+                    "current_completion": cur_comp or "",
+                    "status_before":      status_before,
+                    "status_after":       "AT RISK",
+                })
+
+        return {"feasible": True, "final_date": final_date,
+                "displaced": displaced, "error": None}
+
+    def apply_single_pull_forward(
+        self, so_no: str, sku_code: str, line_item: str,
+        target_date: str, allow_push: bool,
+        displaced: List[Dict],
+    ) -> Dict:
+        """
+        Apply pull forward: delete this SO's unlocked plans (+ displaced if
+        allow_push), then re-plan to target_date using backward scheduling.
+        """
+        self._reload_masters()
+        so = SORepo.get(so_no, sku_code, line_item)
+        if not so:
+            return {"success": False, "error": "SO not found"}
+
+        d0 = date.today()
+        d1 = _date(target_date)
+        horizon = _ds(d1 + timedelta(days=1))
+
+        PlanRepo.delete_unlocked_for_so(so_no, sku_code, line_item)
+        if allow_push:
+            for d_item in displaced:
+                PlanRepo.delete_unlocked_for_so(
+                    d_item["so_number"], d_item["sku_code"], d_item["line_item"])
+
+        slot_map = self._build_slot_map(_ds(d0), horizon)
+        sim_so = {**so, "due_date": target_date}
+        report = {"planned": 0, "skipped": 0, "late": [],
+                  "routing_errors": [], "material_plans": 0}
+        self._plan_so(sim_so, slot_map, _ds(d0), target_date, report, force=True)
+
+        return {"success": True, "planned": report["planned"],
+                "displaced_count": len(displaced), "error": None}
+
     def replan_after_actuals(self, date_from: str, date_to: str) -> Dict:
         self._reload_masters()
         report = {"deleted": [], "replanned": [], "errors": []}

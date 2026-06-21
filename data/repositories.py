@@ -444,29 +444,33 @@ class SORepo:
             data.setdefault("received_at", now)
             data.setdefault("status", "OPEN")
             data.setdefault("customer_name", None)
+            data.setdefault("committed_due_date", None)
             with get_connection() as conn:
                 conn.execute("""
                     INSERT INTO sales_order
-                        (so_number,sku_code,line_item,customer_name,qty,due_date,priority,
-                         received_at,status,start_no_earlier,note)
+                        (so_number,sku_code,line_item,customer_name,qty,due_date,
+                         committed_due_date,priority,received_at,status,start_no_earlier,note)
                     VALUES
-                        (:so_number,:sku_code,:line_item,:customer_name,:qty,:due_date,:priority,
-                         :received_at,:status,:start_no_earlier,:note)
+                        (:so_number,:sku_code,:line_item,:customer_name,:qty,:due_date,
+                         :committed_due_date,:priority,:received_at,:status,:start_no_earlier,:note)
                 """, data)
             if batch_id:
                 _log_so_history(batch_id, data, "NEW", None, data)
             return "NEW"
 
-        changed = {k for k in ("qty","due_date","priority","status","note")
-                   if str(existing.get(k,"")) != str(data.get(k,""))}
+        changed = {k for k in ("qty","due_date","committed_due_date","priority","status","note")
+                   if str(existing.get(k,"") or "") != str(data.get(k,"") or "")}
         if not changed:
             return "UNCHANGED"
 
+        data.setdefault("committed_due_date", None)
         with get_connection() as conn:
             conn.execute("""
                 UPDATE sales_order SET
                     customer_name=:customer_name,
-                    qty=:qty, due_date=:due_date, priority=:priority,
+                    qty=:qty, due_date=:due_date,
+                    committed_due_date=:committed_due_date,
+                    priority=:priority,
                     status=:status, start_no_earlier=:start_no_earlier, note=:note
                 WHERE so_number=:so_number AND sku_code=:sku_code
                   AND line_item=:line_item
@@ -557,13 +561,15 @@ class SORepo:
             for so in data:
                 conn.execute("""
                     INSERT INTO sales_order
-                        (so_number,sku_code,line_item,qty,due_date,priority,
-                         received_at,status,start_no_earlier,note,customer_name)
+                        (so_number,sku_code,line_item,qty,due_date,committed_due_date,
+                         priority,received_at,status,start_no_earlier,note,customer_name)
                     VALUES
-                        (:so_number,:sku_code,:line_item,:qty,:due_date,:priority,
-                         :received_at,:status,:start_no_earlier,:note,
+                        (:so_number,:sku_code,:line_item,:qty,:due_date,:committed_due_date,
+                         :priority,:received_at,:status,:start_no_earlier,:note,
                          :customer_name)
-                """, {**so, "customer_name": so.get("customer_name", "")})
+                """, {**so,
+                      "customer_name": so.get("customer_name", ""),
+                      "committed_due_date": so.get("committed_due_date")})
 
     @staticmethod
     def unplanned() -> List[Dict]:

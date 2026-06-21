@@ -37,8 +37,11 @@ LATE_COLOR = QColor("#ffcccc")
 
 class SOTab(QWidget):
     # columns editable in edit mode
-    _EDITABLE_COLS  = {3, 4, 7, 8, 9, 13}   # Customer, Qty, Due Date, Priority, Status, Note
-    _READONLY_COLS  = {0, 1, 2, 5, 6, 10, 11, 12}
+    # 0=SO, 1=SKU, 2=Line, 3=Customer, 4=Qty, 5=PlannedQty, 6=ActualQty,
+    # 7=Due(Req), 8=CommittedDue, 9=Priority, 10=Status,
+    # 11=ProdCompletion, 12=Release, 13=ReceivedAt, 14=Note
+    _EDITABLE_COLS  = {3, 4, 7, 8, 9, 10, 14}
+    _READONLY_COLS  = {0, 1, 2, 5, 6, 11, 12, 13}
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -108,7 +111,7 @@ class SOTab(QWidget):
         self.table.itemChanged.connect(self._on_cell_changed)
 
         cols = ["SO Number", "SKU Code", "Line", "Customer", "Qty", "Planned Qty",
-                "Actual Qty", "Due Date", "Priority", "Status",
+                "Actual Qty", "Due Date (Req)", "Committed Due", "Priority", "Status",
                 "Prod. Completion", "Release Date", "Received At", "Note"]
         self.table.setColumnCount(len(cols))
         self.table.setHorizontalHeaderLabels(cols)
@@ -176,6 +179,7 @@ class SOTab(QWidget):
                 so.get("customer_name") or "",
                 so["qty"], planned, actual,
                 so["due_date"],
+                so.get("committed_due_date") or "",
                 so["priority"] if so["priority"] is not None else "",
                 so["status"],
                 prod_complete, rel_date,
@@ -190,9 +194,10 @@ class SOTab(QWidget):
                     item.setData(Qt.ItemDataRole.UserRole, so)
                 self.table.setItem(ri, ci, item)
 
-            # Row colouring
+            # Row colouring — use committed_due_date if set, else requested
+            check_due = so.get("committed_due_date") or so["due_date"]
             is_late = (so["status"] == "OPEN" and
-                       datetime.strptime(so["due_date"], "%Y-%m-%d").date() < today and
+                       datetime.strptime(check_due, "%Y-%m-%d").date() < today and
                        actual < so["qty"])
             bg = LATE_COLOR if is_late else STATUS_COLORS.get(so["status"], QColor("white"))
             for ci in range(self.table.columnCount()):
@@ -296,12 +301,13 @@ class SOTab(QWidget):
                 orig = self.table.item(ri, 0).data(Qt.ItemDataRole.UserRole)
                 if not orig:
                     continue
-                customer  = self.table.item(ri, 3).text().strip() or None
-                qty_text  = self.table.item(ri, 4).text().strip()
-                due_date  = self.table.item(ri, 7).text().strip()
-                pri_text  = self.table.item(ri, 8).text().strip()
-                status    = self.table.item(ri, 9).text().strip().upper()
-                note      = self.table.item(ri, 13).text().strip() or None
+                customer       = self.table.item(ri, 3).text().strip() or None
+                qty_text       = self.table.item(ri, 4).text().strip()
+                due_date       = self.table.item(ri, 7).text().strip()
+                committed_due  = self.table.item(ri, 8).text().strip() or None
+                pri_text       = self.table.item(ri, 9).text().strip()
+                status         = self.table.item(ri, 10).text().strip().upper()
+                note           = self.table.item(ri, 14).text().strip() or None
 
                 qty = int(qty_text) if qty_text else orig["qty"]
                 if qty <= 0:
@@ -315,6 +321,12 @@ class SOTab(QWidget):
                 except ValueError:
                     errors.append(f"Row {ri+1}: Due Date format must be YYYY-MM-DD")
                     continue
+                if committed_due:
+                    try:
+                        datetime.strptime(committed_due, "%Y-%m-%d")
+                    except ValueError:
+                        errors.append(f"Row {ri+1}: Committed Due format must be YYYY-MM-DD")
+                        continue
                 try:
                     pri = int(pri_text) if pri_text else None
                     if pri is not None and pri <= 0:
@@ -324,12 +336,13 @@ class SOTab(QWidget):
 
                 updated = dict(orig)
                 updated.update({
-                    "customer_name": customer,
-                    "qty":           qty,
-                    "due_date":      due_date,
-                    "priority":      pri,
-                    "status":        status,
-                    "note":          note,
+                    "customer_name":      customer,
+                    "qty":                qty,
+                    "due_date":           due_date,
+                    "committed_due_date": committed_due,
+                    "priority":           pri,
+                    "status":             status,
+                    "note":               note,
                 })
                 SORepo.upsert(updated)
                 saved += 1
@@ -592,7 +605,26 @@ class SOEditDialog(QDialog):
         if self.so.get("due_date"):
             from PyQt6.QtCore import QDate
             self.due_edit.setDate(QDate.fromString(self.so["due_date"], "yyyy-MM-dd"))
-        form.addRow("Due Date:", self.due_edit)
+        form.addRow("Requested Due Date:", self.due_edit)
+
+        self.committed_due_edit = QDateEdit()
+        self.committed_due_edit.setDisplayFormat("yyyy-MM-dd")
+        self.committed_due_edit.setSpecialValueText("(not set)")
+        self.committed_due_edit.setMinimumDate(QDate(2000, 1, 1))
+        cdd = self.so.get("committed_due_date")
+        if cdd:
+            from PyQt6.QtCore import QDate
+            self.committed_due_edit.setDate(QDate.fromString(cdd, "yyyy-MM-dd"))
+        else:
+            self.committed_due_edit.setDate(QDate(2000, 1, 1))
+        self._committed_due_set = bool(cdd)
+        chk = QCheckBox("Set Committed Due Date")
+        chk.setChecked(bool(cdd))
+        self.committed_due_edit.setEnabled(bool(cdd))
+        chk.toggled.connect(lambda v: (self.committed_due_edit.setEnabled(v),
+                                       setattr(self, "_committed_due_set", v)))
+        self._committed_due_chk = chk
+        form.addRow(chk, self.committed_due_edit)
 
         self.priority_edit = QSpinBox(); self.priority_edit.setRange(0, 9999)
         self.priority_edit.setSpecialValueText("(none)")
@@ -619,6 +651,10 @@ class SOEditDialog(QDialog):
         self.result["customer_name"] = self.customer_edit.text().strip() or None
         self.result["qty"]      = self.qty_edit.value()
         self.result["due_date"] = self.due_edit.date().toString("yyyy-MM-dd")
+        if self._committed_due_set:
+            self.result["committed_due_date"] = self.committed_due_edit.date().toString("yyyy-MM-dd")
+        else:
+            self.result["committed_due_date"] = None
         pri = self.priority_edit.value()
         self.result["priority"] = pri if pri > 0 else None
         self.result["status"]   = self.status_combo.currentText()

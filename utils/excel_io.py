@@ -44,8 +44,9 @@ def _col_widths(ws, widths: List[int]):
 # ─── SO Template & Upload ─────────────────────────────────────────────────────
 
 SO_HEADERS = ["SONumber", "SKUCode", "LineItem", "Qty", "DueDate",
-              "Priority", "Status", "StartNoEarlier", "Note", "CustomerName"]
-SO_COL_WIDTHS = [16, 14, 10, 8, 12, 10, 10, 16, 30, 20]
+              "Priority", "Status", "StartNoEarlier", "Note", "CustomerName",
+              "CommittedDueDate"]
+SO_COL_WIDTHS = [16, 14, 10, 8, 12, 10, 10, 16, 30, 20, 16]
 
 def download_so_template(path: str) -> Tuple[bool, str]:
     if not HAS_OPENPYXL:
@@ -56,7 +57,7 @@ def download_so_template(path: str) -> Tuple[bool, str]:
     _write_header(ws, SO_HEADERS)
     _col_widths(ws, SO_COL_WIDTHS)
     # Example row
-    ws.append(["SO-001", "SKU-A", "L01", 100, "2025-09-30", 1, "OPEN", "", "Sample order", "Customer A"])
+    ws.append(["SO-001", "SKU-A", "L01", 100, "2025-09-30", 1, "OPEN", "", "Sample order", "Customer A", ""])
     wb.save(path)
     return True, path
 
@@ -87,7 +88,7 @@ def preview_so_upload(path: str) -> Tuple[bool, str, Dict]:
         for s in SORepo.all()
     }
 
-    COMPARE = ("qty", "due_date", "priority", "status",
+    COMPARE = ("qty", "due_date", "committed_due_date", "priority", "status",
                "start_no_earlier", "note", "customer_name")
 
     preview_rows, uploaded_keys, errors = [], set(), []
@@ -105,9 +106,10 @@ def preview_so_upload(path: str) -> Tuple[bool, str, Dict]:
                 "due_date":         _parse_date(row[4]),
                 "priority":         int(row[5]) if row[5] not in (None, "") else None,
                 "status":           str(row[6]).strip().upper() if row[6] else "OPEN",
-                "start_no_earlier": _parse_date(row[7]) if row[7] else None,
-                "note":             str(row[8]).strip() if row[8] else None,
-                "customer_name":    str(row[9]).strip() if len(row) > 9 and row[9] else None,
+                "start_no_earlier":   _parse_date(row[7]) if row[7] else None,
+                "note":               str(row[8]).strip() if row[8] else None,
+                "customer_name":      str(row[9]).strip() if len(row) > 9 and row[9] else None,
+                "committed_due_date": _parse_date(row[10]) if len(row) > 10 and row[10] else None,
             }
             key = (nd["so_number"], nd["sku_code"], nd["line_item"])
             uploaded_keys.add(key)
@@ -175,8 +177,9 @@ def upload_so(path: str) -> Tuple[bool, str, Dict]:
                 "priority":        int(row[5]) if row[5] not in (None, "") else None,
                 "status":          str(row[6]).strip().upper() if row[6] else "OPEN",
                 "start_no_earlier": _parse_date(row[7]) if row[7] else None,
-                "note":            str(row[8]).strip() if row[8] else None,
-                "customer_name":   str(row[9]).strip() if len(row) > 9 and row[9] else None,
+                "note":               str(row[8]).strip() if row[8] else None,
+                "customer_name":      str(row[9]).strip() if len(row) > 9 and row[9] else None,
+                "committed_due_date": _parse_date(row[10]) if len(row) > 10 and row[10] else None,
             }
             change = SORepo.upsert(data, batch_id=batch_id)
             summary[change.lower()] = summary.get(change.lower(), 0) + 1

@@ -141,20 +141,26 @@ def init_db():
     # ── Sales Orders ─────────────────────────────────────────────────────────
     c.execute("""
     CREATE TABLE IF NOT EXISTS sales_order (
-        so_number        TEXT NOT NULL,
-        sku_code         TEXT NOT NULL,
-        line_item        TEXT NOT NULL,
-        customer_name    TEXT,
-        qty              INTEGER NOT NULL,
-        due_date         TEXT NOT NULL,
-        priority         INTEGER,
-        received_at      TEXT NOT NULL,
-        status           TEXT NOT NULL DEFAULT 'OPEN',
-        start_no_earlier TEXT,
-        note             TEXT,
+        so_number           TEXT NOT NULL,
+        sku_code            TEXT NOT NULL,
+        line_item           TEXT NOT NULL,
+        customer_name       TEXT,
+        qty                 INTEGER NOT NULL,
+        due_date            TEXT NOT NULL,
+        committed_due_date  TEXT,
+        priority            INTEGER,
+        received_at         TEXT NOT NULL,
+        status              TEXT NOT NULL DEFAULT 'OPEN',
+        start_no_earlier    TEXT,
+        note                TEXT,
         PRIMARY KEY (so_number, sku_code, line_item),
         FOREIGN KEY (sku_code) REFERENCES sku_master(sku_code)
     )""")
+
+    # Migration: add committed_due_date to existing DBs
+    so_cols = [r[1] for r in c.execute("PRAGMA table_info(sales_order)").fetchall()]
+    if "committed_due_date" not in so_cols:
+        c.execute("ALTER TABLE sales_order ADD COLUMN committed_due_date TEXT")
 
     # ── SO Change History ────────────────────────────────────────────────────
     c.execute("""

@@ -2590,14 +2590,9 @@ class GanttTab(QWidget):
         worker.start()
 
     def run_pull_forward(self):
-        d0, d1 = self._date_range()
-        try:
-            result = scheduler.pull_forward(d0, d1)
-            self.refresh()
-            if self.main_window:
-                self.main_window.notify(f"Pull forward: {result['moved']} plans moved.")
-        except Exception as e:
-            QMessageBox.warning(self, "Pull Forward Error", str(e))
+        dlg = PullForwardDialog(self)
+        dlg.exec()
+        self.refresh()
 
     def run_clear_plan(self):
         reply = QMessageBox.question(
@@ -2801,3 +2796,343 @@ class AddPlanDialog(QDialog):
             "memo":         "manual",
         })
         self.accept()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Pull Forward Dialog (per-line)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class PullForwardDialog(QDialog):
+    """
+    Lists all planned OPEN SOs. Per row:
+      [Calc Earliest] → finds earliest possible completion date (background thread)
+      Target Date    → editable date field
+      [Apply]        → mode selection → (if push) impact report → confirm → apply
+    """
+
+    # Column indices
+    C_SO   = 0; C_SKU  = 1; C_LINE = 2; C_CUST = 3
+    C_RDUE = 4; C_CDUE = 5; C_COMP = 6; C_EARL = 7
+    C_TGT  = 8; C_CALC = 9; C_APPLY = 10
+
+    HEADERS = ["SO", "SKU", "Line", "Customer",
+               "Requested Due", "Committed Due", "Current Completion",
+               "Earliest Possible", "Target Date", "", ""]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Pull Forward — Per-Line Scheduling")
+        self.resize(1100, 560)
+        self._workers: list = []
+        self._build_ui()
+        self._load()
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self)
+
+        # info bar
+        info = QLabel("Select a row, set a Target Date, then click Calc Earliest or Apply.")
+        info.setStyleSheet("color:#64748b; font-size:11px; padding:4px;")
+        lay.addWidget(info)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(len(self.HEADERS))
+        self.table.setHorizontalHeaderLabels(self.HEADERS)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setAlternatingRowColors(True)
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(self.C_CUST, QHeaderView.ResizeMode.Stretch)
+        lay.addWidget(self.table)
+
+        btns = QHBoxLayout()
+        btn_refresh = QPushButton("Refresh")
+        btn_refresh.clicked.connect(self._load)
+        btns.addWidget(btn_refresh)
+        btns.addStretch()
+        btn_close = QPushButton("Close")
+        btn_close.clicked.connect(self.accept)
+        btns.addWidget(btn_close)
+        lay.addLayout(btns)
+
+    def _load(self):
+        from datetime import date as _date_cls
+        today = _date_cls.today().strftime("%Y-%m-%d")
+        sos = SORepo.all("OPEN")
+        rows = []
+        for so in sos:
+            plans = PlanRepo.for_so(so["so_number"], so["sku_code"], so["line_item"])
+            if not plans:
+                continue
+            final_plans = [p for p in plans if p.get("is_final_seq")]
+            cur_comp = (max(p["plan_date"] for p in final_plans)
+                        if final_plans else "-")
+            rows.append((so, cur_comp))
+
+        self.table.setRowCount(len(rows))
+        for ri, (so, cur_comp) in enumerate(rows):
+            so_no  = so["so_number"]
+            sku    = so["sku_code"]
+            li     = so["line_item"]
+            rdue   = so.get("due_date", "")
+            cdue   = so.get("committed_due_date") or ""
+
+            def _ro(txt, row=ri):
+                it = QTableWidgetItem(str(txt))
+                it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                return it
+
+            self.table.setItem(ri, self.C_SO,   _ro(so_no))
+            self.table.setItem(ri, self.C_SKU,  _ro(sku))
+            self.table.setItem(ri, self.C_LINE, _ro(li))
+            self.table.setItem(ri, self.C_CUST, _ro(so.get("customer_name") or ""))
+            self.table.setItem(ri, self.C_RDUE, _ro(rdue))
+            self.table.setItem(ri, self.C_CDUE, _ro(cdue))
+            self.table.setItem(ri, self.C_COMP, _ro(cur_comp))
+            self.table.setItem(ri, self.C_EARL, _ro("—"))
+
+            # Target date widget
+            tgt_edit = QDateEdit()
+            tgt_edit.setDisplayFormat("yyyy-MM-dd")
+            tgt_edit.setCalendarPopup(True)
+            from PyQt6.QtCore import QDate
+            tgt_ref = cdue if cdue else rdue
+            tgt_edit.setDate(QDate.fromString(tgt_ref, "yyyy-MM-dd")
+                             if tgt_ref else QDate.currentDate())
+            self.table.setCellWidget(ri, self.C_TGT, tgt_edit)
+
+            # Calc button
+            btn_calc = QPushButton("Calc Earliest")
+            btn_calc.setStyleSheet(
+                "background:#e0e7ff; color:#3730a3; border:1px solid #a5b4fc;"
+                " border-radius:4px; padding:3px 8px; font-size:11px;")
+            btn_calc.clicked.connect(lambda _, r=ri, s=so_no, k=sku, l=li:
+                                     self._calc_earliest(r, s, k, l))
+            self.table.setCellWidget(ri, self.C_CALC, btn_calc)
+
+            # Apply button
+            btn_apply = QPushButton("Apply")
+            btn_apply.setStyleSheet(
+                "background:#2563eb; color:white; border:none;"
+                " border-radius:4px; padding:3px 8px; font-size:11px; font-weight:600;")
+            btn_apply.clicked.connect(lambda _, r=ri, s=so_no, k=sku, l=li:
+                                      self._apply_row(r, s, k, l))
+            self.table.setCellWidget(ri, self.C_APPLY, btn_apply)
+
+            # Colour current completion vs committed/requested due
+            check = cdue if cdue else rdue
+            if cur_comp and cur_comp != "-" and check and cur_comp > check:
+                for c in range(self.C_SO, self.C_EARL + 1):
+                    it = self.table.item(ri, c)
+                    if it:
+                        it.setBackground(QBrush(QColor("#ffebee")))
+
+    def _calc_earliest(self, row: int, so_no: str, sku: str, li: str):
+        btn = self.table.cellWidget(row, self.C_CALC)
+        if btn:
+            btn.setEnabled(False)
+            btn.setText("...")
+
+        class _Worker(QThread):
+            done  = pyqtSignal(str)
+            error = pyqtSignal(str)
+            def __init__(self, s, k, l):
+                super().__init__()
+                self._s, self._k, self._l = s, k, l
+            def run(self):
+                try:
+                    result = scheduler._find_earliest_completion(self._s, self._k, self._l)
+                    self.done.emit(result or "N/A")
+                except Exception as e:
+                    self.error.emit(str(e))
+
+        w = _Worker(so_no, sku, li)
+
+        def _on_done(dt, r=row):
+            it = self.table.item(r, self.C_EARL)
+            if it:
+                it.setText(dt)
+            b = self.table.cellWidget(r, self.C_CALC)
+            if b:
+                b.setEnabled(True)
+                b.setText("Calc Earliest")
+
+        def _on_err(msg, r=row):
+            it = self.table.item(r, self.C_EARL)
+            if it:
+                it.setText("Error")
+            b = self.table.cellWidget(r, self.C_CALC)
+            if b:
+                b.setEnabled(True)
+                b.setText("Calc Earliest")
+            QMessageBox.warning(self, "Calc Error", msg)
+
+        w.done.connect(_on_done)
+        w.error.connect(_on_err)
+        w.finished.connect(w.deleteLater)
+        self._workers.append(w)
+        w.start()
+
+    def _apply_row(self, row: int, so_no: str, sku: str, li: str):
+        tgt_widget = self.table.cellWidget(row, self.C_TGT)
+        if not tgt_widget:
+            return
+        target_date = tgt_widget.date().toString("yyyy-MM-dd")
+
+        # Step 1: choose mode
+        mode_dlg = _PullModeDialog(so_no, sku, li, target_date, self)
+        if mode_dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        allow_push = mode_dlg.allow_push
+
+        # Step 2: simulate
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            sim = scheduler.simulate_single_pull_forward(
+                so_no, sku, li, target_date, allow_push)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if not sim["feasible"]:
+            QMessageBox.warning(self, "Not Feasible",
+                sim.get("error") or "Cannot schedule to target date.")
+            return
+
+        # Step 3: if push mode and displaced SOs exist, show impact report
+        if allow_push and sim["displaced"]:
+            impact_dlg = _PullImpactDialog(
+                so_no, sku, li, target_date,
+                sim["final_date"], sim["displaced"], self)
+            if impact_dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+
+        # Step 4: apply
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            result = scheduler.apply_single_pull_forward(
+                so_no, sku, li, target_date, allow_push, sim["displaced"])
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if result["success"]:
+            QMessageBox.information(
+                self, "Applied",
+                f"Pull forward applied.\n"
+                f"Plans created: {result['planned']}\n"
+                f"SOs displaced: {result['displaced_count']}")
+            self._load()
+        else:
+            QMessageBox.warning(self, "Error", result.get("error", "Unknown error"))
+
+
+class _PullModeDialog(QDialog):
+    """Mode selection: available capacity only vs allow pushing other SOs."""
+
+    def __init__(self, so_no, sku, li, target_date, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Pull Forward — Select Mode")
+        self.allow_push = False
+        from PyQt6.QtWidgets import QRadioButton, QButtonGroup
+        lay = QVBoxLayout(self)
+
+        hdr = QLabel(f"<b>{so_no} / {sku} / {li}</b>  →  target: <b>{target_date}</b>")
+        hdr.setStyleSheet("font-size:13px; padding:6px 0;")
+        lay.addWidget(hdr)
+
+        lay.addWidget(QLabel("How should available capacity be determined?"))
+
+        self._rg = QButtonGroup(self)
+        self._r_avail = QRadioButton(
+            "Fit into available capacity only\n"
+            "(does not move any other plan)")
+        self._r_push  = QRadioButton(
+            "Allow displacing other unlocked plans\n"
+            "(shows impact report before applying)")
+        self._r_avail.setChecked(True)
+        self._rg.addButton(self._r_avail, 0)
+        self._rg.addButton(self._r_push,  1)
+
+        for rb in (self._r_avail, self._r_push):
+            rb.setStyleSheet("padding:6px; font-size:12px;")
+            lay.addWidget(rb)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self._ok)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+
+    def _ok(self):
+        self.allow_push = self._r_push.isChecked()
+        self.accept()
+
+
+class _PullImpactDialog(QDialog):
+    """Shows displaced SOs and their status change before confirming."""
+
+    def __init__(self, so_no, sku, li, target_date,
+                 final_date, displaced, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Pull Forward — Impact Report")
+        self.resize(860, 420)
+        lay = QVBoxLayout(self)
+
+        hdr = QLabel(
+            f"Pulling <b>{so_no}/{sku}/{li}</b> to <b>{target_date}</b> "
+            f"(estimated completion: <b>{final_date or '?'}</b>)<br>"
+            f"The following plans will be <b style='color:#c2342f'>displaced</b>. "
+            f"Confirm to proceed.")
+        hdr.setWordWrap(True)
+        hdr.setStyleSheet("padding:6px; font-size:12px;")
+        lay.addWidget(hdr)
+
+        tbl = QTableWidget(len(displaced), 7)
+        tbl.setHorizontalHeaderLabels(
+            ["SO", "SKU", "Line", "Customer",
+             "Requested Due", "Committed Due", "Status Change"])
+        tbl.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents)
+        tbl.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.Stretch)
+        tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+
+        STATUS_COLORS = {
+            "ON TIME":  QColor("#e8f5e9"),
+            "AT RISK":  QColor("#fff8e1"),
+            "LATE":     QColor("#ffebee"),
+        }
+
+        for ri, d in enumerate(displaced):
+            before = d["status_before"]
+            after  = d["status_after"]
+            change = f"{before}  →  {after}"
+            vals = [d["so_number"], d["sku_code"], d["line_item"],
+                    d["customer_name"], d["due_date"],
+                    d["committed_due_date"], change]
+            for ci, v in enumerate(vals):
+                it = QTableWidgetItem(str(v))
+                it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if ci == 6:
+                    it.setBackground(QBrush(STATUS_COLORS.get(after, QColor("white"))))
+                tbl.setItem(ri, ci, it)
+
+        lay.addWidget(tbl)
+
+        warn = QLabel(f"⚠  {len(displaced)} SO(s) will need re-planning after this operation.")
+        warn.setStyleSheet(
+            "color:#92400e; background:#fffbeb; border:1px solid #fcd34d;"
+            " border-radius:4px; padding:6px; font-size:11px;")
+        lay.addWidget(warn)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel)
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("Confirm & Apply")
+        btns.button(QDialogButtonBox.StandardButton.Ok).setStyleSheet(
+            "background:#dc2626; color:white; font-weight:bold;"
+            " border:none; border-radius:4px; padding:5px 14px;")
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
