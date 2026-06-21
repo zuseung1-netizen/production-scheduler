@@ -38,6 +38,7 @@ from ui.actuals_tab import ActualsTab
 from ui.alerts_tab import AlertsTab
 from ui.dashboard_tab import DashboardTab
 from ui.remaining_tabs import InventoryTab, ReleaseReportTab, ImpactReportTab, ScenarioTab
+from ui.dispatch_tab import DispatchListTab
 from ui.help_tab import HelpTab
 
 
@@ -314,6 +315,7 @@ class DetachedWindow(QMainWindow):
         self.release_tab     = ReleaseReportTab(self)
         self.impact_tab      = ImpactReportTab(self)
         self.scenario_tab    = ScenarioTab(self)
+        self.dispatch_tab    = DispatchListTab(self)
         self.help_tab        = HelpTab(self)
 
         _tab_defs = [
@@ -326,6 +328,7 @@ class DetachedWindow(QMainWindow):
             (self.dashboard_tab, "📊  Dashboard"),
             (self.inventory_tab, "📦  Inventory"),
             (self.release_tab,   "🚀  Release Report"),
+            (self.dispatch_tab,  "📋  Dispatch List"),
             (self.impact_tab,    "📈  Impact Report"),
             (self.scenario_tab,  "🎯  Scenario Planner"),
             (self.help_tab,      "❓  Help"),
@@ -501,6 +504,7 @@ class MainWindow(QMainWindow):
         self.release_tab     = ReleaseReportTab(self)
         self.impact_tab      = ImpactReportTab(self)
         self.scenario_tab    = ScenarioTab(self)
+        self.dispatch_tab    = DispatchListTab(self)
         self.help_tab        = HelpTab(self)
 
         # ── Stack widget (content area) ───────────────────────────────────────
@@ -517,9 +521,10 @@ class MainWindow(QMainWindow):
             (self.dashboard_tab, "📊  Dashboard",         6),
             (self.inventory_tab, "📦  Inventory",         7),
             (self.release_tab,   "🚀  Release Report",    8),
-            (self.impact_tab,    "📈  Impact Report",     9),
-            (self.scenario_tab,  "🎯  Scenario Planner", 10),
-            (self.help_tab,      "❓  Help",              11),
+            (self.dispatch_tab,  "📋  Dispatch List",     9),
+            (self.impact_tab,    "📈  Impact Report",    10),
+            (self.scenario_tab,  "🎯  Scenario Planner", 11),
+            (self.help_tab,      "❓  Help",              12),
         ]
         for widget, title, _ in self._tab_defs:
             self.tabs.addTab(widget, title)
@@ -530,18 +535,19 @@ class MainWindow(QMainWindow):
         self._sidebar.add_item(_IC_GANTT,     "Gantt Planner",    0)
         self._sidebar.add_item(_IC_SO,        "Sales Orders",     1)
         self._sidebar.add_item(_IC_RELEASE,   "Release Report",   8)
+        self._sidebar.add_item(_IC_ALERTS,    "Dispatch List",    9)
         self._sidebar.add_group("Capacity")
         self._sidebar.add_item(_IC_CRP,       "CRP",              3)
         self._sidebar.add_item(_IC_INVENTORY, "Inventory",        7)
-        self._sidebar.add_item(_IC_DASHBOARD, "Scenario Planner", 10)
+        self._sidebar.add_item(_IC_DASHBOARD, "Scenario Planner", 11)
         self._sidebar.add_group("Track")
         self._sidebar.add_item(_IC_ACTUALS,   "Actuals",          4)
         self._sidebar.add_item(_IC_ALERTS,    "Alerts",           5)
         self._sidebar.add_item(_IC_DASHBOARD, "Dashboard",        6)
-        self._sidebar.add_item(_IC_RELEASE,   "Impact Report",    9)
+        self._sidebar.add_item(_IC_RELEASE,   "Impact Report",   10)
         self._sidebar.add_group("Setup")
         self._sidebar.add_item(_IC_MASTERS,   "Masters",          2)
-        self._sidebar.add_item(_IC_HELP,      "Help",            11)
+        self._sidebar.add_item(_IC_HELP,      "Help",            12)
 
         self._sidebar.set_current(0)
         self._sidebar.tabRequested.connect(self._on_sidebar_nav)
