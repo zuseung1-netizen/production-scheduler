@@ -9,6 +9,19 @@
 - UI/UX 변경 → CLAUDE.md의 UI/UX 설계 검토 절차 별도 적용
 - 구현 요청을 받은 경우에만 파일 편집·생성 진행
 
+**기능 구현 완료 시 반드시 git commit 수행한다.**
+
+- 구현 → 구문 검사(`python -m py_compile`) → 앱 실행 확인 → **git commit**
+- 한 세션에서 여러 기능 구현 시 레이어 단위(DB / 스케줄러 / UI)로 나눠 커밋
+- 스크린샷(*.png), mockup HTML, 내보낸 Excel(GanttPlan_*.xlsx)은 커밋하지 않음 (.gitignore 적용)
+- 세션 종료 전 `git status`로 미커밋 파일 없는지 확인
+
+**세션 내 중요 결정/구현 완료 시 메모리를 즉시 저장한다.**
+
+- 새 기능 구현 완료 → `project_implemented_features.md` 업데이트
+- 보류 결정 → `project_deferred_features.md` 추가
+- 설계 함정 발견 → `project_architecture_decisions.md` 추가
+
 ---
 
 ## 프로젝트 개요
