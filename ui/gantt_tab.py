@@ -1792,7 +1792,15 @@ class GanttCanvas(QWidget):
         reason, ok = QInputDialog.getText(self, "Delete Plan", "Reason:")
         if ok:
             plan_data = PlanRepo.get(plan_id)
+            group_id = plan_data.get("consolidation_group") if plan_data else None
             PlanRepo.delete(plan_id, reason=reason)
+            # If the deleted plan was in a consolidation group, check remaining members.
+            # A single-member group is an orphan — auto-break to clear the gold border & lock.
+            if group_id:
+                remaining = [p for p in PlanRepo.all()
+                             if p.get("consolidation_group") == group_id]
+                if len(remaining) <= 1:
+                    ConsolidationEngine.break_group(group_id)
             if plan_data and self.parent_tab:
                 self.parent_tab.push_undo({
                     "type":      "delete",
