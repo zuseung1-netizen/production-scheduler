@@ -588,13 +588,17 @@ def download_sku_process_template(path: str) -> Tuple[bool, str]:
     return True, path
 
 
-def upload_sku_process(path: str) -> Tuple[bool, str]:
+def upload_sku_process(path: str, confirmed: bool = False) -> Tuple[bool, str, list]:
     """
     Upload SKU process routing from Excel.
     Replaces all routing for each SKU found in the file.
+
+    Returns (ok, summary_msg, warnings_list).  When structural warnings exist
+    and confirmed=False the data is NOT written; caller must re-call with
+    confirmed=True after the user acknowledges.
     """
     if not HAS_OPENPYXL:
-        return False, "openpyxl not installed"
+        return False, "openpyxl not installed", []
     try:
         from data.repositories import SKUProcessRepo
         wb = load_workbook(path, data_only=True)
@@ -627,24 +631,34 @@ def upload_sku_process(path: str) -> Tuple[bool, str]:
             })
             count += 1
 
-        # Delete existing routing for affected SKUs before re-inserting
+        summary = f"{count} process step(s) for {len(seen_skus)} SKU(s)"
+
+        # Pre-write structural validation (reuse generic helper via entity mapping)
+        mapped = [{"entity_type": "SKU", "entity_code": r["sku_code"],
+                   "process_seq": r["process_seq"], "is_final_seq": r["is_final_seq"]}
+                  for r in rows_to_insert]
+        warnings = _validate_routing_in_memory(mapped)
+        if warnings and not confirmed:
+            return True, summary, warnings
+
+        # Write to DB
         for sku in seen_skus:
             SKUProcessRepo.delete_all_for_sku(sku)
         SKUProcessRepo.bulk_upsert(rows_to_insert)
 
-        # Validate all affected SKUs
-        errors = []
+        # Post-write deeper validation (room type checks)
+        deep_errors = []
         for sku in seen_skus:
-            ok, msg = SKUProcessRepo.validate_routing(sku)
-            if not ok:
-                errors.append(msg)
+            ok_v, msg_v = SKUProcessRepo.validate_routing(sku)
+            if not ok_v and msg_v not in warnings:
+                deep_errors.append(msg_v)
 
-        result_msg = f"Imported {count} process steps for {len(seen_skus)} SKUs"
-        if errors:
-            result_msg += f"\nValidation warnings:\n" + "\n".join(errors)
-        return True, result_msg
+        msg = f"Imported {summary}"
+        if warnings:
+            msg += f" — {len(warnings)} structural warning(s) acknowledged"
+        return True, msg, warnings + deep_errors
     except Exception as e:
-        return False, str(e)
+        return False, str(e), []
 
 
 # ─── Material Master Template & Upload ───────────────────────────────────────
@@ -712,9 +726,37 @@ def download_process_routing_template(path: str) -> Tuple[bool, str]:
     return True, path
 
 
-def upload_process_routing(path: str) -> Tuple[bool, str]:
+def _validate_routing_in_memory(rows_to_insert: list) -> list:
+    """Check final_seq rules before writing to DB. Returns list of warning strings."""
+    entities: dict = {}
+    for r in rows_to_insert:
+        key = (r["entity_type"], r["entity_code"])
+        entities.setdefault(key, []).append(r)
+    warnings = []
+    for (et, code), steps in entities.items():
+        finals = [s for s in steps if s.get("is_final_seq")]
+        if len(finals) != 1:
+            warnings.append(
+                f"{et} {code}: must have exactly 1 final step "
+                f"(found {len(finals)})")
+        elif finals[0]["process_seq"] != max(s["process_seq"] for s in steps):
+            warnings.append(
+                f"{et} {code}: final step must be the last sequence "
+                f"(seq {finals[0]['process_seq']} is not the max)")
+    return warnings
+
+
+def upload_process_routing(path: str, confirmed: bool = False) -> Tuple[bool, str, list]:
+    """Parse routing Excel and write to DB.
+
+    If structural warnings exist (missing/misplaced final step) and
+    confirmed=False, returns without writing so the caller can show a
+    confirm dialog.  Pass confirmed=True to write regardless.
+
+    Returns (ok, summary_msg, warnings_list).
+    """
     if not HAS_OPENPYXL:
-        return False, "openpyxl not installed"
+        return False, "openpyxl not installed", []
     try:
         from data.repositories import ProcessRoutingRepo
         wb = load_workbook(path, data_only=True)
@@ -745,20 +787,32 @@ def upload_process_routing(path: str) -> Tuple[bool, str]:
             })
             count += 1
 
+        summary = (f"{count} routing step(s) for "
+                   f"{len(seen_entities)} entity(ies)")
+
+        # Pre-write structural validation
+        warnings = _validate_routing_in_memory(rows_to_insert)
+        if warnings and not confirmed:
+            return True, summary, warnings
+
+        # Write to DB
         for et, code in seen_entities:
             ProcessRoutingRepo.delete_all_for_entity(et, code)
         ProcessRoutingRepo.bulk_upsert(rows_to_insert)
 
-        errors = []
+        # Post-write deeper validation (room/material checks)
+        deep_errors = []
         for et, code in seen_entities:
             v, m = ProcessRoutingRepo.validate(et, code)
-            if not v: errors.append(m)
+            if not v and m not in warnings:
+                deep_errors.append(m)
 
-        msg = f"Imported {count} routing steps for {len(seen_entities)} entities"
-        if errors: msg += "\nWarnings:\n" + "\n".join(errors)
-        return True, msg
+        msg = f"Imported {summary}"
+        if warnings:
+            msg += f" — {len(warnings)} structural warning(s) acknowledged"
+        return True, msg, warnings + deep_errors
     except Exception as e:
-        return False, str(e)
+        return False, str(e), []
 
 
 # ─── Inventory Template & Upload ─────────────────────────────────────────────

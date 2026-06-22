@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem, QPushButton, QLabel, QComboBox, QLineEdit,
     QSpinBox, QDoubleSpinBox, QFileDialog, QMessageBox,
     QDialog, QDialogButtonBox, QFormLayout, QAbstractItemView,
-    QHeaderView, QMenu, QCheckBox, QGroupBox
+    QHeaderView, QMenu, QCheckBox, QGroupBox, QTextEdit
 )
 from datetime import datetime, timedelta
 
@@ -1135,6 +1135,69 @@ def _make_table(cols: list, editable: bool = False) -> QTableWidget:
     return t
 
 
+# ─── Routing upload helpers (shared by SKUProcessWidget + ProcessRoutingWidget) ──
+
+def _show_routing_result(parent, title: str, msg: str, warnings: list):
+    """Show upload result — scrollable dialog when content is long."""
+    body = msg
+    if warnings:
+        body += "\n\nWarnings acknowledged:\n" + "\n".join(f"  • {w}" for w in warnings)
+    if len(body) < 300 and "\n" not in body[50:]:
+        QMessageBox.information(parent, title, body)
+        return
+    dlg = QDialog(parent)
+    dlg.setWindowTitle(title)
+    dlg.resize(560, 340)
+    lay = QVBoxLayout(dlg)
+    te = QTextEdit(readOnly=True)
+    te.setPlainText(body)
+    lay.addWidget(te)
+    bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+    bb.accepted.connect(dlg.accept)
+    lay.addWidget(bb)
+    dlg.exec()
+
+
+class _RoutingWarningsDialog(QDialog):
+    """Scrollable dialog asking user to confirm upload despite warnings."""
+    def __init__(self, summary: str, warnings: list, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Routing Upload — Warnings Found")
+        self.resize(580, 400)
+        lay = QVBoxLayout(self)
+
+        lbl = QLabel(
+            f"<b>{summary}</b><br><br>"
+            f"<span style='color:#D97706'>⚠ {len(warnings)} warning(s) found.</span><br>"
+            "Routing steps have NOT been saved yet. Review the warnings below,<br>"
+            "then choose <b>Upload Anyway</b> to proceed or <b>Cancel</b> to abort.")
+        lbl.setWordWrap(True)
+        lay.addWidget(lbl)
+
+        te = QTextEdit(readOnly=True)
+        te.setPlainText("\n".join(f"• {w}" for w in warnings))
+        te.setStyleSheet("background:#FFFDE7; border:1px solid #DDE3ED; border-radius:4px;")
+        lay.addWidget(te)
+
+        bb = QDialogButtonBox()
+        btn_cancel = bb.addButton("Cancel",        QDialogButtonBox.ButtonRole.RejectRole)
+        btn_upload = bb.addButton("Upload Anyway", QDialogButtonBox.ButtonRole.AcceptRole)
+        btn_upload.setStyleSheet(
+            "background:#D97706; color:white; font-weight:bold; "
+            "border:none; border-radius:5px; padding:5px 14px;")
+        btn_cancel.setStyleSheet(
+            "background:#DC2626; color:white; font-weight:bold; "
+            "border:none; border-radius:5px; padding:5px 14px;")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    @staticmethod
+    def ask(parent, summary: str, warnings: list) -> bool:
+        dlg = _RoutingWarningsDialog(summary, warnings, parent)
+        return dlg.exec() == QDialog.DialogCode.Accepted
+
+
 # ─── SKU Process Routing Widget ───────────────────────────────────────────────
 
 class SKUProcessWidget(QWidget):
@@ -1261,16 +1324,28 @@ class SKUProcessWidget(QWidget):
     def _upload(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Upload SKU Process Excel", "", "Excel (*.xlsx)")
-        if path:
-            ok, msg = upload_sku_process(path)
-            (QMessageBox.information if ok else QMessageBox.warning)(
-                self, "Upload", msg)
-            if ok:
-                self.sku_filter.clear()
-                self.sku_filter.addItem("ALL")
-                for s in SKURepo.all():
-                    self.sku_filter.addItem(s["sku_code"])
-                self._load()
+        if not path:
+            return
+
+        ok, summary, warnings = upload_sku_process(path)
+        if not ok:
+            QMessageBox.warning(self, "Upload Failed", summary)
+            return
+
+        if warnings:
+            confirmed = _RoutingWarningsDialog.ask(self, summary, warnings)
+            if not confirmed:
+                return
+            ok, msg, _ = upload_sku_process(path, confirmed=True)
+        else:
+            msg = summary
+
+        _show_routing_result(self, "Upload Complete", msg, warnings)
+        self.sku_filter.clear()
+        self.sku_filter.addItem("ALL")
+        for s in SKURepo.all():
+            self.sku_filter.addItem(s["sku_code"])
+        self._load()
 
     def _template(self):
         path, _ = QFileDialog.getSaveFileName(
@@ -1623,11 +1698,24 @@ class ProcessRoutingWidget(QWidget):
         from utils.excel_io import upload_process_routing
         path, _ = QFileDialog.getOpenFileName(
             self, "Upload Routing Excel", "", "Excel (*.xlsx)")
-        if path:
-            ok, msg = upload_process_routing(path)
-            (QMessageBox.information if ok else QMessageBox.warning)(
-                self, "Upload", msg)
-            if ok: self._load()
+        if not path:
+            return
+
+        ok, summary, warnings = upload_process_routing(path)
+        if not ok:
+            QMessageBox.warning(self, "Upload Failed", summary)
+            return
+
+        if warnings:
+            confirmed = _RoutingWarningsDialog.ask(self, summary, warnings)
+            if not confirmed:
+                return
+            ok, msg, _ = upload_process_routing(path, confirmed=True)
+        else:
+            msg = summary
+
+        _show_routing_result(self, "Upload Complete", msg, warnings)
+        self._load()
 
     def _template(self):
         from utils.excel_io import download_process_routing_template
