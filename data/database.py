@@ -154,6 +154,10 @@ def init_db():
         start_no_earlier    TEXT,
         note                TEXT,
         split_from          TEXT,
+        order_type          TEXT NOT NULL DEFAULT 'CUSTOMER',
+        department          TEXT,
+        purpose             TEXT,
+        requester           TEXT,
         PRIMARY KEY (so_number, sku_code, line_item),
         FOREIGN KEY (sku_code) REFERENCES sku_master(sku_code)
     )""")
@@ -164,6 +168,14 @@ def init_db():
         c.execute("ALTER TABLE sales_order ADD COLUMN committed_due_date TEXT")
     if "split_from" not in so_cols:
         c.execute("ALTER TABLE sales_order ADD COLUMN split_from TEXT")
+    if "order_type" not in so_cols:
+        c.execute("ALTER TABLE sales_order ADD COLUMN order_type TEXT NOT NULL DEFAULT 'CUSTOMER'")
+    if "department" not in so_cols:
+        c.execute("ALTER TABLE sales_order ADD COLUMN department TEXT")
+    if "purpose" not in so_cols:
+        c.execute("ALTER TABLE sales_order ADD COLUMN purpose TEXT")
+    if "requester" not in so_cols:
+        c.execute("ALTER TABLE sales_order ADD COLUMN requester TEXT")
 
     # ── SO Change History ────────────────────────────────────────────────────
     c.execute("""

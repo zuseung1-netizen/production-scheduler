@@ -51,7 +51,11 @@ class SOTab(QWidget):
         self._build_ui()
 
     def _build_ui(self):
-        layout = QVBoxLayout(self)
+        self._build_customer_tab(self)
+        self.refresh()
+
+    def _build_customer_tab(self, container: QWidget):
+        layout = QVBoxLayout(container)
 
         # ── filter bar ──
         fbar = QHBoxLayout()
@@ -138,8 +142,6 @@ class SOTab(QWidget):
         splitter.setSizes([600, 200])
         layout.addWidget(splitter, stretch=1)
 
-        self.refresh()
-
     def refresh(self):
         self._load_table()
         self._load_history()
@@ -150,7 +152,8 @@ class SOTab(QWidget):
         self._btn_save.setEnabled(False)
         status_filter = self.filter_status.currentText()
         search = self.search_box.text().lower()
-        sos = SORepo.all(None if status_filter == "ALL" else status_filter)
+        sos = SORepo.all(None if status_filter == "ALL" else status_filter,
+                         order_type="CUSTOMER")
         if search:
             sos = [s for s in sos if search in (s["so_number"] + s["sku_code"] + s["line_item"]).lower()]
 
@@ -1333,3 +1336,385 @@ class BulkAllocationDialog(QDialog):
                 so["so_number"], so["sku_code"], so["line_item"])
         self._result_label.hide()
         self._load_preview()
+
+
+# ── Internal Order Tab ────────────────────────────────────────────────────────
+
+_IO_DEPTS = ["R&D", "Marketing", "QA", "Production", "Logistics", "Other"]
+
+IO_STATUS_COLORS = {
+    "OPEN":   QColor("#e3f2fd"),
+    "HOLD":   QColor("#ffe0a0"),
+    "CLOSED": QColor("#d0d0d0"),
+}
+
+
+class InternalOrderTab(QWidget):
+    # col indices: 0=IO#, 1=SKU, 2=Line, 3=Dept, 4=Purpose, 5=Requester,
+    #              6=Qty, 7=Due, 8=Priority, 9=Status, 10=Note
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.main_window = parent
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        # ── toolbar ──
+        fbar = QHBoxLayout()
+        fbar.addWidget(QLabel("Status:"))
+        self._filter_status = QComboBox()
+        self._filter_status.addItems(["ALL", "OPEN", "HOLD", "CLOSED"])
+        self._filter_status.currentTextChanged.connect(self.refresh)
+        fbar.addWidget(self._filter_status)
+
+        fbar.addWidget(QLabel("Dept:"))
+        self._filter_dept = QComboBox()
+        self._filter_dept.addItems(["ALL"] + _IO_DEPTS)
+        self._filter_dept.currentTextChanged.connect(self.refresh)
+        fbar.addWidget(self._filter_dept)
+
+        fbar.addWidget(QLabel("Search:"))
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("IO# / SKU / Requester…")
+        self._search.textChanged.connect(self.refresh)
+        fbar.addWidget(self._search)
+        fbar.addStretch()
+
+        btn_new = QPushButton("➕ New Internal Order")
+        btn_new.setStyleSheet(
+            "background:#2563EB; color:white; font-weight:bold; "
+            "border:none; border-radius:5px; padding:5px 14px;")
+        btn_new.clicked.connect(self._create_io)
+        fbar.addWidget(btn_new)
+        layout.addLayout(fbar)
+
+        # ── table ──
+        self._table = QTableWidget()
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setAlternatingRowColors(True)
+        self._table.setSortingEnabled(True)
+        self._table.doubleClicked.connect(self._edit_io)
+        self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._context_menu)
+
+        cols = ["IO Number", "SKU Code", "Line", "Department", "Purpose",
+                "Requester", "Qty", "Internal Due", "Priority", "Status", "Note"]
+        self._table.setColumnCount(len(cols))
+        self._table.setHorizontalHeaderLabels(cols)
+        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        layout.addWidget(self._table, stretch=1)
+
+        self.refresh()
+
+    def refresh(self):
+        status_f = self._filter_status.currentText()
+        dept_f   = self._filter_dept.currentText()
+        search   = self._search.text().lower()
+
+        ios = SORepo.all(
+            None if status_f == "ALL" else status_f,
+            order_type="INTERNAL")
+        if dept_f != "ALL":
+            ios = [io for io in ios if (io.get("department") or "") == dept_f]
+        if search:
+            ios = [io for io in ios if search in (
+                io["so_number"] + io["sku_code"] + io["line_item"] +
+                (io.get("requester") or "") + (io.get("purpose") or "")
+            ).lower()]
+
+        self._table.setSortingEnabled(False)
+        self._table.setRowCount(len(ios))
+        today = date.today()
+
+        for ri, io in enumerate(ios):
+            planned = PlanRepo.planned_qty(io["so_number"], io["sku_code"], io["line_item"])
+            vals = [
+                io["so_number"],
+                io["sku_code"],
+                io["line_item"],
+                io.get("department") or "",
+                io.get("purpose") or "",
+                io.get("requester") or "",
+                io["qty"],
+                io["due_date"],
+                io["priority"] if io["priority"] is not None else "",
+                io["status"],
+                io.get("note") or "",
+            ]
+            for ci, val in enumerate(vals):
+                item = QTableWidgetItem(str(val))
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if ci == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, io)
+                self._table.setItem(ri, ci, item)
+
+            check_due = io["due_date"]
+            is_late = (io["status"] == "OPEN" and
+                       datetime.strptime(check_due, "%Y-%m-%d").date() < today)
+            bg = QColor("#ffcccc") if is_late else IO_STATUS_COLORS.get(io["status"], QColor("white"))
+            for ci in range(self._table.columnCount()):
+                self._table.item(ri, ci).setBackground(QBrush(bg))
+
+        self._table.setSortingEnabled(True)
+
+    def _context_menu(self, pos):
+        row = self._table.rowAt(pos.y())
+        if row < 0:
+            return
+        io = self._table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        if not io:
+            return
+        status = io["status"]
+        menu = QMenu(self)
+        menu.addAction("✏ Edit", lambda: self._edit_io())
+        if status != "HOLD":
+            menu.addAction("⏸ Hold", lambda: self._set_hold(io, True))
+        else:
+            menu.addAction("▶ Unhold", lambda: self._set_hold(io, False))
+        menu.addAction("✅ Mark Complete", lambda: self._close_io(io))
+        menu.addAction("⭐ Set Priority", lambda: self._set_priority(io))
+        menu.exec(QCursor.pos())
+
+    def _create_io(self):
+        io_no = SORepo.next_io_number()
+        dlg = IOCreateDialog(io_no, self)
+        if dlg.exec():
+            SORepo.upsert(dlg.result)
+            self.refresh()
+            if self.main_window:
+                self.main_window.notify(f"Internal Order {dlg.result['so_number']} created.")
+
+    def _edit_io(self):
+        row = self._table.currentRow()
+        if row < 0:
+            return
+        io = self._table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        if not io:
+            return
+        full = SORepo.get(io["so_number"], io["sku_code"], io["line_item"])
+        if not full:
+            return
+        dlg = IOEditDialog(full, self)
+        if dlg.exec():
+            SORepo.upsert(dlg.result)
+            self.refresh()
+
+    def _set_hold(self, io: Dict, hold: bool):
+        SORepo.hold(io["so_number"], io["sku_code"], io["line_item"], hold)
+        self.refresh()
+
+    def _close_io(self, io: Dict):
+        if QMessageBox.question(
+                self, "Complete IO",
+                f"Mark {io['so_number']} as CLOSED?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        ) == QMessageBox.StandardButton.Yes:
+            SORepo.close(io["so_number"], io["sku_code"], io["line_item"])
+            self.refresh()
+
+    def _set_priority(self, io: Dict):
+        from PyQt6.QtWidgets import QInputDialog
+        cur = io["priority"] or 0
+        val, ok = QInputDialog.getInt(self, "Priority", "Priority (lower = higher priority):", cur, 0, 9999)
+        if ok:
+            SORepo.set_priority(io["so_number"], io["sku_code"], io["line_item"], val if val > 0 else None)
+            self.refresh()
+
+
+class IOCreateDialog(QDialog):
+    def __init__(self, io_number: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("New Internal Order")
+        self.setMinimumWidth(440)
+        self.io_number = io_number
+        self.result: Dict = {}
+        self._build_ui()
+
+    def _build_ui(self):
+        from PyQt6.QtWidgets import QFormLayout
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        # IO number (read-only)
+        io_lbl = QLabel(self.io_number)
+        io_lbl.setStyleSheet("font-weight:bold; color:#2563EB;")
+        form.addRow("IO Number:", io_lbl)
+
+        # SKU combo
+        skus = SKURepo.all()
+        self._sku_combo = QComboBox()
+        self._sku_combo.addItems([s["sku_code"] for s in skus])
+        form.addRow("SKU Code:", self._sku_combo)
+
+        # Line item
+        self._line_edit = QLineEdit("L01")
+        form.addRow("Line Item:", self._line_edit)
+
+        # Department
+        self._dept_combo = QComboBox()
+        self._dept_combo.addItems(_IO_DEPTS)
+        form.addRow("Department:", self._dept_combo)
+
+        # Purpose
+        self._purpose_edit = QLineEdit()
+        self._purpose_edit.setPlaceholderText("e.g. Stability study batch")
+        form.addRow("Purpose:", self._purpose_edit)
+
+        # Requester
+        self._requester_edit = QLineEdit()
+        self._requester_edit.setPlaceholderText("Name of requester")
+        form.addRow("Requester:", self._requester_edit)
+
+        # Qty
+        self._qty_spin = QSpinBox()
+        self._qty_spin.setRange(1, 9999999)
+        self._qty_spin.setValue(1)
+        form.addRow("Qty:", self._qty_spin)
+
+        # Internal Due Date
+        self._due_edit = QDateEdit()
+        self._due_edit.setDisplayFormat("yyyy-MM-dd")
+        self._due_edit.setDate(QDate.currentDate().addDays(30))
+        form.addRow("Internal Due Date:", self._due_edit)
+
+        # Priority
+        self._priority_spin = QSpinBox()
+        self._priority_spin.setRange(0, 9999)
+        self._priority_spin.setValue(50)
+        self._priority_spin.setSpecialValueText("(none)")
+        form.addRow("Priority:", self._priority_spin)
+
+        # Note
+        self._note_edit = QLineEdit()
+        form.addRow("Note:", self._note_edit)
+
+        layout.addLayout(form)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self._accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def _accept(self):
+        sku = self._sku_combo.currentText().strip()
+        if not sku:
+            QMessageBox.warning(self, "Validation", "SKU Code is required.")
+            return
+        line = self._line_edit.text().strip() or "L01"
+        pri = self._priority_spin.value()
+        self.result = {
+            "so_number":   self.io_number,
+            "sku_code":    sku,
+            "line_item":   line,
+            "customer_name": None,
+            "qty":         self._qty_spin.value(),
+            "due_date":    self._due_edit.date().toString("yyyy-MM-dd"),
+            "committed_due_date": None,
+            "priority":    pri if pri > 0 else None,
+            "status":      "OPEN",
+            "start_no_earlier": None,
+            "note":        self._note_edit.text().strip() or None,
+            "split_from":  None,
+            "order_type":  "INTERNAL",
+            "department":  self._dept_combo.currentText(),
+            "purpose":     self._purpose_edit.text().strip() or None,
+            "requester":   self._requester_edit.text().strip() or None,
+        }
+        self.accept()
+
+
+class IOEditDialog(QDialog):
+    def __init__(self, io: Dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Edit Internal Order — {io['so_number']}")
+        self.setMinimumWidth(440)
+        self.io = io
+        self.result = dict(io)
+        self._build_ui()
+
+    def _build_ui(self):
+        from PyQt6.QtWidgets import QFormLayout
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        # IO# (read-only)
+        lbl = QLabel(self.io["so_number"])
+        lbl.setStyleSheet("font-weight:bold; color:#2563EB;")
+        form.addRow("IO Number:", lbl)
+
+        # SKU (read-only once created)
+        sku_lbl = QLabel(f"{self.io['sku_code']} / {self.io['line_item']}")
+        form.addRow("SKU / Line:", sku_lbl)
+
+        # Department
+        self._dept_combo = QComboBox()
+        self._dept_combo.addItems(_IO_DEPTS)
+        cur_dept = self.io.get("department") or _IO_DEPTS[0]
+        idx = self._dept_combo.findText(cur_dept)
+        if idx >= 0:
+            self._dept_combo.setCurrentIndex(idx)
+        form.addRow("Department:", self._dept_combo)
+
+        # Purpose
+        self._purpose_edit = QLineEdit(self.io.get("purpose") or "")
+        form.addRow("Purpose:", self._purpose_edit)
+
+        # Requester
+        self._requester_edit = QLineEdit(self.io.get("requester") or "")
+        form.addRow("Requester:", self._requester_edit)
+
+        # Qty
+        self._qty_spin = QSpinBox()
+        self._qty_spin.setRange(1, 9999999)
+        self._qty_spin.setValue(self.io.get("qty", 1))
+        form.addRow("Qty:", self._qty_spin)
+
+        # Due Date
+        self._due_edit = QDateEdit()
+        self._due_edit.setDisplayFormat("yyyy-MM-dd")
+        if self.io.get("due_date"):
+            self._due_edit.setDate(QDate.fromString(self.io["due_date"], "yyyy-MM-dd"))
+        else:
+            self._due_edit.setDate(QDate.currentDate().addDays(30))
+        form.addRow("Internal Due Date:", self._due_edit)
+
+        # Priority
+        self._priority_spin = QSpinBox()
+        self._priority_spin.setRange(0, 9999)
+        self._priority_spin.setSpecialValueText("(none)")
+        self._priority_spin.setValue(self.io.get("priority") or 0)
+        form.addRow("Priority:", self._priority_spin)
+
+        # Status
+        self._status_combo = QComboBox()
+        self._status_combo.addItems(["OPEN", "HOLD", "CLOSED"])
+        idx = self._status_combo.findText(self.io.get("status", "OPEN"))
+        if idx >= 0:
+            self._status_combo.setCurrentIndex(idx)
+        form.addRow("Status:", self._status_combo)
+
+        # Note
+        self._note_edit = QLineEdit(self.io.get("note") or "")
+        form.addRow("Note:", self._note_edit)
+
+        layout.addLayout(form)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self._accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def _accept(self):
+        pri = self._priority_spin.value()
+        self.result.update({
+            "department": self._dept_combo.currentText(),
+            "purpose":    self._purpose_edit.text().strip() or None,
+            "requester":  self._requester_edit.text().strip() or None,
+            "qty":        self._qty_spin.value(),
+            "due_date":   self._due_edit.date().toString("yyyy-MM-dd"),
+            "priority":   pri if pri > 0 else None,
+            "status":     self._status_combo.currentText(),
+            "note":       self._note_edit.text().strip() or None,
+            "order_type": "INTERNAL",
+        })
+        self.accept()

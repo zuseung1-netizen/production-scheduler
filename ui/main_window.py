@@ -31,7 +31,7 @@ from data.database import init_db
 from data.crp_excel import crp_manager
 
 from ui.gantt_tab import GanttTab
-from ui.so_tab import SOTab
+from ui.so_tab import SOTab, InternalOrderTab
 from ui.master_tab import MasterTab
 from ui.crp_tab import CRPTab
 from ui.actuals_tab import ActualsTab
@@ -309,6 +309,7 @@ class DetachedWindow(QMainWindow):
 
         self.gantt_tab       = GanttTab(self)
         self.so_tab          = SOTab(self)
+        self.io_tab          = InternalOrderTab(self)
         self.master_tab      = MasterTab(self)
         self.crp_tab         = CRPTab(self)
         self.actuals_tab     = ActualsTab(self)
@@ -324,6 +325,7 @@ class DetachedWindow(QMainWindow):
         _tab_defs = [
             (self.gantt_tab,     "📅  Gantt Planner"),
             (self.so_tab,        "📋  Sales Orders"),
+            (self.io_tab,        "🏭  Internal Orders"),
             (self.master_tab,    "🗂  Masters"),
             (self.crp_tab,       "👥  CRP"),
             (self.actuals_tab,   "✅  Actuals"),
@@ -498,6 +500,7 @@ class MainWindow(QMainWindow):
         # ── Tab widgets ───────────────────────────────────────────────────────
         self.gantt_tab       = GanttTab(self)
         self.so_tab          = SOTab(self)
+        self.io_tab          = InternalOrderTab(self)
         self.master_tab      = MasterTab(self)
         self.crp_tab         = CRPTab(self)
         self.actuals_tab     = ActualsTab(self)
@@ -517,17 +520,18 @@ class MainWindow(QMainWindow):
         self._tab_defs = [
             (self.gantt_tab,     "📅  Gantt Planner",    0),
             (self.so_tab,        "📋  Sales Orders",     1),
-            (self.master_tab,    "🗂  Masters",           2),
-            (self.crp_tab,       "👥  CRP",               3),
-            (self.actuals_tab,   "✅  Actuals",           4),
-            (self.alerts_tab,    "⚠️  Alerts",            5),
-            (self.dashboard_tab, "📊  Dashboard",         6),
-            (self.inventory_tab, "📦  Inventory",         7),
-            (self.release_tab,   "🚀  Release Report",    8),
-            (self.dispatch_tab,  "📋  Dispatch List",     9),
-            (self.impact_tab,    "📈  Impact Report",    10),
-            (self.scenario_tab,  "🎯  Scenario Planner", 11),
-            (self.help_tab,      "❓  Help",              12),
+            (self.io_tab,        "🏭  Internal Orders",  2),
+            (self.master_tab,    "🗂  Masters",           3),
+            (self.crp_tab,       "👥  CRP",               4),
+            (self.actuals_tab,   "✅  Actuals",           5),
+            (self.alerts_tab,    "⚠️  Alerts",            6),
+            (self.dashboard_tab, "📊  Dashboard",         7),
+            (self.inventory_tab, "📦  Inventory",         8),
+            (self.release_tab,   "🚀  Release Report",    9),
+            (self.dispatch_tab,  "📋  Dispatch List",    10),
+            (self.impact_tab,    "📈  Impact Report",    11),
+            (self.scenario_tab,  "🎯  Scenario Planner", 12),
+            (self.help_tab,      "❓  Help",              13),
         ]
         for widget, title, _ in self._tab_defs:
             self.tabs.addTab(widget, title)
@@ -537,20 +541,21 @@ class MainWindow(QMainWindow):
         self._sidebar.add_group("Plan")
         self._sidebar.add_item(_IC_GANTT,     "Gantt Planner",    0)
         self._sidebar.add_item(_IC_SO,        "Sales Orders",     1)
-        self._sidebar.add_item(_IC_RELEASE,   "Release Report",   8)
-        self._sidebar.add_item(_IC_ALERTS,    "Dispatch List",    9)
+        self._sidebar.add_item(_IC_SO,        "Internal Orders",  2)
+        self._sidebar.add_item(_IC_RELEASE,   "Release Report",   9)
+        self._sidebar.add_item(_IC_ALERTS,    "Dispatch List",   10)
         self._sidebar.add_group("Capacity")
-        self._sidebar.add_item(_IC_CRP,       "CRP",              3)
-        self._sidebar.add_item(_IC_INVENTORY, "Inventory",        7)
-        self._sidebar.add_item(_IC_DASHBOARD, "Scenario Planner", 11)
+        self._sidebar.add_item(_IC_CRP,       "CRP",              4)
+        self._sidebar.add_item(_IC_INVENTORY, "Inventory",        8)
+        self._sidebar.add_item(_IC_DASHBOARD, "Scenario Planner", 12)
         self._sidebar.add_group("Track")
-        self._sidebar.add_item(_IC_ACTUALS,   "Actuals",          4)
-        self._sidebar.add_item(_IC_ALERTS,    "Alerts",           5)
-        self._sidebar.add_item(_IC_DASHBOARD, "Dashboard",        6)
-        self._sidebar.add_item(_IC_RELEASE,   "Impact Report",   10)
+        self._sidebar.add_item(_IC_ACTUALS,   "Actuals",          5)
+        self._sidebar.add_item(_IC_ALERTS,    "Alerts",           6)
+        self._sidebar.add_item(_IC_DASHBOARD, "Dashboard",        7)
+        self._sidebar.add_item(_IC_RELEASE,   "Impact Report",   11)
         self._sidebar.add_group("Setup")
-        self._sidebar.add_item(_IC_MASTERS,   "Masters",          2)
-        self._sidebar.add_item(_IC_HELP,      "Help",            12)
+        self._sidebar.add_item(_IC_MASTERS,   "Masters",          3)
+        self._sidebar.add_item(_IC_HELP,      "Help",            13)
 
         self._sidebar.set_current(0)
         self._sidebar.tabRequested.connect(self._on_sidebar_nav)

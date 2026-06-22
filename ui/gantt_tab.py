@@ -111,6 +111,7 @@ UTIL_MED        = QColor(225, 140, 0)
 UTIL_LOW        = QColor(55,  165, 85)
 MAT_ACCENT      = QColor(108, 68,  168)   # material plan accent
 LATE_ACCENT     = QColor(192, 40,  40)    # late plan accent
+IO_ACCENT       = QColor(80,  40,  160)   # internal order plan accent
 
 ROW_BG_A        = QColor(255, 255, 255)
 ROW_BG_B        = QColor(249, 250, 252)
@@ -1243,8 +1244,10 @@ class GanttCanvas(QWidget):
             is_late = (so and
                        datetime.strptime(so["due_date"], "%Y-%m-%d").date() < date.today()
                        and plan.get("qty_produced", 0) < plan["qty_planned"])
-            accent = (MAT_ACCENT if is_mat
+            is_io   = (plan.get("so_number") or "").startswith("IO-")
+            accent = (MAT_ACCENT  if is_mat
                       else LATE_ACCENT if is_late
+                      else IO_ACCENT   if is_io
                       else _color_for_key(plan["sku_code"]))
 
             # ── Late glow (soft red halo drawn behind card) ───────────────────
@@ -1304,6 +1307,17 @@ class GanttCanvas(QWidget):
                 p.setPen(Qt.PenStyle.NoPen)
                 p.drawEllipse(cb.right() + 3,
                               pill_y + (PILL_H - 7) // 2, 7, 7)
+
+            # IO badge (indigo pill, shown for Internal Order plans)
+            if is_io:
+                _io_bw, _io_bh = 16, PILL_H - 4
+                _io_br = QRect(cb.right() + 4, pill_y + 2, _io_bw, _io_bh)
+                p.setBrush(QBrush(IO_ACCENT))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.drawRoundedRect(_io_br, 2, 2)
+                p.setPen(QPen(Qt.GlobalColor.white))
+                p.setFont(QFont("Segoe UI", 5, QFont.Weight.Bold))
+                p.drawText(_io_br, Qt.AlignmentFlag.AlignCenter, "IO")
 
             # Lock icon (pill-row right side)
             lock_right = rect.right() - 3

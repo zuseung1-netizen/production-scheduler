@@ -86,6 +86,7 @@ def preview_so_upload(path: str) -> Tuple[bool, str, Dict]:
     existing_map = {
         (s["so_number"], s["sku_code"], s["line_item"]): s
         for s in SORepo.all()
+        if s.get("order_type", "CUSTOMER") == "CUSTOMER"
     }
 
     COMPARE = ("qty", "due_date", "committed_due_date", "priority", "status",
@@ -179,7 +180,8 @@ def upload_so(path: str) -> Tuple[bool, str, Dict]:
     SORepo.save_snapshot(batch_id)
 
     existing_keys = {(so["so_number"], so["sku_code"], so["line_item"])
-                     for so in SORepo.all()}
+                     for so in SORepo.all()
+                     if so.get("order_type", "CUSTOMER") == "CUSTOMER"}
     uploaded_keys = set()
     upload_status_map: dict = {}  # key -> status in uploaded Excel
     summary = {"new": 0, "modified": 0, "unchanged": 0, "closed": 0, "errors": []}

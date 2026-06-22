@@ -413,18 +413,37 @@ class CalendarRepo:
 
 class SORepo:
     @staticmethod
-    def all(status: str = None) -> List[Dict]:
+    def all(status: str = None, order_type: str = None) -> List[Dict]:
         with get_connection() as conn:
+            conditions, params = [], []
             if status:
-                rows = conn.execute(
-                    "SELECT * FROM sales_order WHERE status=? "
-                    "ORDER BY priority,received_at",
-                    (status,)).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM sales_order ORDER BY status,priority,received_at"
-                ).fetchall()
+                conditions.append("status=?")
+                params.append(status)
+            if order_type:
+                conditions.append("order_type=?")
+                params.append(order_type)
+            where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+            rows = conn.execute(
+                f"SELECT * FROM sales_order {where} ORDER BY status,priority,received_at",
+                params).fetchall()
         return _rows_to_dicts(rows)
+
+    @staticmethod
+    def next_io_number() -> str:
+        today = datetime.now().strftime("%Y%m%d")
+        prefix = f"IO-{today}-"
+        with get_connection() as conn:
+            row = conn.execute(
+                "SELECT so_number FROM sales_order WHERE so_number LIKE ? "
+                "ORDER BY so_number DESC LIMIT 1",
+                (f"{prefix}%",)).fetchone()
+        if not row:
+            return f"{prefix}001"
+        try:
+            n = int(row["so_number"].rsplit("-", 1)[-1]) + 1
+        except (ValueError, IndexError):
+            n = 1
+        return f"{prefix}{n:03d}"
 
     @staticmethod
     def get(so_number: str, sku_code: str, line_item: str) -> Optional[Dict]:
@@ -445,26 +464,38 @@ class SORepo:
             data.setdefault("status", "OPEN")
             data.setdefault("customer_name", None)
             data.setdefault("committed_due_date", None)
+            data.setdefault("start_no_earlier", None)
+            data.setdefault("note", None)
             data.setdefault("split_from", None)
+            data.setdefault("order_type", "CUSTOMER")
+            data.setdefault("department", None)
+            data.setdefault("purpose", None)
+            data.setdefault("requester", None)
             with get_connection() as conn:
                 conn.execute("""
                     INSERT INTO sales_order
                         (so_number,sku_code,line_item,customer_name,qty,due_date,
-                         committed_due_date,priority,received_at,status,start_no_earlier,note,split_from)
+                         committed_due_date,priority,received_at,status,start_no_earlier,note,
+                         split_from,order_type,department,purpose,requester)
                     VALUES
                         (:so_number,:sku_code,:line_item,:customer_name,:qty,:due_date,
-                         :committed_due_date,:priority,:received_at,:status,:start_no_earlier,:note,:split_from)
+                         :committed_due_date,:priority,:received_at,:status,:start_no_earlier,:note,
+                         :split_from,:order_type,:department,:purpose,:requester)
                 """, data)
             if batch_id:
                 _log_so_history(batch_id, data, "NEW", None, data)
             return "NEW"
 
-        changed = {k for k in ("qty","due_date","committed_due_date","priority","status","note")
+        changed = {k for k in ("qty","due_date","committed_due_date","priority","status","note",
+                               "department","purpose","requester")
                    if str(existing.get(k,"") or "") != str(data.get(k,"") or "")}
         if not changed:
             return "UNCHANGED"
 
         data.setdefault("committed_due_date", None)
+        data.setdefault("department", None)
+        data.setdefault("purpose", None)
+        data.setdefault("requester", None)
         with get_connection() as conn:
             conn.execute("""
                 UPDATE sales_order SET
@@ -472,7 +503,8 @@ class SORepo:
                     qty=:qty, due_date=:due_date,
                     committed_due_date=:committed_due_date,
                     priority=:priority,
-                    status=:status, start_no_earlier=:start_no_earlier, note=:note
+                    status=:status, start_no_earlier=:start_no_earlier, note=:note,
+                    department=:department, purpose=:purpose, requester=:requester
                 WHERE so_number=:so_number AND sku_code=:sku_code
                   AND line_item=:line_item
             """, data)
@@ -578,14 +610,20 @@ class SORepo:
                 conn.execute("""
                     INSERT INTO sales_order
                         (so_number,sku_code,line_item,qty,due_date,committed_due_date,
-                         priority,received_at,status,start_no_earlier,note,customer_name)
+                         priority,received_at,status,start_no_earlier,note,customer_name,
+                         split_from,order_type,department,purpose,requester)
                     VALUES
                         (:so_number,:sku_code,:line_item,:qty,:due_date,:committed_due_date,
-                         :priority,:received_at,:status,:start_no_earlier,:note,
-                         :customer_name)
+                         :priority,:received_at,:status,:start_no_earlier,:note,:customer_name,
+                         :split_from,:order_type,:department,:purpose,:requester)
                 """, {**so,
-                      "customer_name": so.get("customer_name", ""),
-                      "committed_due_date": so.get("committed_due_date")})
+                      "customer_name": so.get("customer_name") or "",
+                      "committed_due_date": so.get("committed_due_date"),
+                      "split_from": so.get("split_from"),
+                      "order_type": so.get("order_type", "CUSTOMER"),
+                      "department": so.get("department"),
+                      "purpose": so.get("purpose"),
+                      "requester": so.get("requester")})
 
     @staticmethod
     def unplanned() -> List[Dict]:
