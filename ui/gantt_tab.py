@@ -746,8 +746,6 @@ class GanttCanvas(QWidget):
         self._plan_layout : Dict[int, Tuple[int, int]] = {}
         # O(1) row lookup built in _build_rows()
         self._row_index   : Dict[str, int] = {}
-        # SO -> sorted row indices, precomputed in load_data()
-        self._so_rows_cache: Dict[Tuple, List[int]] = {}
         # Calendar unavailability maps
         self._closed_map  : Dict[Tuple[int, int], str] = {}          # (ri,col)->status for hatching
         self._slot_closed : Dict[Tuple[str, str, int], str] = {}     # (room,date,shift)->status for badge
@@ -774,16 +772,6 @@ class GanttCanvas(QWidget):
         self._room_proc_set    = {(r["room_code"], r["process_name"]) for r in RoomRepo.all()}
         self._company_holidays = CompanyHolidayRepo.date_set()
         self._build_rows()
-        # Precompute SO -> row indices for O(1) lookup in _draw_due_lines
-        so_rows_tmp: Dict[Tuple, set] = {}
-        for plan in self._plans:
-            if plan.get("entity_type") == "MATERIAL":
-                continue
-            k = (plan["so_number"], plan["sku_code"], plan["line_item"])
-            ri = self._row_index.get(self._plan_row_key(plan))
-            if ri is not None:
-                so_rows_tmp.setdefault(k, set()).add(ri)
-        self._so_rows_cache = {k: sorted(v) for k, v in so_rows_tmp.items()}
         self._build_cap_map()
         self._build_layout_and_heights()
         self._build_hc_map()
@@ -1009,7 +997,6 @@ class GanttCanvas(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         self._draw_grid(p)
-        self._draw_due_lines(p)
         self._draw_today_line(p)
         self._draw_plans(p)
         if self._drag_rect:
@@ -1194,38 +1181,6 @@ class GanttCanvas(QWidget):
             except Exception:
                 return ""
         return ""
-
-    def _draw_due_lines(self, p: QPainter):
-        """
-        Draw due-date lines only across the rows where the SO has plans.
-        Lines start at body_top (below util bars) and span only relevant rows.
-        """
-        pen = QPen(DUE_LINE, 1, Qt.PenStyle.DashLine)
-        f7  = QFont("Arial", 7)
-        p.setFont(f7)
-
-        for (so_no, sku, li), so in self._sos.items():
-            col = self._date_to_col(so["due_date"])
-            if col is None:
-                continue
-            rows = self._so_rows_cache.get((so_no, sku, li))
-            if not rows:
-                continue
-
-            x = col * self._col_w() + self._col_w() // 2
-
-            for ri in rows:
-                y_top = self._row_y_list[ri]
-                y_bot = y_top + self._row_heights[ri]
-                p.setPen(pen)
-                p.drawLine(x, y_top, x, y_bot)
-
-            # Label at top of first row
-            top_row = rows[0]
-            y_label = self._row_y_list[top_row] + 3
-            p.setPen(QPen(DUE_LINE))
-            label = so.get("customer_name") or so_no
-            p.drawText(x + 2, y_label + 8, label[:12])
 
     def _draw_today_line(self, p: QPainter):
         col = self._date_to_col(date.today().strftime("%Y-%m-%d"))
