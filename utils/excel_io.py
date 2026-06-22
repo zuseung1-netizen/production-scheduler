@@ -530,7 +530,113 @@ def export_gantt_plan(plans: List[Dict], sos_dict: Dict,
         # Auto-filter
         ws.auto_filter.ref = f"A1:{ws.cell(1, len(COLS)).coordinate}"
 
-        # ── Sheet 2: Material Demand (demand group members) ───────────────────
+        # ── Sheet 2: PlanNormalized — one row per (plan × SO) ────────────────
+        ws_norm = wb.create_sheet("PlanNormalized")
+        NORM_COLS = [
+            ("PlanID",       10), ("Type",        9),  ("Code",       14),
+            ("SONumber",     14), ("LineItem",    10),  ("CustomerName", 18),
+            ("QtyRequired",  12), ("ProcessSeq",  12),  ("ProcessName", 16),
+            ("RoomCode",     12), ("PlanDate",    13),  ("Shift",        7),
+            ("QtyPlanned",   12), ("IsLocked",    10),  ("IsFinalStep", 12),
+            ("DueDate",      13), ("DaysUntilDue",14),  ("ConsolGroup", 14),
+            ("Memo",         30),
+        ]
+        norm_headers = [c[0] for c in NORM_COLS]
+        for ci, (h, w) in enumerate(zip(norm_headers, [c[1] for c in NORM_COLS]), 1):
+            cell = ws_norm.cell(row=1, column=ci, value=h)
+            cell.fill = hdr_fill
+            cell.font = hdr_font
+            cell.alignment = Alignment(horizontal="center")
+            ws_norm.column_dimensions[cell.column_letter].width = w
+        ws_norm.freeze_panes = "A2"
+        ws_norm.auto_filter.ref = f"A1:{ws_norm.cell(1, len(NORM_COLS)).coordinate}"
+
+        for plan in sorted(plans,
+                           key=lambda p: (p["plan_date"], p.get("entity_code") or p["sku_code"],
+                                          p.get("process_seq", 1))):
+            is_mat = plan.get("entity_type") == "MATERIAL"
+            base = [
+                plan["plan_id"],
+                plan.get("entity_type", "SKU"),
+                plan.get("entity_code") or plan["sku_code"],
+                None, None, None, None,          # SO cols filled per-member
+                plan.get("process_seq", 1),
+                plan["process_name"],
+                plan["room_code"],
+                plan["plan_date"],
+                plan["shift_no"],
+                plan["qty_planned"],
+                "Y" if plan["is_locked"] else "",
+                "Y" if plan.get("is_final_seq") else "",
+                None, None,                      # DueDate, DaysUntilDue per-member
+                plan.get("consolidation_group", "") or "",
+                plan.get("memo", "") or "",
+            ]
+            # Indices of per-SO slots in base list (0-based)
+            I_SO, I_LI, I_CUST, I_QTY, I_DUE, I_DAYS = 3, 4, 5, 6, 15, 16
+
+            if is_mat:
+                gid     = plan.get("material_group_id", "")
+                members = mat_groups.get(gid, [])
+                if not members:
+                    ws_norm.append(base)
+                else:
+                    for m in members:
+                        row_n = list(base)
+                        so_key_m = (m["so_number"], m["sku_code"], m["line_item"])
+                        so_m     = sos_dict.get(so_key_m, {})
+                        row_n[I_SO]   = m["so_number"]
+                        row_n[I_LI]   = m["line_item"]
+                        row_n[I_CUST] = so_m.get("customer_name", "") or ""
+                        row_n[I_QTY]  = m.get("qty_required", "")
+                        due_m = so_m.get("due_date", "")
+                        row_n[I_DUE]  = due_m
+                        if due_m:
+                            try:
+                                row_n[I_DAYS] = (datetime.strptime(due_m, "%Y-%m-%d").date() - today).days
+                            except ValueError:
+                                pass
+                        ws_norm.append(row_n)
+                        ri_n = ws_norm.max_row
+                        if row_n[I_DAYS] is not None and isinstance(row_n[I_DAYS], int):
+                            c = ws_norm.cell(ri_n, norm_headers.index("DaysUntilDue") + 1)
+                            if row_n[I_DAYS] < 0:
+                                c.font = Font(color="CC0000", bold=True)
+                            elif row_n[I_DAYS] <= 3:
+                                c.font = Font(color="996600")
+                        ws_norm.cell(ri_n, 1).fill = fill_material
+            else:
+                so_key = (plan["so_number"], plan["sku_code"], plan["line_item"])
+                so     = sos_dict.get(so_key, {})
+                row_n  = list(base)
+                row_n[I_SO]   = plan["so_number"]
+                row_n[I_LI]   = plan["line_item"]
+                row_n[I_CUST] = so.get("customer_name", "") or ""
+                row_n[I_QTY]  = plan["qty_planned"]
+                due_s = so.get("due_date", "")
+                row_n[I_DUE]  = due_s
+                if due_s:
+                    try:
+                        days_n = (datetime.strptime(due_s, "%Y-%m-%d").date() - today).days
+                        row_n[I_DAYS] = days_n
+                    except ValueError:
+                        days_n = None
+                else:
+                    days_n = None
+                ws_norm.append(row_n)
+                ri_n = ws_norm.max_row
+                if days_n is not None:
+                    c = ws_norm.cell(ri_n, norm_headers.index("DaysUntilDue") + 1)
+                    if days_n < 0:
+                        c.font = Font(color="CC0000", bold=True)
+                    elif days_n <= 3:
+                        c.font = Font(color="996600")
+                if plan["is_locked"]:
+                    ws_norm.cell(ri_n, 1).fill = fill_locked
+                elif plan.get("is_final_seq"):
+                    ws_norm.cell(ri_n, 1).fill = fill_final
+
+        # ── Sheet 3: Material Demand (demand group members) ───────────────────
         if mat_groups:
             ws2 = wb.create_sheet("MaterialDemand")
             hdr2 = ["GroupID", "MaterialCode", "SONumber", "SKUCode",
@@ -557,7 +663,8 @@ def export_gantt_plan(plans: List[Dict], sos_dict: Dict,
 
         wb.save(path)
         n = len(plans)
-        return True, f"Exported {n} plan rows → {os.path.basename(path)}"
+        return True, (f"Exported {n} plan rows → {os.path.basename(path)}\n"
+                      f"Sheets: PlanDetail (summary) · PlanNormalized (one row per SO)")
     except Exception as e:
         return False, str(e)
 
