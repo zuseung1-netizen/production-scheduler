@@ -201,7 +201,8 @@ class Scheduler:
                     so.get("received_at", ""))
 
         all_sos = sorted(merged + individual_sos, key=_key)
-        return all_sos
+        # Opt-B: cluster same-SKU SOs consecutively within each priority tier
+        return self._group_same_sku_within_priority(all_sos)
 
     def pull_forward(self, date_from: str, date_to: str) -> Dict:
         self._reload_masters()
@@ -311,7 +312,8 @@ class Scheduler:
                     upper_d, upper_s = d1, shift_max
 
             candidates = self._candidates(
-                sim_slot_map, step["process_name"], eligible, d0, upper_d, upper_s)
+                sim_slot_map, step["process_name"], eligible, d0, upper_d, upper_s,
+                sku_code)
 
             step_allocated: List[Tuple] = []
             step_rem = qty_to_plan
@@ -624,6 +626,53 @@ class Scheduler:
 
     # ── SKU Planning ─────────────────────────────────────────────────────────
 
+    def _group_same_sku_within_priority(self, sos: List[Dict]) -> List[Dict]:
+        """(Opt-B) Within each priority tier, cluster same-SKU SOs consecutively.
+        SKU order within a tier is determined by first-occurrence position."""
+        if not sos:
+            return sos
+        result: List[Dict] = []
+        i = 0
+        while i < len(sos):
+            pri = sos[i].get("priority")
+            tier: List[Dict] = []
+            while i < len(sos) and sos[i].get("priority") == pri:
+                tier.append(sos[i])
+                i += 1
+            # Record first-seen position for each SKU in this tier
+            sku_first: Dict[str, int] = {}
+            for so in tier:
+                sk = so["sku_code"]
+                if sk not in sku_first:
+                    sku_first[sk] = len(sku_first)
+            tier.sort(key=lambda s: (sku_first[s["sku_code"]], s.get("due_date", "")))
+            result.extend(tier)
+        return result
+
+    def _is_same_sku_adjacent(self, room: str, process_name: str,
+                               ds: str, sno: int, sku_code: str) -> bool:
+        """(Opt-A) Return True if the slot immediately before or after (ds, sno)
+        already has sku_code placed in the same room/process."""
+        sns = sorted(s["shift_no"] for s in self.shifts)
+        if not sns or sno not in sns:
+            return False
+        idx = sns.index(sno)
+        # Next slot (chronologically later — already filled when backward-scanning)
+        if idx + 1 < len(sns):
+            nds, nsno = ds, sns[idx + 1]
+        else:
+            nds = _ds(_date(ds) + timedelta(days=1))
+            nsno = sns[0]
+        if self._placed_sku.get((room, process_name, nds, nsno)) == sku_code:
+            return True
+        # Prev slot (chronologically earlier)
+        if idx > 0:
+            pds, psno = ds, sns[idx - 1]
+        else:
+            pds = _ds(_date(ds) - timedelta(days=1))
+            psno = sns[-1]
+        return self._placed_sku.get((room, process_name, pds, psno)) == sku_code
+
     def _sorted_open_sos(self) -> List[Dict]:
         sos = SORepo.all(status="OPEN")
         def key(so):
@@ -829,7 +878,8 @@ class Scheduler:
                     upper_d, upper_s = d1, shift_max
 
             candidates = self._candidates(
-                slot_map, step["process_name"], eligible, d0, upper_d, upper_s)
+                slot_map, step["process_name"], eligible, d0, upper_d, upper_s,
+                sku_code)
 
             # Final step has no slots in constrained window → fall back to full
             # date range so production is always scheduled, even if it will be late.
@@ -843,7 +893,8 @@ class Scheduler:
                 d1 = _date(date_to)
                 upper_d, upper_s = d1, shift_max
                 candidates = self._candidates(
-                    slot_map, step["process_name"], eligible, d0, upper_d, upper_s)
+                    slot_map, step["process_name"], eligible, d0, upper_d, upper_s,
+                    sku_code)
 
             allocated: List[Tuple] = []
             step_rem = qty_to_plan
@@ -1045,7 +1096,7 @@ class Scheduler:
             d0_eff = max(earliest, _date(date_from))
             candidates = self._candidates(
                 slot_map, step["process_name"], eligible,
-                d0_eff, upper_d, upper_s)
+                d0_eff, upper_d, upper_s, mat_code)
 
             allocated: List[Tuple] = []
             step_rem = total_qty
@@ -1092,7 +1143,7 @@ class Scheduler:
     # ── Shared slot utilities ────────────────────────────────────────────────
 
     def _candidates(self, slot_map, process_name, eligible_rooms,
-                    d0, d_upper, shift_upper):
+                    d0, d_upper, shift_upper, sku_code: str = ""):
         eligible_codes = {r["room_code"] for r in eligible_rooms}
         rp_lookup      = {r["room_code"]: r for r in eligible_rooms}
         raw = []
@@ -1115,13 +1166,18 @@ class Scheduler:
                 ds, sno, room, rp = item
                 hc = self._hc_dist_cache.get((ds, sno), {}).get(
                     (room, process_name), 0)
-                return (-_date(ds).toordinal(), -sno, -calc_uph(rp, hc))
+                # Opt-A: prefer slots adjacent to already-placed same-SKU blocks
+                adj = (1 if sku_code and self._is_same_sku_adjacent(
+                           room, process_name, ds, sno, sku_code) else 0)
+                return (-_date(ds).toordinal(), -sno, -adj, -calc_uph(rp, hc))
             raw.sort(key=uph_key)
         else:
             def cap_key(item):
                 ds, sno, room, rp = item
                 c = slot_map.get((ds, room, process_name, sno), 0.0)
-                return (-_date(ds).toordinal(), -sno, -c)
+                adj = (1 if sku_code and self._is_same_sku_adjacent(
+                           room, process_name, ds, sno, sku_code) else 0)
+                return (-_date(ds).toordinal(), -sno, -adj, -c)
             raw.sort(key=cap_key)
         return raw
 
