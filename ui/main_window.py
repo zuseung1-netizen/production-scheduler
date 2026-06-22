@@ -61,13 +61,13 @@ def _svg_pixmap(svg_body: str, color: str, size: int = 16) -> QPixmap:
 
 
 def _rail_icon(svg_body: str, size: int = 16) -> QIcon:
-    """Rail nav icon: inactive (#aab4d6) when unchecked, white when checked."""
+    """Rail nav icon: inactive (#c8d5ee) when unchecked, white when checked."""
     icon = QIcon()
-    icon.addPixmap(_svg_pixmap(svg_body, "#aab4d6", size),
+    icon.addPixmap(_svg_pixmap(svg_body, "#c8d5ee", size),
                    QIcon.Mode.Normal, QIcon.State.Off)
     icon.addPixmap(_svg_pixmap(svg_body, "#ffffff", size),
                    QIcon.Mode.Normal, QIcon.State.On)
-    icon.addPixmap(_svg_pixmap(svg_body, "#d0d8f0", size),
+    icon.addPixmap(_svg_pixmap(svg_body, "#e8edf8", size),
                    QIcon.Mode.Active, QIcon.State.Off)
     return icon
 
@@ -126,18 +126,18 @@ _IC_MASTERS  = ('<line x1="4" y1="21" x2="4" y2="14"/>'
 _RAIL_CSS = """
 QWidget#rail { background: #16213d; }
 QPushButton#rail-item {
-    background: transparent; color: #aab4d6;
+    background: transparent; color: #c8d5ee;
     border: none; border-left: 3px solid transparent;
     text-align: left; padding: 8px 14px 8px 12px;
     font-size: 12px; font-family: "Segoe UI";
 }
-QPushButton#rail-item:hover { background: rgba(255,255,255,15); color: #d0d8f0; }
+QPushButton#rail-item:hover { background: rgba(255,255,255,18); color: #e8edf8; }
 QPushButton#rail-item:checked {
     background: #22305a; color: #ffffff;
     border-left-color: #4f8df0; font-weight: 600;
 }
 QLabel#rail-group {
-    color: #6b7aa3; font-size: 10px; font-weight: bold;
+    color: #8b9dc8; font-size: 10px; font-weight: bold;
     background: transparent; padding: 10px 18px 3px 18px;
     font-family: "Segoe UI"; letter-spacing: 0.08em;
 }
