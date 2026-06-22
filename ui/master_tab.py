@@ -223,17 +223,19 @@ class ItemMasterWidget(QWidget):
                 MaterialRepo.upsert(dlg.result); self._load()
 
     def _delete(self):
-        row = self.table.currentRow()
-        if row < 0:
+        rows = sorted({i.row() for i in self.table.selectedItems()}, reverse=True)
+        if not rows:
             return
-        item_type = self.table.item(row, 0).text()
-        code      = self.table.item(row, 1).text()
+        items = [(self.table.item(r, 0).text(), self.table.item(r, 1).text()) for r in rows]
+        n = len(rows)
+        label = items[0][1] if n == 1 else f"{n} items"
         if QMessageBox.question(
-            self, "Delete", f"Delete {item_type} '{code}'?"
+            self, "Delete", f"Delete {label}?"
         ) != QMessageBox.StandardButton.Yes:
             return
         from data.repositories import SKURepo, MaterialRepo
-        (SKURepo.delete if item_type == "SKU" else MaterialRepo.delete)(code)
+        for item_type, code in items:
+            (SKURepo.delete if item_type == "SKU" else MaterialRepo.delete)(code)
         self._load()
 
     def _save_changes(self):
@@ -443,12 +445,16 @@ class RoomMasterWidget(QWidget):
         if dlg.exec(): RoomRepo.upsert(dlg.result); self._load()
 
     def _delete(self):
-        row = self.table.currentRow()
-        if row < 0: return
-        rc = self.table.item(row, 0).text()
-        pn = self.table.item(row, 1).text()
-        if QMessageBox.question(self, "Delete", f"Delete {rc}/{pn}?") == QMessageBox.StandardButton.Yes:
-            RoomRepo.delete(rc, pn); self._load()
+        rows = sorted({i.row() for i in self.table.selectedItems()}, reverse=True)
+        if not rows: return
+        items = [(self.table.item(r, 0).text(), self.table.item(r, 1).text()) for r in rows]
+        n = len(rows)
+        label = f"{items[0][0]}/{items[0][1]}" if n == 1 else f"{n} rows"
+        if QMessageBox.question(self, "Delete", f"Delete {label}?") != QMessageBox.StandardButton.Yes:
+            return
+        for rc, pn in items:
+            RoomRepo.delete(rc, pn)
+        self._load()
 
     def _upload(self):
         path, _ = QFileDialog.getOpenFileName(self, "Upload Room Excel", "", "Excel (*.xlsx)")
@@ -1124,6 +1130,7 @@ def _make_table(cols: list, editable: bool = False) -> QTableWidget:
     t.setColumnCount(len(cols))
     t.setHorizontalHeaderLabels(cols)
     t.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+    t.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
     if editable:
         t.setEditTriggers(
             QAbstractItemView.EditTrigger.DoubleClicked |
@@ -1289,16 +1296,19 @@ class SKUProcessWidget(QWidget):
             self._load()
 
     def _delete(self):
-        row = self.table.currentRow()
-        if row < 0:
+        rows = sorted({i.row() for i in self.table.selectedItems()}, reverse=True)
+        if not rows:
             return
-        sku = self.table.item(row, 0).text()
-        seq = int(self.table.item(row, 1).text())
+        items = [(self.table.item(r, 0).text(), int(self.table.item(r, 1).text())) for r in rows]
+        n = len(rows)
+        label = f"seq {items[0][1]} for {items[0][0]}" if n == 1 else f"{n} steps"
         if QMessageBox.question(
-            self, "Delete", f"Delete step seq {seq} for SKU {sku}?"
-        ) == QMessageBox.StandardButton.Yes:
+            self, "Delete", f"Delete {label}?"
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        for sku, seq in items:
             SKUProcessRepo.delete(sku, seq)
-            self._load()
+        self._load()
 
     def _validate(self):
         sku_filter = self.sku_filter.currentText()
@@ -1591,16 +1601,24 @@ class ProcessRoutingWidget(QWidget):
             ProcessRoutingRepo.upsert(dlg.result); self._load()
 
     def _delete(self):
-        row = self.table.currentRow()
-        if row < 0: return
+        rows = sorted({i.row() for i in self.table.selectedItems()}, reverse=True)
+        if not rows: return
         from data.repositories import ProcessRoutingRepo
-        et   = self.table.item(row, 0).text()
-        code = self.table.item(row, 1).text()
-        seq  = int(self.table.item(row, 2).text())
+        items = [
+            (self.table.item(r, 0).text(),
+             self.table.item(r, 1).text(),
+             int(self.table.item(r, 2).text()))
+            for r in rows
+        ]
+        n = len(rows)
+        label = f"{items[0][0]} {items[0][1]} seq {items[0][2]}" if n == 1 else f"{n} steps"
         if QMessageBox.question(
-            self, "Delete", f"Delete {et} {code} seq {seq}?"
-        ) == QMessageBox.StandardButton.Yes:
-            ProcessRoutingRepo.delete(et, code, seq); self._load()
+            self, "Delete", f"Delete {label}?"
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        for et, code, seq in items:
+            ProcessRoutingRepo.delete(et, code, seq)
+        self._load()
 
     def _toggle_edit_mode(self):
         self._edit_mode = not self._edit_mode
