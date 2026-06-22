@@ -393,10 +393,10 @@ class GanttHeaderWidget(QWidget):
                            Qt.AlignmentFlag.AlignCenter,
                            d.strftime("%a").upper())
 
-                # Cap bar — Row 1 (7px height, centered in top UTIL_ROW_H)
+                # Cap bar — Row 1 (8px height, centered in top UTIL_ROW_H)
                 used, cap = col_cap.get(col, (0.0, 0.0))
                 ratio = (used / cap) if cap > 0 else 0
-                bar_h  = 7
+                bar_h  = 8
                 bar_y  = HEADER_H + (UTIL_ROW_H - bar_h) // 2
                 cw_    = DAY_W - 4
                 fill_w = int(cw_ * min(ratio, 1.0))
@@ -422,7 +422,7 @@ class GanttHeaderWidget(QWidget):
                     p.drawText(QRect(tag_x, tag_y_pos, tag_w, tag_h),
                                Qt.AlignmentFlag.AlignCenter, tag_txt)
 
-                # HC% bar — Row 2 (7px height, centered in bottom UTIL_ROW_H)
+                # HC bar — Row 2 (8px height, centered in bottom UTIL_ROW_H)
                 ds_str = (self.start_date + timedelta(days=col)).strftime("%Y-%m-%d")
                 hc_pct = self._hc_util_data.get(ds_str, 0.0)
                 hc_ratio = hc_pct / 100.0
@@ -435,8 +435,8 @@ class GanttHeaderWidget(QWidget):
                 p.setPen(Qt.PenStyle.NoPen)
                 p.drawRoundedRect(QRect(x + 2, hc_bar_y, max(hc_fill_w, 0), bar_h), 2, 2)
 
-                # Row separator between Cap% and HC% rows
-                p.setPen(QPen(QColor(255, 255, 255, 20)))
+                # Row separator between CAPACITY and LABOR rows
+                p.setPen(QPen(QColor(255, 255, 255, 35)))
                 p.drawLine(x, HEADER_H + UTIL_ROW_H, x + DAY_W, HEADER_H + UTIL_ROW_H)
 
                 # Cap divider
@@ -467,17 +467,37 @@ class GanttHeaderWidget(QWidget):
         # ── Fixed Y-label corner ──────────────────────────────────────────────
         p.fillRect(0, 0, yw, HEADER_H, QColor(38, 68, 128))
         p.fillRect(0, HEADER_H, yw, UTIL_H, QColor(30, 58, 110))
-        # "Cap%" label in Row 1 center, "HC%" label in Row 2 center
-        p.setPen(QPen(QColor(174, 191, 230)))
-        p.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
-        cap_lbl_y = HEADER_H + (UTIL_ROW_H - 10) // 2
-        p.drawText(QRect(2, cap_lbl_y, yw - 4, 12),
+
+        # Accent strips: 3px wide left-edge strip per row for visual identity
+        _ACCENT_W = 3
+        cap_row_y  = HEADER_H + 2
+        labor_row_y = HEADER_H + UTIL_ROW_H + 2
+        strip_h    = UTIL_ROW_H - 4
+        p.setPen(Qt.PenStyle.NoPen)
+        # CAPACITY row — green accent
+        p.setBrush(QBrush(UTIL_LOW))
+        p.drawRoundedRect(QRect(0, cap_row_y, _ACCENT_W, strip_h), 1, 1)
+        # LABOR row — sky-blue accent
+        p.setBrush(QBrush(QColor(96, 165, 250)))
+        p.drawRoundedRect(QRect(0, labor_row_y, _ACCENT_W, strip_h), 1, 1)
+
+        # Separator line between CAPACITY and LABOR in the corner
+        p.setPen(QPen(QColor(255, 255, 255, 35)))
+        p.drawLine(0, HEADER_H + UTIL_ROW_H, yw, HEADER_H + UTIL_ROW_H)
+
+        # Row labels — 8px Bold, crisp blue-white
+        p.setPen(QPen(QColor(200, 218, 238)))
+        p.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        lbl_x    = _ACCENT_W + 5   # indent past accent strip
+        lbl_w    = yw - lbl_x - 2
+        cap_lbl_y  = HEADER_H + (UTIL_ROW_H - 12) // 2
+        labor_lbl_y = HEADER_H + UTIL_ROW_H + (UTIL_ROW_H - 12) // 2
+        p.drawText(QRect(lbl_x, cap_lbl_y, lbl_w, 12),
                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                   "Cap%")
-        hc_lbl_y = HEADER_H + UTIL_ROW_H + (UTIL_ROW_H - 10) // 2
-        p.drawText(QRect(2, hc_lbl_y, yw - 4, 12),
+                   "CAPACITY")
+        p.drawText(QRect(lbl_x, labor_lbl_y, lbl_w, 12),
                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                   "HC%")
+                   "LABOR")
         p.setPen(QPen(QColor(255, 255, 255, 40)))
         p.drawLine(yw, 0, yw, self._TOTAL_H)
         p.end()
