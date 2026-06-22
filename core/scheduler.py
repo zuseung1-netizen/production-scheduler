@@ -339,6 +339,9 @@ class Scheduler:
                 })
                 sim_slot_map[key] = max(0.0, avail_inner - sku_to_inner(qty_this, uom))
                 self._block_room_shift(sim_slot_map, ds, room_code, proc_name, sno)
+                # Bug #2 fix: record placement so changeover checks in subsequent
+                # dry-runs (e.g. displaced SOs) see this simulated block.
+                self._record_placed(room_code, proc_name, ds, sno, sku_code)
                 step_allocated.append((ds, sno, room_code, rp))
                 step_rem -= qty_this
 
@@ -518,6 +521,7 @@ class Scheduler:
                     "so_number":          so_no_d,
                     "sku_code":           sku_d,
                     "line_item":          li_d,
+                    "priority":           d_so.get("priority"),   # Bug #1 fix
                     "customer_name":      d_so.get("customer_name") or "",
                     "due_date":           due,
                     "committed_due_date": cdd,
