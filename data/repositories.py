@@ -1761,14 +1761,26 @@ class PlanSnapshotRepo:
         return batch_id
 
     @staticmethod
-    def list_snapshots() -> List[Dict]:
+    def list_snapshots(limit: int = 20) -> List[Dict]:
+        limit_clause = f"LIMIT {limit}" if limit > 0 else ""
         with get_connection() as conn:
             rows = conn.execute(
                 "SELECT batch_id, label, created_at,"
                 " json_array_length(snapshot_data) AS plan_count"
-                " FROM plan_snapshot ORDER BY created_at DESC LIMIT 20"
+                f" FROM plan_snapshot ORDER BY created_at DESC {limit_clause}"
             ).fetchall()
         return _rows_to_dicts(rows)
+
+    @staticmethod
+    def get_snapshot_data(batch_id: str) -> List[Dict]:
+        """Load full plan list from a snapshot (for diff computation)."""
+        with get_connection() as conn:
+            row = conn.execute(
+                "SELECT snapshot_data FROM plan_snapshot WHERE batch_id=?",
+                (batch_id,)).fetchone()
+        if not row:
+            return []
+        return json.loads(row["snapshot_data"])
 
     @staticmethod
     def rollback(batch_id: str):

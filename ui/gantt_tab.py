@@ -20,7 +20,8 @@ from PyQt6.QtWidgets import (
     QMessageBox, QMenu, QDialog, QDialogButtonBox, QTextEdit,
     QApplication, QDateEdit, QFormLayout, QSpinBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QFrame,
-    QLineEdit, QButtonGroup, QSizePolicy
+    QLineEdit, QButtonGroup, QSizePolicy, QSplitter, QGroupBox,
+    QListWidget, QListWidgetItem
 )
 from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, pyqtSignal, QTimer, QThread, QByteArray, QSize
 from PyQt6.QtGui import (
@@ -2823,23 +2824,13 @@ class GanttTab(QWidget):
             self.main_window.notify(f"Plan snapshot saved: {label.strip()}")
 
     def _restore_snapshot_dialog(self):
-        from data.repositories import PlanSnapshotRepo
-        dlg = _PlanRestoreDialog(self)
-        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.selected_batch_id:
-            confirm = QMessageBox.question(
-                self, "Restore Plan",
-                "This will replace ALL current production plans with the snapshot.\n"
-                "Continue?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if confirm != QMessageBox.StandardButton.Yes:
-                return
-            try:
-                PlanSnapshotRepo.rollback(dlg.selected_batch_id)
-                self.refresh()
-                if self.main_window:
-                    self.main_window.notify("Plan restored from snapshot.")
-            except Exception as e:
-                QMessageBox.warning(self, "Restore Error", str(e))
+        dlg = PlanTimeMachineDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.refresh()
+            if self.main_window:
+                lbl = getattr(dlg, "_restored_label", "snapshot")
+                self.main_window.notify(f"Plan restored: \"{lbl}\"")
+
 
     def run_auto_plan(self):
         d0, d1 = self._date_range()
@@ -3551,67 +3542,438 @@ class _PullImpactDialog(QDialog):
 #  Plan Snapshot Restore Dialog
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class _PlanRestoreDialog(QDialog):
-    """Lists saved plan snapshots and lets the user pick one to restore."""
+class _SnapshotCardWidget(QWidget):
+    """Card widget for a single snapshot row in PlanTimeMachineDialog."""
+
+    def __init__(self, snap: Dict, plan_delta: Optional[int] = None, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 5, 8, 5)
+        lay.setSpacing(2)
+
+        lbl = snap.get("label", "")
+        if lbl.startswith("Auto:"):
+            dot_color = "#94A3B8"
+        elif lbl.startswith("Before restore"):
+            dot_color = "#D97706"
+        else:
+            dot_color = "#059669"
+
+        # Row 1: dot + timestamp + label
+        row1 = QHBoxLayout()
+        row1.setSpacing(4)
+        row1.setContentsMargins(0, 0, 0, 0)
+
+        dot = QLabel("●")
+        dot.setStyleSheet(f"color:{dot_color}; font-size:10px;")
+        dot.setFixedWidth(12)
+        row1.addWidget(dot)
+
+        ts = snap.get("created_at", "")[:16]
+        ts_lbl = QLabel(ts)
+        ts_lbl.setStyleSheet("color:#64748B; font-size:9pt;")
+        row1.addWidget(ts_lbl)
+
+        name_lbl = QLabel(lbl)
+        name_lbl.setStyleSheet("font-size:9pt; font-weight:bold; color:#1E293B;")
+        row1.addWidget(name_lbl, 1)
+        lay.addLayout(row1)
+
+        # Row 2: plan count + delta badge
+        row2 = QHBoxLayout()
+        row2.setSpacing(6)
+        row2.setContentsMargins(16, 0, 0, 0)
+
+        plan_count = snap.get("plan_count", "?")
+        count_lbl = QLabel(f"📦 {plan_count} plans")
+        count_lbl.setStyleSheet("font-size:8pt; color:#64748B;")
+        row2.addWidget(count_lbl)
+
+        if plan_delta is not None:
+            if plan_delta > 0:
+                b = QLabel(f"+{plan_delta}")
+                b.setStyleSheet(
+                    "font-size:8pt; background:#D1FAE5; color:#065F46;"
+                    " padding:1px 5px; border-radius:3px;")
+                row2.addWidget(b)
+            elif plan_delta < 0:
+                b = QLabel(str(plan_delta))
+                b.setStyleSheet(
+                    "font-size:8pt; background:#FEE2E2; color:#991B1B;"
+                    " padding:1px 5px; border-radius:3px;")
+                row2.addWidget(b)
+            else:
+                b = QLabel("=")
+                b.setStyleSheet("font-size:8pt; color:#94A3B8; padding:1px 5px;")
+                row2.addWidget(b)
+        else:
+            b = QLabel("oldest")
+            b.setStyleSheet("font-size:8pt; color:#CBD5E1;")
+            row2.addWidget(b)
+
+        row2.addStretch()
+        lay.addLayout(row2)
+
+
+class PlanTimeMachineDialog(QDialog):
+    """OS Time Machine style snapshot browser: browse, diff, and restore plan states."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Restore Plan from Snapshot")
-        self.resize(680, 380)
-        self.selected_batch_id: str = ""
+        self.setWindowTitle("⏪ Plan Time Machine")
+        self.resize(900, 540)
+        self._all_snapshots: List[Dict] = []
+        self._filtered: List[Dict] = []
+        self._diff_cache: Dict[str, Optional[Dict]] = {}
+        self._selected_idx = -1
+        self._restored_label: str = ""
+        self._build_ui()
+        self._load_snapshots()
+
+    def _build_ui(self):
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(8)
 
-        from data.repositories import PlanSnapshotRepo
-        snapshots = PlanSnapshotRepo.list_snapshots()
-
-        if not snapshots:
-            lay.addWidget(QLabel("No snapshots found. Run Execute Plan or Pull Forward first."))
-            btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-            btns.rejected.connect(self.reject)
-            lay.addWidget(btns)
-            return
-
-        info = QLabel("Select a snapshot to restore. All current plans will be replaced.")
-        info.setStyleSheet(
+        banner = QLabel(
+            "⚠  Restoring replaces ALL current plans. "
+            "Current state is automatically saved as 'Before restore' before any rollback.")
+        banner.setStyleSheet(
             "color:#92400e; background:#fffbeb; border:1px solid #fcd34d;"
             " border-radius:4px; padding:6px; font-size:11px;")
-        info.setWordWrap(True)
-        lay.addWidget(info)
+        banner.setWordWrap(True)
+        lay.addWidget(banner)
 
-        tbl = QTableWidget(len(snapshots), 3)
-        tbl.setHorizontalHeaderLabels(["Saved At", "Label", "Plan Count"])
-        tbl.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        tbl.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        tbl.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._snapshots = snapshots
-        self._tbl = tbl
+        splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        for ri, s in enumerate(snapshots):
-            for ci, v in enumerate([s["created_at"], s["label"],
-                                     str(s.get("plan_count", "?"))]):
-                it = QTableWidgetItem(v)
-                it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                tbl.setItem(ri, ci, it)
+        # ── Left: timeline list ───────────────────────────────────────────────
+        left = QWidget()
+        ll = QVBoxLayout(left)
+        ll.setContentsMargins(0, 0, 4, 0)
+        ll.setSpacing(4)
 
-        tbl.selectRow(0)
-        lay.addWidget(tbl)
+        filter_row = QHBoxLayout()
+        self._filter_combo = QComboBox()
+        self._filter_combo.addItems(["All Types", "Auto", "Manual", "Before restore"])
+        self._filter_combo.currentIndexChanged.connect(self._apply_filter)
+        filter_row.addWidget(self._filter_combo)
+        self._search_box = QLineEdit()
+        self._search_box.setPlaceholderText("🔍 Search label…")
+        self._search_box.textChanged.connect(self._apply_filter)
+        filter_row.addWidget(self._search_box, 1)
+        ll.addLayout(filter_row)
 
-        btns = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok |
-            QDialogButtonBox.StandardButton.Cancel)
-        btns.button(QDialogButtonBox.StandardButton.Ok).setText("⏪ Restore")
-        btns.button(QDialogButtonBox.StandardButton.Ok).setStyleSheet(
+        self._list = QListWidget()
+        self._list.setSpacing(1)
+        self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(self._list_context_menu)
+        self._list.currentRowChanged.connect(self._on_selection)
+        ll.addWidget(self._list, 1)
+
+        limit_row = QHBoxLayout()
+        limit_row.addWidget(QLabel("Show:"))
+        self._limit_combo = QComboBox()
+        self._limit_combo.addItems(["10", "20", "50", "All"])
+        self._limit_combo.setCurrentText("20")
+        self._limit_combo.currentIndexChanged.connect(self._load_snapshots)
+        limit_row.addWidget(self._limit_combo)
+        limit_row.addStretch()
+        self._count_label = QLabel("")
+        self._count_label.setStyleSheet("color:#64748B; font-size:10px;")
+        limit_row.addWidget(self._count_label)
+        ll.addLayout(limit_row)
+
+        splitter.addWidget(left)
+
+        # ── Right: detail panel ───────────────────────────────────────────────
+        right = QWidget()
+        rl = QVBoxLayout(right)
+        rl.setContentsMargins(4, 0, 0, 0)
+        rl.setSpacing(0)
+
+        self._detail_scroll = QScrollArea()
+        self._detail_scroll.setWidgetResizable(True)
+        self._detail_scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        self._detail_content = QWidget()
+        self._detail_inner = QVBoxLayout(self._detail_content)
+        self._detail_inner.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._detail_inner.setSpacing(8)
+
+        ph = QLabel("Select a snapshot from the list to view details.")
+        ph.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ph.setStyleSheet("color:#94A3B8; font-size:13px; margin:40px;")
+        self._detail_inner.addWidget(ph)
+
+        self._detail_scroll.setWidget(self._detail_content)
+        rl.addWidget(self._detail_scroll)
+        splitter.addWidget(right)
+
+        splitter.setSizes([360, 540])
+        lay.addWidget(splitter, 1)
+
+        # ── Bottom buttons ────────────────────────────────────────────────────
+        btn_row = QHBoxLayout()
+        self._btn_delete = QPushButton("🗑 Delete Selected")
+        self._btn_delete.setEnabled(False)
+        self._btn_delete.clicked.connect(self._delete_selected)
+        btn_row.addWidget(self._btn_delete)
+        btn_row.addStretch()
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_cancel)
+        self._btn_restore = QPushButton("⏪ Restore to This Point")
+        self._btn_restore.setEnabled(False)
+        self._btn_restore.setStyleSheet(
             "background:#d97706; color:white; font-weight:bold;"
-            " border:none; border-radius:4px; padding:5px 14px;")
-        btns.accepted.connect(self._on_ok)
-        btns.rejected.connect(self.reject)
-        lay.addWidget(btns)
+            " border:none; border-radius:5px; padding:6px 18px;")
+        self._btn_restore.clicked.connect(self._restore)
+        btn_row.addWidget(self._btn_restore)
+        lay.addLayout(btn_row)
 
-    def _on_ok(self):
-        rows = self._tbl.selectionModel().selectedRows()
-        if not rows:
+    # ── Data loading ──────────────────────────────────────────────────────────
+
+    def _load_snapshots(self):
+        from data.repositories import PlanSnapshotRepo
+        lv = self._limit_combo.currentText()
+        limit = 0 if lv == "All" else int(lv)
+        self._all_snapshots = PlanSnapshotRepo.list_snapshots(limit=limit)
+        self._diff_cache.clear()
+        self._apply_filter()
+
+    def _apply_filter(self):
+        ftype = self._filter_combo.currentText()
+        search = self._search_box.text().lower().strip()
+        result = []
+        for s in self._all_snapshots:
+            lbl = s.get("label", "")
+            if ftype == "Auto" and not lbl.startswith("Auto:"):
+                continue
+            if ftype == "Manual" and (
+                    lbl.startswith("Auto:") or lbl.startswith("Before restore")):
+                continue
+            if ftype == "Before restore" and not lbl.startswith("Before restore"):
+                continue
+            if search and search not in lbl.lower():
+                continue
+            result.append(s)
+        self._filtered = result
+        self._rebuild_list()
+
+    def _rebuild_list(self):
+        self._list.blockSignals(True)
+        self._list.clear()
+        for i, snap in enumerate(self._filtered):
+            all_idx = next((j for j, s in enumerate(self._all_snapshots)
+                            if s["batch_id"] == snap["batch_id"]), -1)
+            prev_count = None
+            if all_idx >= 0 and all_idx + 1 < len(self._all_snapshots):
+                prev_count = self._all_snapshots[all_idx + 1].get("plan_count") or 0
+            curr_count = snap.get("plan_count") or 0
+            delta = (curr_count - prev_count) if prev_count is not None else None
+
+            card = _SnapshotCardWidget(snap, delta)
+            item = QListWidgetItem()
+            item.setSizeHint(card.sizeHint())
+            self._list.addItem(item)
+            self._list.setItemWidget(item, card)
+
+        self._count_label.setText(f"{len(self._filtered)} snapshot(s)")
+        self._list.blockSignals(False)
+
+        if self._filtered:
+            self._list.setCurrentRow(0)
+        else:
+            self._clear_detail()
+            self._btn_restore.setEnabled(False)
+            self._btn_delete.setEnabled(False)
+
+    # ── Selection → detail panel ──────────────────────────────────────────────
+
+    def _on_selection(self, row):
+        if row < 0 or row >= len(self._filtered):
             return
-        self.selected_batch_id = self._snapshots[rows[0].row()]["batch_id"]
+        self._selected_idx = row
+        snap = self._filtered[row]
+        self._btn_restore.setEnabled(True)
+        self._btn_delete.setEnabled(True)
+        self._build_detail(snap)
+
+    def _build_detail(self, snap: Dict):
+        while self._detail_inner.count():
+            item = self._detail_inner.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        lbl = snap.get("label", "")
+        ts = snap.get("created_at", "")[:19].replace("T", " ")
+
+        hdr = QLabel(lbl)
+        hdr.setStyleSheet("font-size:12pt; font-weight:bold; color:#1E293B;")
+        hdr.setWordWrap(True)
+        self._detail_inner.addWidget(hdr)
+
+        ts_lbl = QLabel(f"⏱  {ts}")
+        ts_lbl.setStyleSheet("color:#64748B; font-size:10pt;")
+        self._detail_inner.addWidget(ts_lbl)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        self._detail_inner.addWidget(sep)
+
+        # Summary group
+        summary_grp = QGroupBox("Snapshot Summary")
+        sg = QFormLayout(summary_grp)
+        sg.addRow("Total plans:", QLabel(f"<b>{snap.get('plan_count', '?')}</b>"))
+        self._detail_inner.addWidget(summary_grp)
+
+        # Diff group
+        diff_grp = QGroupBox("Changes vs. Previous Snapshot")
+        dg = QVBoxLayout(diff_grp)
+
+        all_idx = next((j for j, s in enumerate(self._all_snapshots)
+                        if s["batch_id"] == snap["batch_id"]), -1)
+        has_prev = all_idx >= 0 and all_idx + 1 < len(self._all_snapshots)
+
+        if not has_prev:
+            no_prev = QLabel("No previous snapshot — this is the oldest saved state.")
+            no_prev.setStyleSheet("color:#94A3B8; font-size:10px;")
+            dg.addWidget(no_prev)
+        else:
+            prev_snap = self._all_snapshots[all_idx + 1]
+            prev_ts = prev_snap.get("created_at", "")[:16]
+            prev_lbl = prev_snap.get("label", "")
+            vs_lbl = QLabel(f"vs. {prev_ts}  —  {prev_lbl}")
+            vs_lbl.setStyleSheet("color:#64748B; font-size:9px;")
+            dg.addWidget(vs_lbl)
+
+            cache_key = snap["batch_id"]
+            if cache_key not in self._diff_cache:
+                self._diff_cache[cache_key] = self._compute_diff(
+                    snap["batch_id"], prev_snap["batch_id"])
+            diff = self._diff_cache[cache_key]
+
+            diff_tbl = QTableWidget(4, 2)
+            diff_tbl.setHorizontalHeaderLabels(["Type", "Count"])
+            diff_tbl.verticalHeader().setVisible(False)
+            diff_tbl.horizontalHeader().setSectionResizeMode(
+                0, QHeaderView.ResizeMode.Stretch)
+            diff_tbl.horizontalHeader().setSectionResizeMode(
+                1, QHeaderView.ResizeMode.ResizeToContents)
+            diff_tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            diff_tbl.setFixedHeight(120)
+            diff_tbl.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+
+            for ri, (row_lbl, count, bg, fg) in enumerate([
+                ("➕ Added",   diff["added"],   "#D1FAE5", "#065F46"),
+                ("➖ Removed", diff["removed"],  "#FEE2E2", "#991B1B"),
+                ("✏  Changed", diff["changed"],  "#DBEAFE", "#1E40AF"),
+                ("=  Same",   diff["same"],    "#FFFFFF", "#64748B"),
+            ]):
+                for ci, val in enumerate([row_lbl, str(count)]):
+                    it = QTableWidgetItem(val)
+                    it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    it.setBackground(QBrush(QColor(bg)))
+                    it.setForeground(QBrush(QColor(fg)))
+                    diff_tbl.setItem(ri, ci, it)
+            dg.addWidget(diff_tbl)
+
+        self._detail_inner.addWidget(diff_grp)
+
+        warn = QLabel(
+            "⚠  Restoring will replace all current plans with this snapshot.\n"
+            "Current state is automatically saved before restore.")
+        warn.setStyleSheet(
+            "color:#92400e; background:#fffbeb; border:1px solid #fcd34d;"
+            " border-radius:4px; padding:6px; font-size:10px;")
+        warn.setWordWrap(True)
+        self._detail_inner.addWidget(warn)
+        self._detail_inner.addStretch()
+
+    def _clear_detail(self):
+        while self._detail_inner.count():
+            item = self._detail_inner.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        ph = QLabel("Select a snapshot from the list to view details.")
+        ph.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ph.setStyleSheet("color:#94A3B8; font-size:13px; margin:40px;")
+        self._detail_inner.addWidget(ph)
+
+    # ── Diff computation ──────────────────────────────────────────────────────
+
+    def _compute_diff(self, curr_id: str, prev_id: str) -> Dict:
+        from data.repositories import PlanSnapshotRepo
+
+        def _key(p: Dict) -> str:
+            pid = p.get("plan_id")
+            if pid:
+                return str(pid)
+            return (f"{p.get('so_number')}|{p.get('entity_code')}"
+                    f"|{p.get('process_seq')}|{p.get('plan_date')}|{p.get('shift_no')}")
+
+        curr_map = {_key(p): p for p in PlanSnapshotRepo.get_snapshot_data(curr_id)}
+        prev_map = {_key(p): p for p in PlanSnapshotRepo.get_snapshot_data(prev_id)}
+
+        added   = len(set(curr_map) - set(prev_map))
+        removed = len(set(prev_map) - set(curr_map))
+        common  = set(curr_map) & set(prev_map)
+        changed = sum(1 for k in common if curr_map[k] != prev_map[k])
+        same    = len(common) - changed
+        return {"added": added, "removed": removed, "changed": changed, "same": same}
+
+    # ── Actions ───────────────────────────────────────────────────────────────
+
+    def _restore(self):
+        if self._selected_idx < 0 or self._selected_idx >= len(self._filtered):
+            return
+        snap = self._filtered[self._selected_idx]
+        label = snap.get("label", "")
+        ts = snap.get("created_at", "")[:16]
+
+        confirm = QMessageBox.question(
+            self, "Restore Plan",
+            f"Restore to:\n\"{label}\"\n({ts})\n\n"
+            "Current plans will be saved as 'Before restore' first, then replaced.\n\n"
+            "Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            from data.repositories import PlanSnapshotRepo
+            from datetime import datetime as _dt
+            PlanSnapshotRepo.save(
+                f"Before restore — {_dt.now().strftime('%Y-%m-%d %H:%M')}")
+            PlanSnapshotRepo.rollback(snap["batch_id"])
+            self._restored_label = label
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Restore Error", str(e))
+            return
+        QApplication.restoreOverrideCursor()
         self.accept()
+
+    def _delete_selected(self):
+        if self._selected_idx < 0 or self._selected_idx >= len(self._filtered):
+            return
+        snap = self._filtered[self._selected_idx]
+        confirm = QMessageBox.question(
+            self, "Delete Snapshot",
+            f"Delete snapshot \"{snap.get('label', '')}\"?\nThis cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        from data.repositories import PlanSnapshotRepo
+        PlanSnapshotRepo.delete(snap["batch_id"])
+        self._load_snapshots()
+
+    def _list_context_menu(self, pos):
+        if self._list.currentRow() < 0:
+            return
+        menu = QMenu(self)
+        act_del = menu.addAction("🗑 Delete This Snapshot")
+        act = menu.exec(self._list.mapToGlobal(pos))
+        if act == act_del:
+            self._delete_selected()
