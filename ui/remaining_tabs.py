@@ -774,6 +774,8 @@ class CRPTab(QWidget):
         self._btn_labor.setChecked(idx == 0)
         self._btn_prod.setChecked(idx == 1)
         self._btn_cap.setChecked(idx == 2)
+        if idx == 1:  # Calendar page — reload room list in case rooms were added
+            self._cal_widget.refresh()
 
     def _build_labor_page(self) -> QWidget:
         page = QWidget()

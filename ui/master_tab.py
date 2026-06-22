@@ -827,6 +827,9 @@ class CalendarWidget(QWidget):
 
         self._load()
 
+    def refresh(self):
+        self._load()
+
     def _load(self):
         d0 = self.date_from.date().toString("yyyy-MM-dd")
         d1 = self.date_to.date().toString("yyyy-MM-dd")
