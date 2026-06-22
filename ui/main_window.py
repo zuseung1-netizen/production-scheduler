@@ -61,13 +61,13 @@ def _svg_pixmap(svg_body: str, color: str, size: int = 16) -> QPixmap:
 
 
 def _rail_icon(svg_body: str, size: int = 16) -> QIcon:
-    """Rail nav icon: inactive (#c8d5ee) when unchecked, white when checked."""
+    """Rail nav icon: dark slate when inactive, blue when checked, darker on hover."""
     icon = QIcon()
-    icon.addPixmap(_svg_pixmap(svg_body, "#c8d5ee", size),
+    icon.addPixmap(_svg_pixmap(svg_body, "#475569", size),
                    QIcon.Mode.Normal, QIcon.State.Off)
-    icon.addPixmap(_svg_pixmap(svg_body, "#ffffff", size),
+    icon.addPixmap(_svg_pixmap(svg_body, "#1d4ed8", size),
                    QIcon.Mode.Normal, QIcon.State.On)
-    icon.addPixmap(_svg_pixmap(svg_body, "#e8edf8", size),
+    icon.addPixmap(_svg_pixmap(svg_body, "#1e293b", size),
                    QIcon.Mode.Active, QIcon.State.Off)
     return icon
 
@@ -124,20 +124,23 @@ _IC_MASTERS  = ('<line x1="4" y1="21" x2="4" y2="14"/>'
 # ─── Left navigation sidebar ─────────────────────────────────────────────────
 
 _RAIL_CSS = """
-QWidget#rail { background: #16213d; }
+QWidget#rail { background: #eef2fa; }
 QPushButton#rail-item {
-    background: transparent; color: #c8d5ee;
+    background: transparent; color: #334155;
     border: none; border-left: 3px solid transparent;
     text-align: left; padding: 8px 14px 8px 12px;
-    font-size: 12px; font-family: "Segoe UI";
+    font-size: 13px; font-family: "Segoe UI"; font-weight: 500;
 }
-QPushButton#rail-item:hover { background: rgba(255,255,255,18); color: #e8edf8; }
+QPushButton#rail-item:hover {
+    background: rgba(37,99,235,0.08); color: #1e293b;
+    border-left-color: rgba(37,99,235,0.3);
+}
 QPushButton#rail-item:checked {
-    background: #22305a; color: #ffffff;
-    border-left-color: #4f8df0; font-weight: 600;
+    background: rgba(37,99,235,0.12); color: #1d4ed8;
+    border-left-color: #2563eb; font-weight: 700;
 }
 QLabel#rail-group {
-    color: #8b9dc8; font-size: 10px; font-weight: bold;
+    color: #64748b; font-size: 10px; font-weight: 700;
     background: transparent; padding: 10px 18px 3px 18px;
     font-family: "Segoe UI"; letter-spacing: 0.08em;
 }
