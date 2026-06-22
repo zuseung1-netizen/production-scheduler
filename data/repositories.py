@@ -1743,6 +1743,65 @@ class ScenarioRepo:
 
 
 # Old code referenced SKUProcessRepo — redirect to ProcessRoutingRepo
+class PlanSnapshotRepo:
+    """Snapshot and rollback for production_plan table."""
+
+    @staticmethod
+    def save(label: str) -> str:
+        """Save current production_plan to a snapshot. Returns batch_id."""
+        import uuid
+        batch_id = str(uuid.uuid4())
+        plans = PlanRepo.all()
+        with get_connection() as conn:
+            conn.execute(
+                "INSERT INTO plan_snapshot(batch_id,label,snapshot_data,created_at)"
+                " VALUES(?,?,?,?)",
+                (batch_id, label,
+                 json.dumps(plans, ensure_ascii=False), _now()))
+        return batch_id
+
+    @staticmethod
+    def list_snapshots() -> List[Dict]:
+        with get_connection() as conn:
+            rows = conn.execute(
+                "SELECT batch_id, label, created_at,"
+                " json_array_length(snapshot_data) AS plan_count"
+                " FROM plan_snapshot ORDER BY created_at DESC LIMIT 20"
+            ).fetchall()
+        return _rows_to_dicts(rows)
+
+    @staticmethod
+    def rollback(batch_id: str):
+        """Replace all production_plan rows with the snapshot contents."""
+        with get_connection() as conn:
+            row = conn.execute(
+                "SELECT snapshot_data FROM plan_snapshot WHERE batch_id=?",
+                (batch_id,)).fetchone()
+        if not row:
+            raise ValueError(f"Plan snapshot {batch_id} not found")
+        plans = json.loads(row["snapshot_data"])
+        FIELDS = (
+            "entity_type", "entity_code", "so_number", "sku_code", "line_item",
+            "process_name", "process_seq", "is_final_seq", "room_code",
+            "plan_date", "shift_no", "qty_planned", "qty_produced",
+            "is_locked", "is_consolidated", "consolidation_group",
+            "material_group_id", "block_type", "memo", "created_at", "updated_at",
+        )
+        with get_connection() as conn:
+            conn.execute("DELETE FROM production_plan")
+            for p in plans:
+                vals = {f: p.get(f) for f in FIELDS}
+                conn.execute(
+                    f"INSERT INTO production_plan({','.join(FIELDS)})"
+                    f" VALUES({','.join(':'+f for f in FIELDS)})",
+                    vals)
+
+    @staticmethod
+    def delete(batch_id: str):
+        with get_connection() as conn:
+            conn.execute("DELETE FROM plan_snapshot WHERE batch_id=?", (batch_id,))
+
+
 class SKUProcessRepo:
     @staticmethod
     def for_sku(sku_code: str) -> List[Dict]:

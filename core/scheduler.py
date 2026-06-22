@@ -178,21 +178,10 @@ class Scheduler:
                     clusters.append([so])
 
             for cluster in clusters:
-                if len(cluster) == 1:
-                    merged.append(cluster[0])
-                else:
-                    # Build virtual SO: earliest due date, highest priority, combined qty
-                    earliest_due = min(s["due_date"] for s in cluster)
-                    priorities   = [s["priority"] for s in cluster if s.get("priority") is not None]
-                    best_pri     = min(priorities) if priorities else None
-                    total_qty    = sum(int(s["qty"]) for s in cluster)
-                    # Use first SO's fields as base, override combined fields
-                    base = dict(cluster[0])
-                    base["qty"]        = total_qty
-                    base["due_date"]   = earliest_due
-                    base["priority"]   = best_pri
-                    base["_campaign_members"] = cluster  # keep refs for history
-                    merged.append(base)
+                # Plan each SO individually in due-date order.
+                # Opt-A+B adjacency bonus + SKU clustering achieves physical
+                # grouping without mixing SO identifiers in plan records.
+                merged.extend(sorted(cluster, key=lambda s: s["due_date"]))
 
         # Re-sort merged + individual by same priority key as _sorted_open_sos
         def _key(so):

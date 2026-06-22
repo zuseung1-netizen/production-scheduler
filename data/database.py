@@ -388,6 +388,15 @@ def init_db():
         FOREIGN KEY (scenario_id) REFERENCES scenario(scenario_id)
     )""")
 
+    # ── Plan Snapshots ───────────────────────────────────────────────────────
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS plan_snapshot (
+        batch_id        TEXT PRIMARY KEY,
+        label           TEXT NOT NULL,
+        snapshot_data   TEXT NOT NULL,
+        created_at      TEXT NOT NULL
+    )""")
+
     conn.commit()
     conn.close()
 

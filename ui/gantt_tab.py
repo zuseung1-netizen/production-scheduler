@@ -2054,6 +2054,29 @@ class GanttTab(QWidget):
         btn_pull.clicked.connect(self.run_pull_forward)
         lay.addWidget(btn_pull)
 
+        # Snapshot: manual save + restore
+        btn_snap = QPushButton("📸")
+        btn_snap.setFixedSize(32, 32)
+        btn_snap.setToolTip("Save plan snapshot")
+        btn_snap.setStyleSheet(
+            "QPushButton { border:1px solid #e2e4ea; border-radius:5px; background:#fff;"
+            " font-size:14px; }"
+            "QPushButton:hover { background:#f5f6fa; }"
+        )
+        btn_snap.clicked.connect(self._save_snapshot_manual)
+        lay.addWidget(btn_snap)
+
+        btn_restore = QPushButton("⏪")
+        btn_restore.setFixedSize(32, 32)
+        btn_restore.setToolTip("Restore plan from snapshot")
+        btn_restore.setStyleSheet(
+            "QPushButton { border:1px solid #e2e4ea; border-radius:5px; background:#fff;"
+            " font-size:14px; }"
+            "QPushButton:hover { background:#f5f6fa; }"
+        )
+        btn_restore.clicked.connect(self._restore_snapshot_dialog)
+        lay.addWidget(btn_restore)
+
         # Danger: Clear Plan
         btn_clear_plan = QPushButton("🗑  Clear Plan")
         btn_clear_plan.setStyleSheet(
@@ -2787,6 +2810,37 @@ class GanttTab(QWidget):
         if self.btn_unplanned.isChecked():
             self._refresh_unplanned_panel()
 
+    def _save_snapshot_manual(self):
+        from data.repositories import PlanSnapshotRepo
+        from datetime import datetime as _dt
+        label, ok = QInputDialog.getText(
+            self, "Save Snapshot", "Snapshot label:",
+            text=f"Manual {_dt.now().strftime('%Y-%m-%d %H:%M')}")
+        if not ok or not label.strip():
+            return
+        PlanSnapshotRepo.save(label.strip())
+        if self.main_window:
+            self.main_window.notify(f"Plan snapshot saved: {label.strip()}")
+
+    def _restore_snapshot_dialog(self):
+        from data.repositories import PlanSnapshotRepo
+        dlg = _PlanRestoreDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.selected_batch_id:
+            confirm = QMessageBox.question(
+                self, "Restore Plan",
+                "This will replace ALL current production plans with the snapshot.\n"
+                "Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                PlanSnapshotRepo.rollback(dlg.selected_batch_id)
+                self.refresh()
+                if self.main_window:
+                    self.main_window.notify("Plan restored from snapshot.")
+            except Exception as e:
+                QMessageBox.warning(self, "Restore Error", str(e))
+
     def run_auto_plan(self):
         d0, d1 = self._date_range()
         from PyQt6.QtWidgets import QApplication
@@ -2807,6 +2861,10 @@ class GanttTab(QWidget):
                 self._d0, self._d1 = d0, d1
             def run(self):
                 try:
+                    from data.repositories import PlanSnapshotRepo
+                    from datetime import datetime as _dt
+                    PlanSnapshotRepo.save(
+                        f"Auto: Execute Plan {_dt.now().strftime('%Y-%m-%d %H:%M')}")
                     scheduler._reload_masters()
                     self.done.emit(scheduler.auto_plan(self._d0, self._d1))
                 except Exception as exc:
@@ -3341,7 +3399,12 @@ class PullForwardDialog(QDialog):
             if impact_dlg.exec() != QDialog.DialogCode.Accepted:
                 return
 
-        # Step 4: apply
+        # Step 4: apply (snapshot first so the user can restore if needed)
+        from data.repositories import PlanSnapshotRepo
+        from datetime import datetime as _dt
+        PlanSnapshotRepo.save(
+            f"Auto: Pull Forward {so_no}/{sku} → {target_date} "
+            f"{_dt.now().strftime('%H:%M')}")
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             result = scheduler.apply_single_pull_forward(
@@ -3482,3 +3545,73 @@ class _PullImpactDialog(QDialog):
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         lay.addWidget(btns)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Plan Snapshot Restore Dialog
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class _PlanRestoreDialog(QDialog):
+    """Lists saved plan snapshots and lets the user pick one to restore."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Restore Plan from Snapshot")
+        self.resize(680, 380)
+        self.selected_batch_id: str = ""
+        lay = QVBoxLayout(self)
+
+        from data.repositories import PlanSnapshotRepo
+        snapshots = PlanSnapshotRepo.list_snapshots()
+
+        if not snapshots:
+            lay.addWidget(QLabel("No snapshots found. Run Execute Plan or Pull Forward first."))
+            btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+            btns.rejected.connect(self.reject)
+            lay.addWidget(btns)
+            return
+
+        info = QLabel("Select a snapshot to restore. All current plans will be replaced.")
+        info.setStyleSheet(
+            "color:#92400e; background:#fffbeb; border:1px solid #fcd34d;"
+            " border-radius:4px; padding:6px; font-size:11px;")
+        info.setWordWrap(True)
+        lay.addWidget(info)
+
+        tbl = QTableWidget(len(snapshots), 3)
+        tbl.setHorizontalHeaderLabels(["Saved At", "Label", "Plan Count"])
+        tbl.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        tbl.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        tbl.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._snapshots = snapshots
+        self._tbl = tbl
+
+        for ri, s in enumerate(snapshots):
+            for ci, v in enumerate([s["created_at"], s["label"],
+                                     str(s.get("plan_count", "?"))]):
+                it = QTableWidgetItem(v)
+                it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                tbl.setItem(ri, ci, it)
+
+        tbl.selectRow(0)
+        lay.addWidget(tbl)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel)
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("⏪ Restore")
+        btns.button(QDialogButtonBox.StandardButton.Ok).setStyleSheet(
+            "background:#d97706; color:white; font-weight:bold;"
+            " border:none; border-radius:4px; padding:5px 14px;")
+        btns.accepted.connect(self._on_ok)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+
+    def _on_ok(self):
+        rows = self._tbl.selectionModel().selectedRows()
+        if not rows:
+            return
+        self.selected_batch_id = self._snapshots[rows[0].row()]["batch_id"]
+        self.accept()
