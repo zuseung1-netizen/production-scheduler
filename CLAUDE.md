@@ -22,6 +22,16 @@
 - 보류 결정 → `project_deferred_features.md` 추가
 - 설계 함정 발견 → `project_architecture_decisions.md` 추가
 
+**앱 테스팅 프로토콜 (GUI 자동화 시 반드시 준수)**
+
+앱 실행 후 GUI 동작을 직접 확인하거나 자동화할 때:
+
+1. **모니터 배치**: 터미널(쉘)은 보조 모니터, 앱은 주 모니터. 앱 실행 후 `SetWindowPos`로 주 모니터 좌표(x≈50, y≈50)로 이동
+2. **권한 팝업 방지**: 앱 테스팅용 Bash 명령에는 항상 `dangerouslyDisableSandbox: true` 사용 — 권한 팝업 자체가 뜨지 않음
+3. **포커스 관리**: 자동화 스크립트(클릭, 드래그 등) 전후 반드시 `SetForegroundWindow(hwnd_app)`로 앱 포커스 명시적 복귀
+4. **DPI 주의**: 보조 모니터는 150% DPI → 물리 픽셀 좌표 ÷ 1.5 = 논리 좌표. 앱을 주 모니터로 이동하면 이 문제 회피 가능
+5. **스크린샷**: `ImageGrab.grab(all_screens=True)` + 윈도우 rect 기준 크롭
+
 ---
 
 ## 프로젝트 개요
