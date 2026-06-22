@@ -2372,42 +2372,69 @@ class GanttTab(QWidget):
     def _build_unplanned_panel(self) -> QWidget:
         panel = QFrame()
         panel.setFixedWidth(340)
-        panel.setFrameShape(QFrame.Shape.StyledPanel)
-        panel.setStyleSheet("background:#fafafa; border-left:1px solid #ccc;")
+        panel.setFrameShape(QFrame.Shape.NoFrame)
+        panel.setStyleSheet(
+            "QFrame { background:#F4F6FB; border-left:1px solid #DDE3ED; }"
+        )
         pl = QVBoxLayout(panel)
-        pl.setContentsMargins(6, 6, 6, 6)
-        pl.setSpacing(4)
+        pl.setContentsMargins(0, 0, 0, 0)
+        pl.setSpacing(0)
 
-        head = QHBoxLayout()
+        # Header
+        hdr = QFrame()
+        hdr.setStyleSheet(
+            "QFrame { background:#fff; border:none; border-bottom:1px solid #DDE3ED; }"
+        )
+        hdr_lay = QHBoxLayout(hdr)
+        hdr_lay.setContentsMargins(14, 10, 10, 10)
+        hdr_lay.setSpacing(6)
+
         title = QLabel("📦 Unplanned Orders")
-        title.setStyleSheet("font-weight:bold;")
-        head.addWidget(title)
-        head.addStretch()
-        btn_close = QPushButton("✕")
-        btn_close.setFixedWidth(24)
-        btn_close.setToolTip("Close")
-        btn_close.clicked.connect(self._close_unplanned_panel)
-        head.addWidget(btn_close)
-        pl.addLayout(head)
+        title.setStyleSheet("font-size:13px; font-weight:700; color:#1E293B; border:none;")
+        hdr_lay.addWidget(title)
 
+        self.unplanned_count_label = QLabel("0")
+        self.unplanned_count_label.setStyleSheet(
+            "font-size:11px; font-weight:600; color:#475569;"
+            " background:#F1F5F9; border-radius:8px; padding:1px 8px; border:none;"
+        )
+        hdr_lay.addWidget(self.unplanned_count_label)
+        hdr_lay.addStretch()
+
+        btn_close = QPushButton("✕")
+        btn_close.setFixedSize(24, 24)
+        btn_close.setToolTip("Close")
+        btn_close.setStyleSheet(
+            "QPushButton { background:transparent; border:none; color:#94A3B8; font-size:13px; }"
+            "QPushButton:hover { background:#F1F5F9; border-radius:4px; }"
+        )
+        btn_close.clicked.connect(self._close_unplanned_panel)
+        hdr_lay.addWidget(btn_close)
+        pl.addWidget(hdr)
+
+        # Scroll area
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet("background:transparent;")
+        scroll.setStyleSheet("background:transparent; border:none;")
 
         self._unplanned_inner = QWidget()
         self._unplanned_inner.setStyleSheet("background:transparent;")
         self.unplanned_card_layout = QVBoxLayout(self._unplanned_inner)
-        self.unplanned_card_layout.setContentsMargins(0, 2, 0, 2)
-        self.unplanned_card_layout.setSpacing(6)
+        self.unplanned_card_layout.setContentsMargins(8, 10, 8, 10)
+        self.unplanned_card_layout.setSpacing(8)
         self.unplanned_card_layout.addStretch()
         scroll.setWidget(self._unplanned_inner)
-        pl.addWidget(scroll)
+        pl.addWidget(scroll, stretch=1)
 
-        self.unplanned_count_label = QLabel("0 unplanned order(s)")
-        self.unplanned_count_label.setStyleSheet("color:#555; font-size:11px;")
-        pl.addWidget(self.unplanned_count_label)
+        # Footer
+        self.unplanned_footer_label = QLabel("0 order(s) · 0 step(s)")
+        self.unplanned_footer_label.setStyleSheet(
+            "font-size:11px; color:#94A3B8; padding:6px 14px;"
+            " border-top:1px solid #EEF1F7; background:#fff;"
+        )
+        pl.addWidget(self.unplanned_footer_label)
 
         return panel
 
@@ -2444,76 +2471,212 @@ class GanttTab(QWidget):
 
         n_orders = len(groups)
         n_steps  = len(rows)
-        self.unplanned_count_label.setText(
-            f"{n_orders} unplanned order(s)  ·  {n_steps} step(s)")
+        self.unplanned_count_label.setText(str(n_orders))
+        self.unplanned_footer_label.setText(
+            f"{n_orders} order(s) · {n_steps} step(s)")
 
     def _make_unplanned_card(self, rep: dict, steps: list, today_str: str) -> QFrame:
-        so_number   = rep["so_number"]
-        sku_code    = rep["sku_code"]
-        line_item   = rep["line_item"]
-        customer    = rep.get("customer_name") or ""
-        due_date    = rep.get("due_date") or ""
-        priority    = rep.get("priority")
-        is_late     = bool(due_date and due_date < today_str)
-        n_steps     = len(steps)
-        remaining   = max(s.get("remaining_qty", 0) for s in steps)
+        so_number = rep["so_number"]
+        sku_code  = rep["sku_code"]
+        line_item = rep["line_item"]
+        customer  = rep.get("customer_name") or ""
+        due_date  = rep.get("due_date") or ""
+        priority  = rep.get("priority")
+        is_late   = bool(due_date and due_date < today_str)
+        n_steps   = len(steps)
+
+        # Determine card state and color tokens
+        if is_late:
+            strip_color  = "#DC2626"
+            border_color = "#FCA5A5"
+            btn_bg       = "#DC2626"
+            btn_hover    = "#B91C1C"
+            dot_color    = "#DC2626"
+            name_color   = "#DC2626"
+        elif n_steps > 1:
+            strip_color  = "#D97706"
+            border_color = "#FDE68A"
+            btn_bg       = "#2563EB"
+            btn_hover    = "#1D4ED8"
+            dot_color    = "#D97706"
+            name_color   = "#D97706"
+        else:
+            strip_color  = "#16A34A"
+            border_color = "#DDE3ED"
+            btn_bg       = "#2563EB"
+            btn_hover    = "#1D4ED8"
+            dot_color    = "#D97706"
+            name_color   = "#D97706"
 
         card = QFrame()
-        card.setFrameShape(QFrame.Shape.StyledPanel)
-        border_color = "#ef4444" if is_late else "#d1d5db"
+        card.setFrameShape(QFrame.Shape.NoFrame)
         card.setStyleSheet(
-            f"QFrame{{background:white; border:1px solid {border_color};"
-            f" border-radius:6px; padding:0px;}}"
+            f"QFrame#unplanned_card {{"
+            f" background:#fff;"
+            f" border:1px solid {border_color};"
+            f" border-radius:8px;"
+            f"}}"
         )
+        card.setObjectName("unplanned_card")
 
-        cl = QVBoxLayout(card)
-        cl.setContentsMargins(10, 8, 10, 8)
-        cl.setSpacing(3)
+        outer = QVBoxLayout(card)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        # Row 1: SO · SKU/Line  +  Plan button
-        row1 = QHBoxLayout()
-        row1.setSpacing(6)
-        lbl_so = QLabel(f"<b>{so_number}</b>  ·  {sku_code} / {line_item}")
-        lbl_so.setStyleSheet("font-size:12px;")
-        row1.addWidget(lbl_so, stretch=1)
+        # Zone A — Status strip (separate widget to avoid border-top + border-radius QSS conflict)
+        strip = QFrame()
+        strip.setFixedHeight(4)
+        strip.setStyleSheet(
+            f"QFrame {{ background:{strip_color}; border:none;"
+            f" border-top-left-radius:7px; border-top-right-radius:7px; }}"
+        )
+        outer.addWidget(strip)
 
-        btn = QPushButton("▶ Plan")
-        btn.setFixedHeight(24)
-        btn.setFixedWidth(64)
+        # ── Body ─────────────────────────────────────────────
+        body_widget = QWidget()
+        body_widget.setStyleSheet("background:transparent;")
+        body = QVBoxLayout(body_widget)
+        body.setContentsMargins(12, 9, 12, 6)
+        body.setSpacing(4)
+
+        # Zone B — Header row: SO number + SKU/Line
+        hdr = QHBoxLayout()
+        hdr.setSpacing(4)
+        lbl_so = QLabel(so_number)
+        lbl_so.setStyleSheet(
+            "font-size:13px; font-weight:700; color:#1E293B; background:transparent;"
+        )
+        hdr.addWidget(lbl_so, stretch=1)
+        lbl_sku = QLabel(f"{sku_code} · {line_item}")
+        lbl_sku.setStyleSheet("font-size:11px; color:#94A3B8; background:transparent;")
+        lbl_sku.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        hdr.addWidget(lbl_sku)
+        body.addLayout(hdr)
+
+        # Badge row (conditional)
+        if is_late and due_date:
+            try:
+                from datetime import datetime as _dt
+                overdue_days = (date.today() - _dt.strptime(due_date, "%Y-%m-%d").date()).days
+                badge_text = f"⚠ OVERDUE · D+{overdue_days}"
+            except Exception:
+                badge_text = "⚠ OVERDUE"
+            badge = QLabel(badge_text)
+            badge.setStyleSheet(
+                "font-size:10px; font-weight:700; color:#DC2626;"
+                " background:#FEF2F2; border:1px solid #FECACA;"
+                " border-radius:3px; padding:2px 7px;"
+            )
+            badge.setSizePolicy(
+                QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+            )
+            body.addWidget(badge)
+        elif n_steps > 1:
+            badge = QLabel(f"{n_steps} steps unplanned")
+            badge.setStyleSheet(
+                "font-size:10px; font-weight:700; color:#D97706;"
+                " background:#FFFBEB; border:1px solid #FDE68A;"
+                " border-radius:3px; padding:2px 7px;"
+            )
+            badge.setSizePolicy(
+                QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+            )
+            body.addWidget(badge)
+
+        # Zone C — Meta row: customer + due date
+        meta = QHBoxLayout()
+        meta.setSpacing(4)
+        cust_text = customer if customer else "—"
+        lbl_cust = QLabel(cust_text)
+        lbl_cust.setStyleSheet("font-size:11px; color:#64748B; background:transparent;")
+        meta.addWidget(lbl_cust, stretch=1)
+
+        if due_date:
+            if is_late:
+                due_color  = "#DC2626"
+                due_weight = "font-weight:600;"
+            else:
+                try:
+                    from datetime import datetime as _dtt
+                    days_left = (_dtt.strptime(due_date, "%Y-%m-%d").date() - date.today()).days
+                    due_color = "#16A34A" if days_left <= 14 else "#64748B"
+                except Exception:
+                    due_color = "#64748B"
+                due_weight = ""
+            due_suffix = " ⚠" if is_late else ""
+            lbl_due = QLabel(f"Due {due_date}{due_suffix}")
+            lbl_due.setStyleSheet(
+                f"font-size:11px; color:{due_color}; {due_weight} background:transparent;"
+            )
+        else:
+            lbl_due = QLabel("Due —")
+            lbl_due.setStyleSheet("font-size:11px; color:#94A3B8; background:transparent;")
+        lbl_due.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        meta.addWidget(lbl_due)
+        body.addLayout(meta)
+
+        # Zone D — Step rows
+        for i, s in enumerate(steps):
+            if i > 0:
+                sep = QFrame()
+                sep.setFrameShape(QFrame.Shape.HLine)
+                sep.setFixedHeight(1)
+                sep.setStyleSheet("background:#EEF1F7; border:none;")
+                body.addWidget(sep)
+
+            step_row = QHBoxLayout()
+            step_row.setSpacing(5)
+            step_row.setContentsMargins(0, 0, 0, 0)
+
+            dot = QLabel("●")
+            dot.setFixedWidth(10)
+            dot.setStyleSheet(f"font-size:7px; color:{dot_color}; background:transparent;")
+            dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            step_row.addWidget(dot)
+
+            seq  = s.get("process_seq")
+            pname = s.get("process_name") or "(no routing)"
+            tag  = f"[{seq}] {pname}" if seq is not None else pname
+            lbl_step = QLabel(tag)
+            lbl_step.setStyleSheet(
+                f"font-size:10px; color:{name_color}; background:transparent;"
+            )
+            step_row.addWidget(lbl_step, stretch=1)
+
+            rem = s.get("remaining_qty", 0)
+            pri_str = f"Pri {priority} · " if (priority and i == 0) else ""
+            lbl_rem = QLabel(f"{pri_str}Rem: {rem}")
+            lbl_rem.setStyleSheet("font-size:10px; color:#94A3B8; background:transparent;")
+            lbl_rem.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            step_row.addWidget(lbl_rem)
+
+            step_container = QWidget()
+            step_container.setStyleSheet("background:transparent;")
+            step_container.setMinimumHeight(20)
+            step_container.setLayout(step_row)
+            body.addWidget(step_container)
+
+        outer.addWidget(body_widget)
+
+        # ── Zone E — Action button ────────────────────────────
+        action_widget = QWidget()
+        action_widget.setStyleSheet("background:transparent;")
+        action_lay = QVBoxLayout(action_widget)
+        action_lay.setContentsMargins(12, 0, 12, 10)
+        action_lay.setSpacing(0)
+
+        btn = QPushButton("▶ Plan Now")
+        btn.setFixedHeight(28)
         btn.setStyleSheet(
-            "QPushButton{background:#2563eb;color:white;border-radius:4px;"
-            "font-size:11px; border:none;}"
-            "QPushButton:hover{background:#1d4ed8;}"
-            "QPushButton:pressed{background:#1e40af;}"
+            f"QPushButton {{ background:{btn_bg}; color:white; border:none;"
+            f" border-radius:5px; font-size:11px; font-weight:700; }}"
+            f"QPushButton:hover {{ background:{btn_hover}; }}"
+            f"QPushButton:pressed {{ background:{btn_hover}; }}"
         )
         btn.clicked.connect(lambda _c, rd=dict(rep): self._force_plan_row(rd))
-        row1.addWidget(btn)
-        cl.addLayout(row1)
+        action_lay.addWidget(btn)
 
-        # Row 2: Customer · Due date
-        due_color = "#ef4444" if is_late else "#6b7280"
-        due_text  = f"Due: {due_date}" if due_date else "Due: —"
-        cust_text = customer if customer else "—"
-        lbl_meta = QLabel(f"{cust_text}  ·  <span style='color:{due_color};'>{due_text}</span>")
-        lbl_meta.setStyleSheet("font-size:11px; color:#6b7280;")
-        cl.addWidget(lbl_meta)
-
-        # Row 3: Priority · Remaining · steps unplanned
-        pri_text  = f"Pri: {priority}" if priority else "Pri: —"
-        step_parts = []
-        for s in steps:
-            seq  = s.get("process_seq")
-            name = s.get("process_name") or ""
-            tag  = f"[{seq}] {name}" if seq is not None else name
-            step_parts.append(tag)
-        steps_text = "  ·  ".join(step_parts) if step_parts else "(no routing)"
-        lbl_steps = QLabel(
-            f"<span style='color:#9ca3af;'>{pri_text}  ·  Rem: {remaining}</span>"
-            f"<br><span style='color:#b45309; font-size:10px;'>{steps_text}</span>"
-        )
-        lbl_steps.setStyleSheet("font-size:11px;")
-        lbl_steps.setWordWrap(True)
-        cl.addWidget(lbl_steps)
+        outer.addWidget(action_widget)
 
         return card
 
