@@ -3350,11 +3350,13 @@ class PullForwardDialog(QDialog):
             QApplication.restoreOverrideCursor()
 
         if result["success"]:
-            QMessageBox.information(
-                self, "Applied",
-                f"Pull forward applied.\n"
-                f"Plans created: {result['planned']}\n"
-                f"SOs displaced: {result['displaced_count']}")
+            replanned = result.get("replanned", 0)
+            msg = (f"Pull forward applied.\n"
+                   f"Plans created: {result['planned']}\n"
+                   f"SOs displaced: {result['displaced_count']}")
+            if replanned:
+                msg += f"\nDisplaced SOs auto-replanned: {replanned}"
+            QMessageBox.information(self, "Applied", msg)
             self._load()
         else:
             QMessageBox.warning(self, "Error", result.get("error", "Unknown error"))
@@ -3404,28 +3406,29 @@ class _PullModeDialog(QDialog):
 
 
 class _PullImpactDialog(QDialog):
-    """Shows displaced SOs and their status change before confirming."""
+    """Shows displaced SOs, their verified new completion dates, and due-date status."""
 
     def __init__(self, so_no, sku, li, target_date,
                  final_date, displaced, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Pull Forward — Impact Report")
-        self.resize(860, 420)
+        self.resize(980, 440)
         lay = QVBoxLayout(self)
 
         hdr = QLabel(
             f"Pulling <b>{so_no}/{sku}/{li}</b> to <b>{target_date}</b> "
             f"(estimated completion: <b>{final_date or '?'}</b>)<br>"
-            f"The following plans will be <b style='color:#c2342f'>displaced</b>. "
-            f"Confirm to proceed.")
+            f"The following SOs will be displaced and <b>automatically re-planned</b> "
+            f"in the remaining capacity. All new completions have been verified against due dates.")
         hdr.setWordWrap(True)
         hdr.setStyleSheet("padding:6px; font-size:12px;")
         lay.addWidget(hdr)
 
-        tbl = QTableWidget(len(displaced), 7)
-        tbl.setHorizontalHeaderLabels(
-            ["SO", "SKU", "Line", "Customer",
-             "Requested Due", "Committed Due", "Status Change"])
+        tbl = QTableWidget(len(displaced), 9)
+        tbl.setHorizontalHeaderLabels([
+            "SO", "SKU", "Line", "Customer",
+            "Requested Due", "Committed Due",
+            "Current Completion", "New Completion", "Status After"])
         tbl.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents)
         tbl.horizontalHeader().setSectionResizeMode(
@@ -3433,39 +3436,48 @@ class _PullImpactDialog(QDialog):
         tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
 
         STATUS_COLORS = {
-            "ON TIME":  QColor("#e8f5e9"),
-            "AT RISK":  QColor("#fff8e1"),
-            "LATE":     QColor("#ffebee"),
+            "ON TIME":       QColor("#e8f5e9"),
+            "LATE":          QColor("#ffebee"),
+            "CANNOT REPLAN": QColor("#ffebee"),
+        }
+        STATUS_FG = {
+            "ON TIME":       QColor("#2e7d32"),
+            "LATE":          QColor("#c62828"),
+            "CANNOT REPLAN": QColor("#c62828"),
         }
 
         for ri, d in enumerate(displaced):
-            before = d["status_before"]
-            after  = d["status_after"]
-            change = f"{before}  →  {after}"
-            vals = [d["so_number"], d["sku_code"], d["line_item"],
-                    d["customer_name"], d["due_date"],
-                    d["committed_due_date"], change]
+            after = d["status_after"]
+            vals = [
+                d["so_number"], d["sku_code"], d["line_item"],
+                d["customer_name"], d["due_date"], d["committed_due_date"],
+                d["current_completion"], d["new_completion"], after,
+            ]
             for ci, v in enumerate(vals):
                 it = QTableWidgetItem(str(v))
                 it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                if ci == 6:
+                if ci == 8:
                     it.setBackground(QBrush(STATUS_COLORS.get(after, QColor("white"))))
+                    it.setForeground(QBrush(STATUS_FG.get(after, QColor("#1e293b"))))
+                    it.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
                 tbl.setItem(ri, ci, it)
 
         lay.addWidget(tbl)
 
-        warn = QLabel(f"⚠  {len(displaced)} SO(s) will need re-planning after this operation.")
-        warn.setStyleSheet(
-            "color:#92400e; background:#fffbeb; border:1px solid #fcd34d;"
+        info = QLabel(
+            f"ℹ  {len(displaced)} SO(s) will be displaced and automatically re-planned "
+            f"after this operation. Due-date compliance has been verified for all.")
+        info.setStyleSheet(
+            "color:#1e3a5f; background:#e8f0fe; border:1px solid #b3c6f7;"
             " border-radius:4px; padding:6px; font-size:11px;")
-        lay.addWidget(warn)
+        lay.addWidget(info)
 
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok |
             QDialogButtonBox.StandardButton.Cancel)
         btns.button(QDialogButtonBox.StandardButton.Ok).setText("Confirm & Apply")
         btns.button(QDialogButtonBox.StandardButton.Ok).setStyleSheet(
-            "background:#dc2626; color:white; font-weight:bold;"
+            "background:#2563eb; color:white; font-weight:bold;"
             " border:none; border-radius:4px; padding:5px 14px;")
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)

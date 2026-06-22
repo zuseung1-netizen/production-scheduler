@@ -390,7 +390,9 @@ class Scheduler:
     ) -> Dict:
         """
         Dry-run: backward-schedule so_no/sku/li to finish by target_date.
-        allow_push=True: also counts capacity occupied by other unlocked plans.
+        allow_push=True: displaced unlocked plans are each dry-run rescheduled
+        to verify they can still meet their own due dates. Push is blocked if
+        any displaced SO cannot be rescheduled on time.
         Returns {feasible, final_date, displaced, error}.
         """
         self._reload_masters()
@@ -405,8 +407,17 @@ class Scheduler:
             return {"feasible": False, "final_date": None,
                     "displaced": [], "error": "Target date is in the past"}
 
-        horizon = _ds(d1 + timedelta(days=1))
-        slot_map = self._build_slot_map(_ds(d0), horizon)
+        # Wide horizon covers displaced SO due dates so they can be rescheduled
+        # beyond target_date if needed.
+        all_open = SORepo.all(status="OPEN")
+        max_due = max(
+            (_date(s["due_date"]) for s in all_open if s.get("due_date")),
+            default=d1 + timedelta(days=60),
+        )
+        wide_d1   = max(d1, max_due) + timedelta(days=1)
+        wide_horizon = _ds(wide_d1)
+
+        slot_map = self._build_slot_map(_ds(d0), wide_horizon)
 
         # Return this SO's own unlocked plans to the pool
         own_plans = [p for p in PlanRepo.for_so(so_no, sku_code, line_item)
@@ -420,7 +431,7 @@ class Scheduler:
         # For allow_push: also return other unlocked plans to pool (can be displaced)
         other_plans: List[Dict] = []
         if allow_push:
-            for p in PlanRepo.all(_ds(d0), horizon):
+            for p in PlanRepo.all(_ds(d0), wide_horizon):
                 if p["is_locked"]:
                     continue
                 if (p["so_number"] == so_no and p["sku_code"] == sku_code
@@ -432,6 +443,7 @@ class Scheduler:
                        p["process_name"], p["shift_no"])
                 slot_map[key] = slot_map.get(key, 0.0) + sku_to_inner(p["qty_planned"], uom)
 
+        # Dry-run target SO up to target_date (sim_map is mutated in-place)
         sim_so = {**so, "due_date": target_date}
         sim_map = dict(slot_map)
         slots = self._dry_run_plan_so(sim_so, sim_map, d0, d1)
@@ -444,12 +456,14 @@ class Scheduler:
         final_slots = [s for s in slots if s["is_final"]]
         final_date = max(s["date"] for s in final_slots) if final_slots else None
 
-        # Identify displaced plans
+        # Identify and validate displaced plans
         displaced: List[Dict] = []
         if allow_push and other_plans:
             used_keys = {(s["date"], s["room_code"], s["process_name"], s["shift_no"])
                          for s in slots}
             seen_so_keys: set = set()
+            candidates_to_check: List[tuple] = []
+
             for p in other_plans:
                 pk = (p["plan_date"], p["room_code"],
                       p["process_name"], p["shift_no"])
@@ -462,27 +476,70 @@ class Scheduler:
                 d_so = SORepo.get(p["so_number"], p["sku_code"], p["line_item"])
                 if not d_so:
                     continue
-                d_plans = [x for x in PlanRepo.for_so(
-                    p["so_number"], p["sku_code"], p["line_item"])
-                    if x.get("is_final_seq")]
+                candidates_to_check.append((so_key, d_so))
+
+            # Sort displaced SOs by priority/due — most critical replanned first
+            def _disp_key(item):
+                _, ds = item
+                pri = ds.get("priority")
+                return ((0, pri) if pri is not None else (1, 0),
+                        ds.get("due_date", ""))
+            candidates_to_check.sort(key=_disp_key)
+
+            # sim_map already has target SO's capacity consumed.
+            # Dry-run each displaced SO sequentially in remaining capacity.
+            for (so_no_d, sku_d, li_d), d_so in candidates_to_check:
+                due     = d_so.get("due_date", "")
+                cdd     = d_so.get("committed_due_date") or ""
+                check   = cdd if cdd else due
+                d1_d    = _date(check) if check else wide_d1
+
+                d_plans = [x for x in PlanRepo.for_so(so_no_d, sku_d, li_d)
+                           if x.get("is_final_seq")]
                 cur_comp = (max(x["plan_date"] for x in d_plans)
                             if d_plans else None)
-                due = d_so.get("due_date", "")
-                cdd = d_so.get("committed_due_date") or ""
-                check = cdd if cdd else due
                 status_before = ("LATE" if cur_comp and check and cur_comp > check
                                  else "ON TIME")
+
+                replan_slots = self._dry_run_plan_so(d_so, sim_map, d0, d1_d)
+
+                if not replan_slots:
+                    new_comp      = None
+                    can_reschedule = False
+                    status_after  = "CANNOT REPLAN"
+                else:
+                    fin = [s for s in replan_slots if s.get("is_final")]
+                    new_comp = max(s["date"] for s in fin) if fin else None
+                    can_reschedule = bool(
+                        new_comp and (not check or new_comp <= check))
+                    status_after = "ON TIME" if can_reschedule else "LATE"
+
                 displaced.append({
-                    "so_number":          p["so_number"],
-                    "sku_code":           p["sku_code"],
-                    "line_item":          p["line_item"],
+                    "so_number":          so_no_d,
+                    "sku_code":           sku_d,
+                    "line_item":          li_d,
                     "customer_name":      d_so.get("customer_name") or "",
                     "due_date":           due,
                     "committed_due_date": cdd,
                     "current_completion": cur_comp or "",
+                    "new_completion":     new_comp or "",
                     "status_before":      status_before,
-                    "status_after":       "AT RISK",
+                    "status_after":       status_after,
+                    "can_reschedule":     can_reschedule,
                 })
+
+            # Block push if any displaced SO cannot meet its due date
+            blocking = [d for d in displaced if not d["can_reschedule"]]
+            if blocking:
+                names = ", ".join(
+                    f"{d['so_number']}/{d['sku_code']}" for d in blocking[:3])
+                return {
+                    "feasible": False,
+                    "final_date": final_date,
+                    "displaced": displaced,
+                    "error": (f"Push blocked: displaced SO(s) cannot be rescheduled "
+                              f"within their due dates — {names}"),
+                }
 
         return {"feasible": True, "final_date": final_date,
                 "displaced": displaced, "error": None}
@@ -494,7 +551,8 @@ class Scheduler:
     ) -> Dict:
         """
         Apply pull forward: delete this SO's unlocked plans (+ displaced if
-        allow_push), then re-plan to target_date using backward scheduling.
+        allow_push), re-plan target SO, then automatically re-plan displaced SOs
+        in priority order using remaining capacity.
         """
         self._reload_masters()
         so = SORepo.get(so_no, sku_code, line_item)
@@ -502,23 +560,49 @@ class Scheduler:
             return {"success": False, "error": "SO not found"}
 
         d0 = date.today()
-        d1 = _date(target_date)
-        horizon = _ds(d1 + timedelta(days=1))
+        # Wide horizon so displaced SOs can be rescheduled beyond target_date
+        all_open = SORepo.all(status="OPEN")
+        max_due = max(
+            (_date(s["due_date"]) for s in all_open if s.get("due_date")),
+            default=_date(target_date) + timedelta(days=60),
+        )
+        wide_d1      = max(_date(target_date), max_due) + timedelta(days=1)
+        wide_horizon = _ds(wide_d1)
 
+        # Delete unlocked plans for target SO and all displaced SOs
         PlanRepo.delete_unlocked_for_so(so_no, sku_code, line_item)
         if allow_push:
             for d_item in displaced:
                 PlanRepo.delete_unlocked_for_so(
                     d_item["so_number"], d_item["sku_code"], d_item["line_item"])
 
-        slot_map = self._build_slot_map(_ds(d0), horizon)
+        slot_map = self._build_slot_map(_ds(d0), wide_horizon)
+        report   = {"planned": 0, "skipped": 0, "late": [],
+                    "routing_errors": [], "material_plans": 0}
+
+        # 1. Plan target SO first (force=True so it lands exactly at target_date)
         sim_so = {**so, "due_date": target_date}
-        report = {"planned": 0, "skipped": 0, "late": [],
-                  "routing_errors": [], "material_plans": 0}
         self._plan_so(sim_so, slot_map, _ds(d0), target_date, report, force=True)
 
+        # 2. Auto-replan displaced SOs in priority order using remaining capacity
+        replanned = 0
+        if allow_push:
+            def _disp_sort(item):
+                pri = item.get("priority")
+                return ((0, pri) if pri is not None else (1, 0),
+                        item.get("due_date", ""))
+            for d_item in sorted(displaced, key=_disp_sort):
+                d_so = SORepo.get(d_item["so_number"], d_item["sku_code"],
+                                  d_item["line_item"])
+                if not d_so:
+                    continue
+                due = d_so.get("committed_due_date") or d_so.get("due_date") or wide_horizon
+                self._plan_so(d_so, slot_map, _ds(d0), due, report)
+                replanned += 1
+
         return {"success": True, "planned": report["planned"],
-                "displaced_count": len(displaced), "error": None}
+                "displaced_count": len(displaced),
+                "replanned": replanned, "error": None}
 
     def replan_after_actuals(self, date_from: str, date_to: str) -> Dict:
         self._reload_masters()
