@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QApplication, QDateEdit, QFormLayout, QSpinBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QFrame,
     QLineEdit, QButtonGroup, QSizePolicy, QSplitter, QGroupBox,
-    QListWidget, QListWidgetItem
+    QListWidget, QListWidgetItem, QStyle
 )
 from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, pyqtSignal, QTimer, QThread, QByteArray, QSize
 from PyQt6.QtGui import (
@@ -2075,14 +2075,19 @@ class GanttTab(QWidget):
             " font-size:11px; font-weight:600; color:#3a4255; padding:0 8px; }"
             "QPushButton:hover { background:#f5f6fa; }"
         )
-        btn_snap = QPushButton("Snapshot")
+        _style = QApplication.instance().style()
+        btn_snap = QPushButton("  Snapshot")
+        btn_snap.setIcon(_style.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton))
+        btn_snap.setIconSize(QSize(14, 14))
         btn_snap.setFixedHeight(32)
         btn_snap.setToolTip("Save plan snapshot")
         btn_snap.setStyleSheet(_SNAP_CSS)
         btn_snap.clicked.connect(self._save_snapshot_manual)
         lay.addWidget(btn_snap)
 
-        btn_restore = QPushButton("Time Machine")
+        btn_restore = QPushButton("  Time Machine")
+        btn_restore.setIcon(_style.standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+        btn_restore.setIconSize(QSize(14, 14))
         btn_restore.setFixedHeight(32)
         btn_restore.setToolTip("Browse and restore plan snapshots")
         btn_restore.setStyleSheet(_SNAP_CSS)
