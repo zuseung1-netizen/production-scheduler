@@ -133,8 +133,13 @@ class Scheduler:
         self._plan_all_materials(slot_map, date_from, date_to, report)
 
         # 3. Defragment: reorder unlocked plans to minimise SKU switches
-        defrag = self.defragment(date_from, date_to)
-        report["defrag_moved"] = defrag["moved"]
+        if ConfigRepo.get("defrag_enabled", "1") == "1":
+            defrag = self.defragment(date_from, date_to)
+            report["defrag_moved"]       = defrag["moved"]
+            report["defrag_skipped"]     = defrag.get("skipped_groups", 0)
+            report["defrag_gap_frozen"]  = defrag.get("gap_frozen", 0)
+        else:
+            report["defrag_moved"] = 0
 
         return report
 
@@ -658,20 +663,38 @@ class Scheduler:
         return report
 
     def defragment(self, date_from: str, date_to: str) -> Dict:
-        """Post-pass: reorder unlocked SKU plans within each (room, process) so
-        that same-SKU plans occupy consecutive slots, minimising changeovers.
-        Locked plans are not moved.  If reordering a room+process would push any
-        plan past its SO hard deadline the whole group is left untouched.
-        Returns {"moved": N, "skipped_groups": M}."""
+        """Post-pass: reorder unlocked SKU plans within each (room, process) to
+        pack same-SKU blocks consecutively, minimising changeovers.
+
+        Improvements over v1:
+        - Topological order: groups with lower process_seq are defragged first
+          so predecessor slots are stable when checking gap constraints.
+        - gap_ok per-plan: each reassignment is validated against min_gap_shifts
+          of the routing step. Plans that would violate a gap are frozen in place;
+          only the failing plan is frozen, not the whole group.
+        - Smart sort key: (sku, earliest_allowable_start, deadline) — gap-constrained
+          plans are front-loaded to reduce downstream violations.
+        - plan_slot_map updated after each group so later groups see current positions.
+
+        Returns {"moved": N, "skipped_groups": M, "gap_frozen": K}.
+        """
+        from collections import defaultdict as _dd
+        from data.repositories import ProcessRoutingRepo as _PRR
+
         self._reload_masters()
+        shift_nos = sorted(s["shift_no"] for s in self.shifts)
 
-        shift_nos = [s["shift_no"] for s in sorted(self.shifts, key=lambda s: s["shift_no"])]
+        # ── routing maps ──────────────────────────────────────────────────────
+        all_routing = _PRR.all()
+        # (entity_code, process_name) → step dict
+        routing_by_proc: Dict[Tuple, Dict] = {}
+        # entity_code → {process_seq → step}
+        routing_by_seq: Dict[str, Dict[int, Dict]] = {}
+        for step in all_routing:
+            routing_by_proc[(step["entity_code"], step["process_name"])] = step
+            routing_by_seq.setdefault(step["entity_code"], {})[step["process_seq"]] = step
 
-        def _slot_ord(date_str: str, shift_no: int) -> Tuple:
-            idx = shift_nos.index(shift_no) if shift_no in shift_nos else 0
-            return (date_str, idx)
-
-        # Hard deadline per plan key (SO due − post_lead_days)
+        # ── hard deadline per (so, sku, line) ────────────────────────────────
         hard_deadline: Dict[Tuple, str] = {}
         for so in SORepo.all("OPEN"):
             k = (so["so_number"], so["sku_code"], so["line_item"])
@@ -684,59 +707,150 @@ class Scheduler:
             return hard_deadline.get(
                 (p["so_number"], p["sku_code"], p["line_item"]), date_to)
 
+        # ── all SKU plans in range ────────────────────────────────────────────
         all_plans = [p for p in PlanRepo.all(date_from, date_to)
                      if p.get("entity_type") != "MATERIAL"]
 
-        # Group by (room, process)
-        from collections import defaultdict as _dd
+        # ── global slot index: chronological order for gap arithmetic ─────────
+        all_date_shifts = sorted(
+            {(p["plan_date"], p["shift_no"]) for p in all_plans},
+            key=lambda ds: (ds[0], shift_nos.index(ds[1]) if ds[1] in shift_nos else 0)
+        )
+        slot_global_idx: Dict[Tuple, int] = {ds: i for i, ds in enumerate(all_date_shifts)}
+
+        def _sidx(date_str: str, shift_no: int) -> int:
+            return slot_global_idx.get((date_str, shift_no), 0)
+
+        # ── plan_slot_map: (so, line, entity_code, process_seq) → (date, shift)
+        # Mutable: updated after each group so later groups see current positions.
+        plan_slot_map: Dict[Tuple, Tuple] = {}
+        for p in all_plans:
+            step = routing_by_proc.get((p["entity_code"], p["process_name"]))
+            if step:
+                key = (p["so_number"], p["line_item"],
+                       p["entity_code"], step["process_seq"])
+                plan_slot_map[key] = (p["plan_date"], p["shift_no"])
+
+        # ── gap validation ─────────────────────────────────────────────────────
+        def _gap_ok(plan: Dict, new_date: str, new_shift: int) -> bool:
+            step = routing_by_proc.get((plan["entity_code"], plan["process_name"]))
+            if not step:
+                return True
+            seq = step["process_seq"]
+            ec  = plan["entity_code"]
+            so  = plan["so_number"]
+            line = plan["line_item"]
+            new_idx = _sidx(new_date, new_shift)
+
+            # Predecessor: new_idx must be >= pre_idx + 1 + step.min_gap_shifts
+            if seq > 1:
+                pre_slot = plan_slot_map.get((so, line, ec, seq - 1))
+                if pre_slot:
+                    gap_needed = 1 + int(step.get("min_gap_shifts") or 0)
+                    if new_idx < _sidx(*pre_slot) + gap_needed:
+                        return False
+
+            # Successor: post_idx must still be >= new_idx + 1 + post_step.min_gap_shifts
+            post_step = routing_by_seq.get(ec, {}).get(seq + 1)
+            if post_step:
+                post_slot = plan_slot_map.get((so, line, ec, seq + 1))
+                if post_slot:
+                    gap_needed = 1 + int(post_step.get("min_gap_shifts") or 0)
+                    if _sidx(*post_slot) < new_idx + gap_needed:
+                        return False
+
+            return True
+
+        # ── group by (room, process), sort in topological (process_seq) order ─
         groups: Dict[Tuple, List[Dict]] = _dd(list)
         for p in all_plans:
             groups[(p["room_code"], p["process_name"])].append(p)
 
+        def _group_min_seq(plans: List[Dict]) -> int:
+            seqs = []
+            for p in plans:
+                step = routing_by_proc.get((p["entity_code"], p["process_name"]))
+                if step:
+                    seqs.append(step["process_seq"])
+            return min(seqs) if seqs else 999
+
+        sorted_groups = sorted(groups.items(), key=lambda item: _group_min_seq(item[1]))
+
         moved = 0
         skipped = 0
+        gap_frozen = 0
 
-        for (room, proc), plans in groups.items():
+        for (room, proc), plans in sorted_groups:
             unlocked = [p for p in plans if not p["is_locked"]]
             if len(unlocked) < 2:
                 continue
 
-            # Check if already no switches between SKUs (already optimal)
-            sorted_now = sorted(unlocked, key=lambda p: _slot_ord(p["plan_date"], p["shift_no"]))
+            # Already optimal (no SKU switches)?
+            sorted_now = sorted(unlocked, key=lambda p: _sidx(p["plan_date"], p["shift_no"]))
             skus_now = [p["sku_code"] for p in sorted_now]
-            if all(skus_now[i] == skus_now[i-1] for i in range(1, len(skus_now))):
+            if all(skus_now[i] == skus_now[i - 1] for i in range(1, len(skus_now))):
                 continue
 
-            # Target slot list = chronological (date, shift) list of unlocked plan slots
-            flat_slots = sorted(
-                [_slot_ord(p["plan_date"], p["shift_no"]) for p in unlocked])
+            # Chronological slot pool (may have duplicates for stacked plans)
+            slot_pool = sorted(
+                [(p["plan_date"], p["shift_no"]) for p in unlocked],
+                key=lambda ds: _sidx(*ds)
+            )
 
-            # Desired order: group by SKU, within SKU sort by deadline then original slot
+            # Earliest allowable start per plan (predecessor-constrained)
+            def _earliest(p: Dict) -> int:
+                step = routing_by_proc.get((p["entity_code"], p["process_name"]))
+                if not step or step["process_seq"] <= 1:
+                    return 0
+                pre_slot = plan_slot_map.get(
+                    (p["so_number"], p["line_item"],
+                     p["entity_code"], step["process_seq"] - 1))
+                if not pre_slot:
+                    return 0
+                return _sidx(*pre_slot) + 1 + int(step.get("min_gap_shifts") or 0)
+
+            # Sort: (sku, earliest_allowable_start, deadline, original_slot)
             desired = sorted(unlocked, key=lambda p: (
                 p["sku_code"],
+                _earliest(p),
                 _deadline(p),
-                _slot_ord(p["plan_date"], p["shift_no"]),
+                _sidx(p["plan_date"], p["shift_no"]),
             ))
 
-            # Reconstruct actual (date, shift) from slot ordinal
-            ord_to_slot: Dict[Tuple, Tuple] = {}
-            for p in unlocked:
-                ord_to_slot[_slot_ord(p["plan_date"], p["shift_no"])] = (
-                    p["plan_date"], p["shift_no"])
-
-            # Build assignments: plan → new (date, shift)
+            # Greedy assignment with per-plan gap check
+            remaining_pool = list(slot_pool)  # mutable copy
             assignments: List[Tuple[Dict, str, int]] = []
-            for plan, slot_ord in zip(desired, flat_slots):
-                new_date, new_shift = ord_to_slot[slot_ord]
-                assignments.append((plan, new_date, new_shift))
 
-            # Validate: no plan pushed past its hard deadline
+            for plan in desired:
+                placed = False
+                for i, (nd, ns) in enumerate(remaining_pool):
+                    if _gap_ok(plan, nd, ns):
+                        assignments.append((plan, nd, ns))
+                        remaining_pool.pop(i)
+                        placed = True
+                        break
+                if not placed:
+                    # Freeze at original slot
+                    orig = (plan["plan_date"], plan["shift_no"])
+                    assignments.append((plan, orig[0], orig[1]))
+                    try:
+                        remaining_pool.remove(orig)
+                    except ValueError:
+                        pass
+                    gap_frozen += 1
+
+            # Validate deadlines (skip whole group if any violation)
             if any(new_date > _deadline(plan) for plan, new_date, _ in assignments):
                 skipped += 1
                 continue
 
-            # Apply
+            # Apply and update plan_slot_map
             for plan, new_date, new_shift in assignments:
+                step = routing_by_proc.get((plan["entity_code"], plan["process_name"]))
+                if step:
+                    plan_slot_map[(plan["so_number"], plan["line_item"],
+                                   plan["entity_code"], step["process_seq"])] = \
+                        (new_date, new_shift)
                 if plan["plan_date"] == new_date and plan["shift_no"] == new_shift:
                     continue
                 PlanRepo.update(plan["plan_id"],
@@ -744,7 +858,7 @@ class Scheduler:
                                 reason="defragment")
                 moved += 1
 
-        return {"moved": moved, "skipped_groups": skipped}
+        return {"moved": moved, "skipped_groups": skipped, "gap_frozen": gap_frozen}
 
     def detect_conflicts(self, date_from: str, date_to: str) -> List[Dict]:
         # _reload_masters() is intentionally NOT called here —

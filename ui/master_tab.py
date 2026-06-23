@@ -1163,6 +1163,10 @@ class AppConfigWidget(QWidget):
         self.assign_mode.setCurrentIndex(0 if cur_mode == "CAPACITY" else 1)
         form.addRow("Room Assignment Mode:", self.assign_mode)
 
+        self.defrag_enabled = QCheckBox("Run defragment pass after auto-plan")
+        self.defrag_enabled.setChecked(ConfigRepo.get("defrag_enabled", "1") == "1")
+        form.addRow("Defragment:", self.defrag_enabled)
+
         self.crp_path = QLineEdit(ConfigRepo.get("crp_excel_path", ""))
         btn_browse = QPushButton("Browse…")
         btn_browse.clicked.connect(self._browse_crp)
@@ -1256,6 +1260,7 @@ class AppConfigWidget(QWidget):
         ConfigRepo.set("crp_excel_path",     self.crp_path.text())
         ConfigRepo.set("room_assign_mode",   self.assign_mode.currentText())
         ConfigRepo.set("material_due_merge_days", str(self.merge_days.value()))
+        ConfigRepo.set("defrag_enabled",     "1" if self.defrag_enabled.isChecked() else "0")
         QMessageBox.information(self, "Saved", "Settings saved.")
 
 
