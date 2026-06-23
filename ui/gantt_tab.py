@@ -2055,10 +2055,10 @@ class GanttTab(QWidget):
         sfl.addWidget(self.search_edit)
         lay.addWidget(sf)
 
-        # KPI pills (frame + inner text label)
-        self._pill_ok,   self._pill_ok_lbl   = self._make_kpi_pill("#e6f4ea", "#1d8a4a", "#2bab5e")
-        self._pill_risk, self._pill_risk_lbl = self._make_kpi_pill("#fef3e0", "#b9760a", "#e09a1f")
-        self._pill_late, self._pill_late_lbl = self._make_kpi_pill("#fbe7e7", "#c2342f", "#e0413a")
+        # KPI pills
+        self._pill_ok   = self._make_kpi_pill("#e6f4ea", "#1d8a4a", "#2bab5e")
+        self._pill_risk = self._make_kpi_pill("#fef3e0", "#b9760a", "#e09a1f")
+        self._pill_late = self._make_kpi_pill("#fbe7e7", "#c2342f", "#e0413a")
         self._pill_ok.setToolTip("Filter: On Time only (click to toggle)")
         self._pill_risk.setToolTip("Filter: At Risk only (click to toggle)")
         self._pill_late.setToolTip("Filter: Late only (click to toggle)")
@@ -2187,31 +2187,34 @@ class GanttTab(QWidget):
 
     @staticmethod
     def _make_kpi_pill(bg: str, fg: str, dot_clr: str):
-        """Returns (QPushButton pill, inner text_label). Button is checkable for filter toggle."""
-        btn = QPushButton()
+        """Returns a checkable QPushButton pill for status filtering."""
+        from PyQt6.QtGui import QColor
+
+        def _darken(hex_color: str, factor: float) -> str:
+            c = QColor(hex_color)
+            h, s, v, a = c.getHsvF()
+            c.setHsvF(h, min(s * (1 + factor * 0.3), 1.0), max(v - factor * 0.15, 0.0), a)
+            return c.name()
+
+        bg_hover   = _darken(bg, 0.3)
+        bg_checked = _darken(bg, 0.55)
+
+        btn = QPushButton(f"● —")
         btn.setCheckable(True)
-        btn.setFixedHeight(22)
+        btn.setFixedHeight(24)
         btn.setStyleSheet(
-            f"QPushButton {{ background:{bg}; border-radius:10px; border:none;"
-            f" padding:0 10px 0 9px; }}"
-            f"QPushButton:checked {{ border:2px solid {dot_clr}; }}"
-            f"QPushButton:hover {{ opacity:0.85; }}"
+            f"QPushButton {{"
+            f"  background:{bg}; color:{fg}; border-radius:12px; border:none;"
+            f"  padding:0 12px; font-size:11px; font-weight:600;"
+            f"}}"
+            f"QPushButton:hover {{"
+            f"  background:{bg_hover};"
+            f"}}"
+            f"QPushButton:checked {{"
+            f"  background:{bg_checked}; font-weight:700;"
+            f"}}"
         )
-        lay = QHBoxLayout(btn)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(5)
-
-        dot = QLabel("●")
-        dot.setStyleSheet(f"color:{dot_clr}; font-size:7px; background:transparent; border:none;")
-        dot.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        lay.addWidget(dot)
-
-        txt = QLabel("—")
-        txt.setStyleSheet(
-            f"color:{fg}; font-size:10px; font-weight:700; background:transparent; border:none;")
-        txt.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        lay.addWidget(txt)
-        return btn, txt
+        return btn
 
     def _update_kpi_pills(self):
         """Count OPEN SOs by schedule status and update KPI pill labels."""
@@ -2235,9 +2238,9 @@ class GanttTab(QWidget):
                     at_risk += 1
                 else:
                     on_time += 1
-            self._pill_ok_lbl.setText(f"On time  {on_time}")
-            self._pill_risk_lbl.setText(f"At risk  {at_risk}")
-            self._pill_late_lbl.setText(f"Late  {late}")
+            self._pill_ok.setText(f"● On time  {on_time}")
+            self._pill_risk.setText(f"● At risk  {at_risk}")
+            self._pill_late.setText(f"● Late  {late}")
         except Exception:
             pass
 
