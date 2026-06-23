@@ -132,6 +132,10 @@ class Scheduler:
         # 2. Plan derived Material demand
         self._plan_all_materials(slot_map, date_from, date_to, report)
 
+        # 3. Defragment: reorder unlocked plans to minimise SKU switches
+        defrag = self.defragment(date_from, date_to)
+        report["defrag_moved"] = defrag["moved"]
+
         return report
 
     def _apply_campaign_grouping(self, open_sos: List[Dict]) -> List[Dict]:
@@ -652,6 +656,95 @@ class Scheduler:
              for x in plan_report["late"]]
         )
         return report
+
+    def defragment(self, date_from: str, date_to: str) -> Dict:
+        """Post-pass: reorder unlocked SKU plans within each (room, process) so
+        that same-SKU plans occupy consecutive slots, minimising changeovers.
+        Locked plans are not moved.  If reordering a room+process would push any
+        plan past its SO hard deadline the whole group is left untouched.
+        Returns {"moved": N, "skipped_groups": M}."""
+        self._reload_masters()
+
+        shift_nos = [s["shift_no"] for s in sorted(self.shifts, key=lambda s: s["shift_no"])]
+
+        def _slot_ord(date_str: str, shift_no: int) -> Tuple:
+            idx = shift_nos.index(shift_no) if shift_no in shift_nos else 0
+            return (date_str, idx)
+
+        # Hard deadline per plan key (SO due − post_lead_days)
+        hard_deadline: Dict[Tuple, str] = {}
+        for so in SORepo.all("OPEN"):
+            k = (so["so_number"], so["sku_code"], so["line_item"])
+            sku = self.sku_map.get(so["sku_code"], {})
+            lead = int(sku.get("post_lead_days") or 0)
+            dl = (date.fromisoformat(so["due_date"]) - timedelta(days=lead)).isoformat()
+            hard_deadline[k] = dl
+
+        def _deadline(p: Dict) -> str:
+            return hard_deadline.get(
+                (p["so_number"], p["sku_code"], p["line_item"]), date_to)
+
+        all_plans = [p for p in PlanRepo.all(date_from, date_to)
+                     if p.get("entity_type") != "MATERIAL"]
+
+        # Group by (room, process)
+        from collections import defaultdict as _dd
+        groups: Dict[Tuple, List[Dict]] = _dd(list)
+        for p in all_plans:
+            groups[(p["room_code"], p["process_name"])].append(p)
+
+        moved = 0
+        skipped = 0
+
+        for (room, proc), plans in groups.items():
+            unlocked = [p for p in plans if not p["is_locked"]]
+            if len(unlocked) < 2:
+                continue
+
+            # Check if already no switches between SKUs (already optimal)
+            sorted_now = sorted(unlocked, key=lambda p: _slot_ord(p["plan_date"], p["shift_no"]))
+            skus_now = [p["sku_code"] for p in sorted_now]
+            if all(skus_now[i] == skus_now[i-1] for i in range(1, len(skus_now))):
+                continue
+
+            # Target slot list = chronological (date, shift) list of unlocked plan slots
+            flat_slots = sorted(
+                [_slot_ord(p["plan_date"], p["shift_no"]) for p in unlocked])
+
+            # Desired order: group by SKU, within SKU sort by deadline then original slot
+            desired = sorted(unlocked, key=lambda p: (
+                p["sku_code"],
+                _deadline(p),
+                _slot_ord(p["plan_date"], p["shift_no"]),
+            ))
+
+            # Reconstruct actual (date, shift) from slot ordinal
+            ord_to_slot: Dict[Tuple, Tuple] = {}
+            for p in unlocked:
+                ord_to_slot[_slot_ord(p["plan_date"], p["shift_no"])] = (
+                    p["plan_date"], p["shift_no"])
+
+            # Build assignments: plan → new (date, shift)
+            assignments: List[Tuple[Dict, str, int]] = []
+            for plan, slot_ord in zip(desired, flat_slots):
+                new_date, new_shift = ord_to_slot[slot_ord]
+                assignments.append((plan, new_date, new_shift))
+
+            # Validate: no plan pushed past its hard deadline
+            if any(new_date > _deadline(plan) for plan, new_date, _ in assignments):
+                skipped += 1
+                continue
+
+            # Apply
+            for plan, new_date, new_shift in assignments:
+                if plan["plan_date"] == new_date and plan["shift_no"] == new_shift:
+                    continue
+                PlanRepo.update(plan["plan_id"],
+                                {"plan_date": new_date, "shift_no": new_shift},
+                                reason="defragment")
+                moved += 1
+
+        return {"moved": moved, "skipped_groups": skipped}
 
     def detect_conflicts(self, date_from: str, date_to: str) -> List[Dict]:
         # _reload_masters() is intentionally NOT called here —
