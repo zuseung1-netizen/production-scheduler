@@ -111,6 +111,7 @@ class SOTab(QWidget):
         # SO table
         self.table = QTableWidget()
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         self.table.setSortingEnabled(True)
@@ -250,28 +251,51 @@ class SOTab(QWidget):
         row = self.table.rowAt(pos.y())
         if row < 0:
             return
+
+        # Collect all selected rows (ExtendedSelection may have multiple)
+        selected_rows = sorted({idx.row() for idx in self.table.selectedIndexes()})
+        if not selected_rows:
+            selected_rows = [row]
+
+        # Primary row (where right-click landed) drives single-item actions
         so_no  = self.table.item(row, 0).text()
         sku    = self.table.item(row, 1).text()
         li     = self.table.item(row, 2).text()
         status = self.table.item(row, 11).text()  # col 11 = Status
 
         menu = QMenu(self)
-        menu.addAction("✏ Edit",    lambda: self._edit_row())
-        if status != "HOLD":
-            menu.addAction("⏸ Hold",  lambda: self._set_hold(so_no, sku, li, True))
+
+        if len(selected_rows) == 1:
+            # ── Single-row actions ────────────────────────────────────────────
+            menu.addAction("✏ Edit",    lambda: self._edit_row())
+            if status != "HOLD":
+                menu.addAction("⏸ Hold",  lambda: self._set_hold(so_no, sku, li, True))
+            else:
+                menu.addAction("▶ Unhold", lambda: self._set_hold(so_no, sku, li, False))
+            if status in ("OPEN", "HOLD"):
+                menu.addAction("✂ Split", lambda: self._split_so(so_no, sku, li))
+            menu.addAction("🚫 Close",  lambda: self._close_so(so_no, sku, li))
+            menu.addAction("⭐ Set Priority", lambda: self._set_priority(so_no, sku, li))
+            menu.addAction("📅 Set Start-No-Earlier", lambda: self._set_start_date(so_no, sku, li))
+            menu.addSeparator()
+            menu.addAction("📦 Allocate Inventory", lambda: self._open_inv_allocation(so_no, sku, li))
+            menu.addSeparator()
+            act_del = menu.addAction("🗑 Delete SO")
+            act_del.triggered.connect(lambda: self._delete_so(so_no, sku, li))
         else:
-            menu.addAction("▶ Unhold", lambda: self._set_hold(so_no, sku, li, False))
-        if status in ("OPEN", "HOLD"):
-            menu.addAction("✂ Split", lambda: self._split_so(so_no, sku, li))
-        menu.addAction("🚫 Close",  lambda: self._close_so(so_no, sku, li))
-        menu.addAction("⭐ Set Priority", lambda: self._set_priority(so_no, sku, li))
-        menu.addAction("📅 Set Start-No-Earlier", lambda: self._set_start_date(so_no, sku, li))
-        menu.addSeparator()
-        menu.addAction("📦 Allocate Inventory", lambda: self._open_inv_allocation(so_no, sku, li))
-        menu.addSeparator()
-        act_del = menu.addAction("🗑 Delete SO")
-        act_del.setToolTip("Permanently remove this SO and its unlocked plans")
-        act_del.triggered.connect(lambda: self._delete_so(so_no, sku, li))
+            # ── Multi-row actions ─────────────────────────────────────────────
+            n = len(selected_rows)
+            act_del = menu.addAction(f"🗑 Delete Selected ({n})")
+            # Capture keys at menu-build time to avoid closure capture issues
+            keys = [
+                (self.table.item(r, 0).text(),
+                 self.table.item(r, 1).text(),
+                 self.table.item(r, 2).text())
+                for r in selected_rows
+                if self.table.item(r, 0)
+            ]
+            act_del.triggered.connect(lambda _=None, k=keys: self._delete_so_bulk(k))
+
         menu.exec(QCursor.pos())
 
     def _edit_row(self):
@@ -428,6 +452,34 @@ class SOTab(QWidget):
         if ans != QMessageBox.StandardButton.Yes:
             return
         SORepo.delete(so_no, sku, li)
+        self.refresh()
+        if self.main_window and hasattr(self.main_window, "gantt_tab"):
+            self.main_window.gantt_tab.refresh()
+
+    def _delete_so_bulk(self, keys: list):
+        """Delete multiple SOs at once. keys = [(so_no, sku, li), ...]"""
+        from data.repositories import PlanRepo
+        total_locked = sum(
+            sum(1 for p in PlanRepo.for_so(sn, sk, li) if p.get("is_locked"))
+            for sn, sk, li in keys
+        )
+        warn = ""
+        if total_locked:
+            warn = (f"\n\n⚠ {total_locked} locked plan(s) across selected SOs "
+                    "will NOT be deleted. Unlock them first if needed.")
+        names = "\n".join(f"  • {sn} / {sk} / {li}" for sn, sk, li in keys[:10])
+        if len(keys) > 10:
+            names += f"\n  … and {len(keys) - 10} more"
+        ans = QMessageBox.question(
+            self, f"Delete {len(keys)} SOs",
+            f"Permanently delete {len(keys)} SO(s)?\n{names}\n\n"
+            f"Unlocked plans and inventory allocations will also be removed."
+            f"{warn}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        for sn, sk, li in keys:
+            SORepo.delete(sn, sk, li)
         self.refresh()
         if self.main_window and hasattr(self.main_window, "gantt_tab"):
             self.main_window.gantt_tab.refresh()
