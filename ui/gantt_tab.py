@@ -1314,22 +1314,6 @@ class GanttCanvas(QWidget):
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawRoundedRect(rect.adjusted(1, 1, -1, -1), CARD_RADIUS, CARD_RADIUS)
 
-            # ── Stack position badge when multiple plans share this slot ──────
-            slot_idx, slot_total = self._plan_layout.get(plan["plan_id"], (0, 1))
-            if slot_total > 1:
-                _sb_txt  = f"#{slot_idx + 1}"
-                _sb_font = QFont("Segoe UI", 6, QFont.Weight.Bold)
-                _sb_w    = QFontMetrics(_sb_font).horizontalAdvance(_sb_txt) + 6
-                _sb_h    = 11
-                _sb_r    = QRect(rect.right() - _sb_w - 2,
-                                 rect.bottom() - _sb_h - 1, _sb_w, _sb_h)
-                p.setBrush(QBrush(QColor(37, 99, 235, 200)))
-                p.setPen(Qt.PenStyle.NoPen)
-                p.drawRoundedRect(_sb_r, 3, 3)
-                p.setPen(QPen(Qt.GlobalColor.white))
-                p.setFont(_sb_font)
-                p.drawText(_sb_r, Qt.AlignmentFlag.AlignCenter, _sb_txt)
-
             # ── PILL ROW (top PILL_H px) ──────────────────────────────────────
             pill_y = rect.y() + PILL_MARGIN
             cb = cb_vis
