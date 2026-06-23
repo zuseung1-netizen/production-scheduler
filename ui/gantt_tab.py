@@ -2134,41 +2134,41 @@ class GanttTab(QWidget):
         sep.setFixedWidth(1)
         lay.addWidget(sep)
 
+        _st = QApplication.instance().style()
+        _icon_css = (
+            "QPushButton { border:1px solid #e2e4ea; border-radius:5px; background:#fff; }"
+            "QPushButton:hover:enabled { background:#f5f6fa; }"
+            "QPushButton:disabled { opacity:0.4; }"
+        )
+
         # Icon: Undo
-        self._btn_undo = QPushButton("↩")
+        self._btn_undo = QPushButton()
+        self._btn_undo.setIcon(_st.standardIcon(QStyle.StandardPixmap.SP_ArrowBack))
+        self._btn_undo.setIconSize(QSize(16, 16))
         self._btn_undo.setFixedSize(32, 32)
         self._btn_undo.setToolTip("Undo last action (Ctrl+Z)")
         self._btn_undo.setEnabled(False)
-        self._btn_undo.setStyleSheet(
-            "QPushButton { border:1px solid #e2e4ea; border-radius:5px; background:#fff;"
-            " font-size:14px; }"
-            "QPushButton:hover:enabled { background:#f5f6fa; }"
-            "QPushButton:disabled { color:#bbb; }"
-        )
+        self._btn_undo.setStyleSheet(_icon_css)
         self._btn_undo.clicked.connect(self._undo_last)
         lay.addWidget(self._btn_undo)
 
         # Icon: Refresh CRP
-        btn_crp = QPushButton("♻")
+        btn_crp = QPushButton()
+        btn_crp.setIcon(_st.standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+        btn_crp.setIconSize(QSize(16, 16))
         btn_crp.setFixedSize(32, 32)
         btn_crp.setToolTip("Refresh CRP")
-        btn_crp.setStyleSheet(
-            "QPushButton { border:1px solid #e2e4ea; border-radius:5px; background:#fff;"
-            " font-size:14px; }"
-            "QPushButton:hover { background:#f5f6fa; }"
-        )
+        btn_crp.setStyleSheet(_icon_css)
         btn_crp.clicked.connect(self._on_crp_refresh)
         lay.addWidget(btn_crp)
 
         # Icon: New Window
-        btn_win = QPushButton("⧉")
+        btn_win = QPushButton()
+        btn_win.setIcon(_st.standardIcon(QStyle.StandardPixmap.SP_TitleBarMaxButton))
+        btn_win.setIconSize(QSize(16, 16))
         btn_win.setFixedSize(32, 32)
         btn_win.setToolTip("New Window (Ctrl+N)")
-        btn_win.setStyleSheet(
-            "QPushButton { border:1px solid #e2e4ea; border-radius:5px; background:#fff;"
-            " font-size:14px; }"
-            "QPushButton:hover { background:#f5f6fa; }"
-        )
+        btn_win.setStyleSheet(_icon_css)
         btn_win.clicked.connect(self._on_new_window)
         lay.addWidget(btn_win)
 
