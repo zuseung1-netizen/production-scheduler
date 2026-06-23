@@ -424,7 +424,10 @@ class SORepo:
                 params.append(order_type)
             where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
             rows = conn.execute(
-                f"SELECT * FROM sales_order {where} ORDER BY status,priority,received_at",
+                f"SELECT * FROM sales_order {where} ORDER BY "
+                "CASE status WHEN 'OPEN' THEN 0 WHEN 'HOLD' THEN 1 WHEN 'CLOSED' THEN 2 ELSE 3 END,"
+                "CASE WHEN priority IS NULL THEN 9999 ELSE priority END,"
+                "received_at",
                 params).fetchall()
         return _rows_to_dicts(rows)
 
