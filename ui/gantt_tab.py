@@ -724,6 +724,7 @@ class GanttCanvas(QWidget):
         self._rows     : List[str]  = []
         self._conflicts: List[Dict] = []
         self._search_filter: str    = ""
+        self._status_filter: str    = ""   # "on_time" | "at_risk" | "late" | ""
 
         self._checked  : Set[int] = set()
         self._drag_plan_id  : Optional[int]    = None
@@ -790,6 +791,11 @@ class GanttCanvas(QWidget):
 
     def set_search_filter(self, text: str):
         self._search_filter = text
+        self.update()
+
+    def set_status_filter(self, status: str):
+        """Filter by schedule status: 'on_time', 'at_risk', 'late', or '' to clear."""
+        self._status_filter = status
         self.update()
 
     def _is_holiday(self, d: date) -> bool:
@@ -1224,20 +1230,30 @@ class GanttCanvas(QWidget):
             self._check_hit_rects[plan["plan_id"]] = QRect(cx - 10, cy - 10, 20, 20)
 
             # Search filter: dim non-matching plans
+            so_rec = self._sos.get((plan["so_number"], plan["sku_code"], plan["line_item"]))
+            dim_out = False
             if self._search_filter:
                 haystack = " ".join(filter(None, [
                     plan.get("so_number", ""), plan.get("sku_code", ""),
                     plan.get("entity_code", ""), plan.get("room_code", ""),
                     plan.get("process_name", ""),
-                    (self._sos.get((plan["so_number"], plan["sku_code"],
-                                    plan["line_item"])) or {}).get("customer_name", ""),
+                    (so_rec or {}).get("customer_name", ""),
                 ])).lower()
                 if self._search_filter not in haystack:
-                    p.setOpacity(0.15)
+                    dim_out = True
+
+            # Status filter: dim plans whose SO doesn't match selected status
+            if self._status_filter and not dim_out:
+                due_str = (so_rec or {}).get("due_date")
+                if due_str:
+                    days = (datetime.strptime(due_str, "%Y-%m-%d").date() - date.today()).days
+                    so_status = "late" if days < 0 else ("at_risk" if days <= 3 else "on_time")
                 else:
-                    p.setOpacity(1.0)
-            else:
-                p.setOpacity(1.0)
+                    so_status = "on_time"
+                if so_status != self._status_filter:
+                    dim_out = True
+
+            p.setOpacity(0.12 if dim_out else 1.0)
 
             is_mat = plan.get("entity_type") == "MATERIAL"
             so = self._sos.get((plan["so_number"], plan["sku_code"], plan["line_item"]))
@@ -2043,6 +2059,12 @@ class GanttTab(QWidget):
         self._pill_ok,   self._pill_ok_lbl   = self._make_kpi_pill("#e6f4ea", "#1d8a4a", "#2bab5e")
         self._pill_risk, self._pill_risk_lbl = self._make_kpi_pill("#fef3e0", "#b9760a", "#e09a1f")
         self._pill_late, self._pill_late_lbl = self._make_kpi_pill("#fbe7e7", "#c2342f", "#e0413a")
+        self._pill_ok.setToolTip("Filter: On Time only (click to toggle)")
+        self._pill_risk.setToolTip("Filter: At Risk only (click to toggle)")
+        self._pill_late.setToolTip("Filter: Late only (click to toggle)")
+        self._pill_ok.clicked.connect(lambda: self._on_pill_clicked("on_time"))
+        self._pill_risk.clicked.connect(lambda: self._on_pill_clicked("at_risk"))
+        self._pill_late.clicked.connect(lambda: self._on_pill_clicked("late"))
         lay.addWidget(self._pill_ok)
         lay.addWidget(self._pill_risk)
         lay.addWidget(self._pill_late)
@@ -2165,23 +2187,31 @@ class GanttTab(QWidget):
 
     @staticmethod
     def _make_kpi_pill(bg: str, fg: str, dot_clr: str):
-        """Returns (container_frame, text_label) for a KPI pill with colored dot."""
-        frame = QFrame()
-        frame.setFixedHeight(22)
-        frame.setStyleSheet(f"QFrame {{ background:{bg}; border-radius:10px; border:none; }}")
-        lay = QHBoxLayout(frame)
-        lay.setContentsMargins(9, 0, 10, 0)
+        """Returns (QPushButton pill, inner text_label). Button is checkable for filter toggle."""
+        btn = QPushButton()
+        btn.setCheckable(True)
+        btn.setFixedHeight(22)
+        btn.setStyleSheet(
+            f"QPushButton {{ background:{bg}; border-radius:10px; border:none;"
+            f" padding:0 10px 0 9px; }}"
+            f"QPushButton:checked {{ border:2px solid {dot_clr}; }}"
+            f"QPushButton:hover {{ opacity:0.85; }}"
+        )
+        lay = QHBoxLayout(btn)
+        lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(5)
 
         dot = QLabel("●")
         dot.setStyleSheet(f"color:{dot_clr}; font-size:7px; background:transparent; border:none;")
+        dot.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         lay.addWidget(dot)
 
         txt = QLabel("—")
         txt.setStyleSheet(
             f"color:{fg}; font-size:10px; font-weight:700; background:transparent; border:none;")
+        txt.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         lay.addWidget(txt)
-        return frame, txt
+        return btn, txt
 
     def _update_kpi_pills(self):
         """Count OPEN SOs by schedule status and update KPI pill labels."""
@@ -2214,6 +2244,16 @@ class GanttTab(QWidget):
     def _on_search_changed(self, text: str):
         if hasattr(self, "canvas"):
             self.canvas.set_search_filter(text.strip().lower())
+
+    def _on_pill_clicked(self, status: str):
+        """Toggle status filter. Clicking the active filter again clears it."""
+        pills = {"on_time": self._pill_ok, "at_risk": self._pill_risk, "late": self._pill_late}
+        active = status if pills[status].isChecked() else ""
+        # Uncheck all others
+        for key, pill in pills.items():
+            pill.setChecked(key == active)
+        if hasattr(self, "canvas"):
+            self.canvas.set_status_filter(active)
 
     def _on_crp_refresh(self):
         if self.main_window and hasattr(self.main_window, "_refresh_crp"):
