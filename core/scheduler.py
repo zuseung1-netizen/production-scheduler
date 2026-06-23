@@ -1380,9 +1380,32 @@ class Scheduler:
             allocated: List[Tuple] = []
             step_rem = qty_to_plan
             proc_name = step["process_name"]
+
+            # Closing-mode: track per-shift placements so that when remaining
+            # qty < total capacity across all candidate rooms for a shift,
+            # we restrict to a single room (best by cap) to prevent overproduction/scrap.
+            _closing_placed: Dict[Tuple[str, int], str] = {}  # (ds, sno) -> room chosen
+
             for ds, sno, room_code, rp in candidates:
                 if step_rem <= 0:
                     break
+
+                # Campaign closing: check if remaining < sum of all rooms' cap this shift
+                _shift_key = (ds, sno)
+                if _shift_key not in _closing_placed:
+                    _total_shift_cap = sum(
+                        inner_to_sku(slot_map.get((_ds, _r, proc_name, _sno), 0.0), uom)
+                        for _ds, _sno, _r, _ in candidates
+                        if _ds == ds and _sno == sno
+                    )
+                    _closing_mode = (_total_shift_cap > 0 and step_rem < _total_shift_cap)
+                else:
+                    _closing_mode = True  # already chose one room for this shift
+
+                if _closing_mode and _shift_key in _closing_placed:
+                    if _closing_placed[_shift_key] != room_code:
+                        continue  # skip non-chosen rooms in this closing shift
+
                 co = self._changeover_shifts.get((room_code, proc_name), 0)
                 if co > 0 and self._has_changeover_conflict(
                         room_code, proc_name, ds, sno, co, sku_code):
@@ -1393,20 +1416,25 @@ class Scheduler:
                 if avail_sku <= 0:
                     continue
                 qty_this = min(step_rem, avail_sku)
+
+                if _closing_mode and _shift_key not in _closing_placed:
+                    _closing_placed[_shift_key] = room_code
+
                 PlanRepo.insert({
-                    "entity_type":   "SKU",
-                    "entity_code":   sku_code,
-                    "so_number":     so["so_number"],
-                    "sku_code":      sku_code,
-                    "line_item":     so["line_item"],
-                    "process_name":  proc_name,
-                    "process_seq":   seq,
-                    "is_final_seq":  1 if is_final else 0,
-                    "room_code":     room_code,
-                    "plan_date":     ds,
-                    "shift_no":      sno,
-                    "qty_planned":   qty_this,
-                    "memo":          "[FINAL]" if is_final else f"[SEQ-{seq}]",
+                    "entity_type":      "SKU",
+                    "entity_code":      sku_code,
+                    "so_number":        so["so_number"],
+                    "sku_code":         sku_code,
+                    "line_item":        so["line_item"],
+                    "process_name":     proc_name,
+                    "process_seq":      seq,
+                    "is_final_seq":     1 if is_final else 0,
+                    "room_code":        room_code,
+                    "plan_date":        ds,
+                    "shift_no":         sno,
+                    "qty_planned":      qty_this,
+                    "is_closing_shift": 1 if _closing_mode else 0,
+                    "memo":             "[FINAL]" if is_final else f"[SEQ-{seq}]",
                 })
                 slot_map[key] = max(0.0, avail_inner - sku_to_inner(qty_this, uom))
                 self._block_room_shift(slot_map, ds, room_code, proc_name, sno)

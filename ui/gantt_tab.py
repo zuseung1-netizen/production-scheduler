@@ -128,6 +128,7 @@ DUE_TAG_BG      = QColor(254, 243, 224)
 DUE_TAG_FG      = QColor(185, 118, 10)
 DUE_TAG_LATE_BG = QColor(251, 231, 231)
 DUE_TAG_LATE_FG = QColor(194, 52,  47)
+CLOSE_TAG_BG    = QColor(217, 119,   6)  # amber — campaign closing shift badge
 CHECK_FILL      = QColor(63,  124, 196, 30)
 
 CARD_H     = 72   # row slot height — matches mockup 72px body row
@@ -1405,6 +1406,20 @@ class GanttCanvas(QWidget):
                 p.drawText(lk_r, Qt.AlignmentFlag.AlignCenter, "🔒")
                 lock_right = lk_r.x() - 2
 
+            # Campaign CLOSE badge (before CLOSED/HOLD and due-date badges)
+            if plan.get("is_closing_shift") and not is_mat:
+                _cl_lbl = "CLOSE"
+                _cl_bw  = QFontMetrics(f_tag).horizontalAdvance(_cl_lbl) + 6
+                _cl_bh  = PILL_H - 4
+                _cl_r   = QRect(lock_right - _cl_bw - 2, pill_y + 2, _cl_bw, _cl_bh)
+                p.setBrush(QBrush(CLOSE_TAG_BG))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.drawRoundedRect(_cl_r, 2, 2)
+                p.setPen(QPen(Qt.GlobalColor.white))
+                p.setFont(QFont("Segoe UI", 5, QFont.Weight.Bold))
+                p.drawText(_cl_r, Qt.AlignmentFlag.AlignCenter, _cl_lbl)
+                lock_right = _cl_r.x() - 2
+
             # CLOSED / HOLD badge (right of pill row, before lock)
             _cell_status = self._slot_closed.get(
                 (plan["room_code"], plan["plan_date"], plan["shift_no"]))
@@ -1623,7 +1638,8 @@ class GanttCanvas(QWidget):
                        f"Due: {_raw_due}  Prod deadline: {_prd_dl}\n"
                        f"{'🔒 LOCKED' if plan['is_locked'] else 'unlocked'}\n"
                        f"Consol group: {grp}  "
-                       f"{'⭐ FINAL' if plan.get('is_final_seq') else ''}")
+                       f"{'⭐ FINAL' if plan.get('is_final_seq') else ''}  "
+                       f"{'⚠ Closing shift (single-line)' if plan.get('is_closing_shift') else ''}")
             QToolTip.showText(QCursor.pos(), tip, self)
         else:
             self.setCursor(Qt.CursorShape.ArrowCursor)

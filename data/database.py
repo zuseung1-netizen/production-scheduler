@@ -231,6 +231,12 @@ def init_db():
         updated_at          TEXT
     )""")
 
+    plan_cols = [r[1] for r in c.execute("PRAGMA table_info(production_plan)").fetchall()]
+    if "is_closing_shift" not in plan_cols:
+        c.execute(
+            "ALTER TABLE production_plan ADD COLUMN is_closing_shift INTEGER NOT NULL DEFAULT 0"
+        )
+
     # ── Material Demand Groups ────────────────────────────────────────────────
     # Records which SO-LineItems contributed to a merged material plan.
     c.execute("""
