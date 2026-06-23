@@ -40,6 +40,7 @@ from ui.dashboard_tab import DashboardTab
 from ui.remaining_tabs import (InventoryTab, ReleaseReportTab, ImpactReportTab,
                                ScenarioTab, LaborUtilizationTab)
 from ui.dispatch_tab import DispatchListTab
+from ui.plan_list_tab import PlanListTab
 from ui.help_tab import HelpTab
 
 
@@ -117,6 +118,13 @@ _IC_LABOR    = ('<rect x="3" y="3" width="18" height="18" rx="2"/>'
                 '<line x1="3" y1="15" x2="21" y2="15"/>'
                 '<line x1="9" y1="3" x2="9" y2="21"/>'
                 '<line x1="15" y1="3" x2="15" y2="21"/>')
+
+_IC_LIST     = ('<line x1="8" y1="6" x2="21" y2="6"/>'
+                '<line x1="8" y1="12" x2="21" y2="12"/>'
+                '<line x1="8" y1="18" x2="21" y2="18"/>'
+                '<line x1="3" y1="6" x2="3.01" y2="6"/>'
+                '<line x1="3" y1="12" x2="3.01" y2="12"/>'
+                '<line x1="3" y1="18" x2="3.01" y2="18"/>')
 
 _IC_MASTERS  = ('<line x1="4" y1="21" x2="4" y2="14"/>'
                 '<line x1="4" y1="10" x2="4" y2="3"/>'
@@ -327,6 +335,7 @@ class DetachedWindow(QMainWindow):
         self.impact_tab      = ImpactReportTab(self)
         self.scenario_tab    = ScenarioTab(self)
         self.dispatch_tab    = DispatchListTab(self)
+        self.plan_list_tab   = PlanListTab(self)
         self.labor_tab       = LaborUtilizationTab(self)
         self.help_tab        = HelpTab(self)
 
@@ -346,6 +355,7 @@ class DetachedWindow(QMainWindow):
             (self.scenario_tab,  "🎯  Scenario Planner"),
             (self.help_tab,      "❓  Help"),
             (self.labor_tab,     "👷  Labor Utilization"),
+            (self.plan_list_tab, "☰   Plan List"),
         ]
         for widget, title in _tab_defs:
             self.tabs.addTab(widget, title)
@@ -520,6 +530,7 @@ class MainWindow(QMainWindow):
         self.impact_tab      = ImpactReportTab(self)
         self.scenario_tab    = ScenarioTab(self)
         self.dispatch_tab    = DispatchListTab(self)
+        self.plan_list_tab   = PlanListTab(self)
         self.labor_tab       = LaborUtilizationTab(self)
         self.help_tab        = HelpTab(self)
 
@@ -543,6 +554,7 @@ class MainWindow(QMainWindow):
             (self.scenario_tab,  "🎯  Scenario Planner",    12),
             (self.help_tab,      "❓  Help",                 13),
             (self.labor_tab,     "👷  Labor Utilization",   14),
+            (self.plan_list_tab, "☰   Plan List",           15),
         ]
         for widget, title, _ in self._tab_defs:
             self.tabs.addTab(widget, title)
@@ -551,6 +563,7 @@ class MainWindow(QMainWindow):
         self._sidebar = NavSidebar(self)
         self._sidebar.add_group("Plan")
         self._sidebar.add_item(_IC_GANTT,     "Gantt Planner",      0)
+        self._sidebar.add_item(_IC_LIST,      "Plan List",         15)
         self._sidebar.add_item(_IC_SO,        "Sales Orders",       1)
         self._sidebar.add_item(_IC_SO,        "Internal Orders",    2)
         self._sidebar.add_item(_IC_RELEASE,   "Release Report",     9)
