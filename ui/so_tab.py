@@ -1542,15 +1542,12 @@ class IOCreateDialog(QDialog):
         io_lbl.setStyleSheet("font-weight:bold; color:#2563EB;")
         form.addRow("IO Number:", io_lbl)
 
-        # SKU combo
+        # SKU combo — blank placeholder so form starts empty
         skus = SKURepo.all()
         self._sku_combo = QComboBox()
+        self._sku_combo.addItem("")
         self._sku_combo.addItems([s["sku_code"] for s in skus])
         form.addRow("SKU Code:", self._sku_combo)
-
-        # Line item
-        self._line_edit = QLineEdit("L01")
-        form.addRow("Line Item:", self._line_edit)
 
         # Department
         self._dept_combo = QComboBox()
@@ -1579,10 +1576,10 @@ class IOCreateDialog(QDialog):
         self._due_edit.setDate(QDate.currentDate().addDays(30))
         form.addRow("Internal Due Date:", self._due_edit)
 
-        # Priority
+        # Priority — default 0 = (none)
         self._priority_spin = QSpinBox()
         self._priority_spin.setRange(0, 9999)
-        self._priority_spin.setValue(50)
+        self._priority_spin.setValue(0)
         self._priority_spin.setSpecialValueText("(none)")
         form.addRow("Priority:", self._priority_spin)
 
@@ -1601,12 +1598,11 @@ class IOCreateDialog(QDialog):
         if not sku:
             QMessageBox.warning(self, "Validation", "SKU Code is required.")
             return
-        line = self._line_edit.text().strip() or "L01"
         pri = self._priority_spin.value()
         self.result = {
             "so_number":   self.io_number,
             "sku_code":    sku,
-            "line_item":   line,
+            "line_item":   "L01",
             "customer_name": None,
             "qty":         self._qty_spin.value(),
             "due_date":    self._due_edit.date().toString("yyyy-MM-dd"),
