@@ -1429,24 +1429,25 @@ class GanttCanvas(QWidget):
                 prod_deadline = (datetime.strptime(due, "%Y-%m-%d").date()
                                  - timedelta(days=_lead))
 
-            # Due-date badge (amber/red pill — based on prod_deadline)
+            # Due-date badge (amber/red pill — based on prod_deadline, always shown)
             if prod_deadline:
                 days_to = (prod_deadline - date.today()).days
-                if days_to <= 7:
-                    due_str = f"{prod_deadline.month}.{prod_deadline.day}"
-                    tag_bg  = DUE_TAG_LATE_BG if days_to < 0 else DUE_TAG_BG
-                    tag_fg  = DUE_TAG_LATE_FG if days_to < 0 else DUE_TAG_FG
-                    fw = QFontMetrics(f_tag).horizontalAdvance(due_str) + 8
-                    fh = 12
-                    tx = lock_right - fw - (2 if not plan["is_locked"] else 0)
-                    ty_tag = pill_y + (PILL_H - fh) // 2
-                    tr = QRect(tx, ty_tag, fw, fh)
-                    p.setBrush(QBrush(tag_bg))
-                    p.setPen(Qt.PenStyle.NoPen)
-                    p.drawRoundedRect(tr, 3, 3)
-                    p.setPen(QPen(tag_fg))
-                    p.setFont(f_tag)
-                    p.drawText(tr, Qt.AlignmentFlag.AlignCenter, due_str)
+                due_str = f"{prod_deadline.month}.{prod_deadline.day}"
+                tag_bg  = DUE_TAG_LATE_BG if days_to < 0 else (
+                          DUE_TAG_BG if days_to <= 7 else QColor(220, 230, 245))
+                tag_fg  = DUE_TAG_LATE_FG if days_to < 0 else (
+                          DUE_TAG_FG if days_to <= 7 else QColor(80, 100, 140))
+                fw = QFontMetrics(f_tag).horizontalAdvance(due_str) + 8
+                fh = 12
+                tx = lock_right - fw - (2 if not plan["is_locked"] else 0)
+                ty_tag = pill_y + (PILL_H - fh) // 2
+                tr = QRect(tx, ty_tag, fw, fh)
+                p.setBrush(QBrush(tag_bg))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.drawRoundedRect(tr, 3, 3)
+                p.setPen(QPen(tag_fg))
+                p.setFont(f_tag)
+                p.drawText(tr, Qt.AlignmentFlag.AlignCenter, due_str)
 
             # ── TEXT ZONE ─────────────────────────────────────────────────────
             tx  = rect.x() + TEXT_PAD_L
