@@ -2229,68 +2229,73 @@ class GanttTab(QWidget):
         vl.setContentsMargins(0, 0, 0, 0)
         vl.setSpacing(0)
 
-        w = QWidget()
-        w.setObjectName("viewbar")
-        w.setFixedHeight(46)
-        w.setStyleSheet("QWidget#viewbar { background:#fafbfc; }")
-        lay = QHBoxLayout(w)
-        lay.setContentsMargins(14, 0, 12, 0)
-        lay.setSpacing(8)
-
-        lbl_y = QLabel("Y-axis")
-        lbl_y.setStyleSheet("font-size:11px; color:#6b7280; font-weight:600;")
-        lay.addWidget(lbl_y)
-
-        # Preset buttons
-        _PRESETS = [("Room", ["Room"]),
-                    ("Room›Proc", ["Room", "Process"]),
-                    ("SKU", ["SKU"])]
-        self._preset_btns: List[QPushButton] = []
+        _ROW_CSS = "QWidget { background:#fafbfc; }"
         _PRESET_CSS = (
             "QPushButton { font-size:10px; font-weight:600; padding:3px 9px;"
             " border-radius:4px; border:1px solid #d4d7e0; background:#fff; color:#3a4255; }"
             "QPushButton:checked { background:#dde9ff; border-color:#4f8df0; color:#2451c2; }"
             "QPushButton:hover:!checked { background:#f5f6fa; }"
         )
-        for lbl, dims in _PRESETS:
+        _DIM_CSS = (
+            "QComboBox { background:#fff; border:1px solid #d4d7e0; border-radius:4px;"
+            " padding:3px 5px; font-size:11px; color:#3a4255; }"
+            "QComboBox:focus { border-color:#4f8df0; }"
+        )
+
+        # ── Row 1: Y-axis presets + dim combos ───────────────────────────────
+        row1 = QWidget(); row1.setStyleSheet(_ROW_CSS)
+        row1.setFixedHeight(38)
+        r1 = QHBoxLayout(row1)
+        r1.setContentsMargins(14, 0, 12, 0)
+        r1.setSpacing(6)
+
+        lbl_y = QLabel("Y-axis")
+        lbl_y.setStyleSheet("font-size:11px; color:#6b7280; font-weight:600;")
+        r1.addWidget(lbl_y)
+
+        self._preset_btns: List[QPushButton] = []
+        for lbl, dims in [("Room", ["Room"]), ("Room›Proc", ["Room", "Process"]), ("SKU", ["SKU"])]:
             btn = QPushButton(lbl)
             btn.setCheckable(True)
             btn.setFixedHeight(26)
             btn.setStyleSheet(_PRESET_CSS)
             btn.clicked.connect(lambda _c, d=dims: self._apply_preset(d))
             self._preset_btns.append(btn)
-            lay.addWidget(btn)
+            r1.addWidget(btn)
 
-        # Separator
-        lay.addWidget(self._vb_sep())
+        r1.addWidget(self._vb_sep())
 
-        # Dim selectors with ▸ arrows
         self._dim_combos: List[QComboBox] = []
-        defaults = ["Room", "Process", "—", "—"]
-        _DIM_CSS = (
-            "QComboBox { background:#fff; border:1px solid #d4d7e0; border-radius:4px;"
-            " padding:3px 5px; font-size:11px; color:#3a4255; }"
-            "QComboBox:focus { border-color:#4f8df0; }"
-        )
-        for i, default_dim in enumerate(defaults):
+        for i, default_dim in enumerate(["Room", "Process", "—", "—"]):
             if i > 0:
-                arr = QLabel("▸")
-                arr.setStyleSheet("color:#b0b8cc; font-size:10px;")
-                lay.addWidget(arr)
+                arr = QLabel("▸"); arr.setStyleSheet("color:#b0b8cc; font-size:10px;")
+                r1.addWidget(arr)
             cb = QComboBox()
             cb.addItems(Y_DIM_OPTIONS)
             cb.setCurrentText(default_dim)
             cb.setStyleSheet(_DIM_CSS)
-            cb.setMaximumWidth(90)
+            cb.setFixedWidth(82)
             cb.currentTextChanged.connect(self._on_dim_changed)
             cb.setToolTip(f"Y-axis depth {i+1}")
             self._dim_combos.append(cb)
-            lay.addWidget(cb)
+            r1.addWidget(cb)
 
-        # Separator
-        lay.addWidget(self._vb_sep())
+        r1.addStretch()
+        vl.addWidget(row1)
 
-        # Shift toggle pill
+        # row separator
+        sep1 = QFrame(); sep1.setFrameShape(QFrame.Shape.HLine)
+        sep1.setFixedHeight(1); sep1.setStyleSheet("background:#e8eaf0; border:none;")
+        vl.addWidget(sep1)
+
+        # ── Row 2: Shift · Horizon · Date · stretch · Actions ────────────────
+        row2 = QWidget(); row2.setStyleSheet(_ROW_CSS)
+        row2.setFixedHeight(40)
+        r2 = QHBoxLayout(row2)
+        r2.setContentsMargins(14, 0, 12, 0)
+        r2.setSpacing(8)
+
+        # Shift toggle
         self.shift_toggle = QPushButton("Shift")
         self.shift_toggle.setCheckable(True)
         self.shift_toggle.setFixedHeight(26)
@@ -2300,19 +2305,20 @@ class GanttTab(QWidget):
             "QPushButton:checked { background:#2f5fd6; color:#fff; border-color:#2f5fd6; }"
         )
         self.shift_toggle.toggled.connect(self._on_shift_toggle)
-        lay.addWidget(self.shift_toggle)
+        r2.addWidget(self.shift_toggle)
+
+        r2.addWidget(self._vb_sep())
 
         # Horizon segmented selector
         hz_outer = QFrame()
-        hz_outer.setStyleSheet(
-            "QFrame { background:#eef0f4; border-radius:5px; border:none; }")
-        hz_outer.setFixedHeight(28)
+        hz_outer.setStyleSheet("QFrame { background:#eef0f4; border-radius:6px; border:none; }")
+        hz_outer.setFixedHeight(30)
         hz_lay = QHBoxLayout(hz_outer)
-        hz_lay.setContentsMargins(2, 2, 2, 2)
+        hz_lay.setContentsMargins(3, 3, 3, 3)
         hz_lay.setSpacing(1)
         _HZ_BTN_CSS = (
-            "QPushButton { font-size:10px; font-weight:600; padding:3px 7px;"
-            " min-width:28px; border-radius:4px; border:none;"
+            "QPushButton { font-size:10px; font-weight:600; padding:2px 10px;"
+            " min-width:30px; border-radius:4px; border:none;"
             " color:#6b7280; background:transparent; }"
             "QPushButton:checked { background:#fff; color:#16213d;"
             " border:1px solid #cbd5e1; }"
@@ -2329,22 +2335,23 @@ class GanttTab(QWidget):
             hz_lay.addWidget(hb)
             hz_grp.addButton(hb)
             self._horizon_btns[lbl] = hb
-        lay.addWidget(hz_outer)
+        r2.addWidget(hz_outer)
 
         # Date picker
         from PyQt6.QtCore import QDate
         self.date_edit = QDateEdit(QDate.currentDate())
         self.date_edit.setDisplayFormat("yyyy-MM-dd")
         self.date_edit.setFixedHeight(26)
+        self.date_edit.setFixedWidth(100)
         self.date_edit.setStyleSheet(
             "QDateEdit { border:1px solid #d4d7e0; border-radius:4px;"
             " padding:2px 6px; font-size:11px; color:#3a4255; }")
         self.date_edit.dateChanged.connect(lambda: self.refresh())
-        lay.addWidget(self.date_edit)
+        r2.addWidget(self.date_edit)
 
-        lay.addStretch()
+        r2.addStretch()
 
-        # Unplanned button with count badge (updated in refresh)
+        # Unplanned
         self.btn_unplanned = QPushButton("📦 Unplanned  0")
         self.btn_unplanned.setCheckable(True)
         self.btn_unplanned.setFixedHeight(28)
@@ -2355,7 +2362,7 @@ class GanttTab(QWidget):
             "QPushButton:checked { background:#fef3e0; border-color:#e09a1f; color:#b9760a; }"
         )
         self.btn_unplanned.toggled.connect(self._on_toggle_unplanned)
-        lay.addWidget(self.btn_unplanned)
+        r2.addWidget(self.btn_unplanned)
 
         # Export
         btn_export = QPushButton("↓ Export")
@@ -2367,7 +2374,7 @@ class GanttTab(QWidget):
             "QPushButton:hover { background:#f5f6fa; }"
         )
         btn_export.clicked.connect(self._export_plan)
-        lay.addWidget(btn_export)
+        r2.addWidget(btn_export)
 
         # Consolidate
         self.btn_consol = QPushButton("🔗 Consolidate (0)")
@@ -2380,9 +2387,9 @@ class GanttTab(QWidget):
             "QPushButton:disabled { opacity:0.5; color:#aaa; }"
         )
         self.btn_consol.clicked.connect(self._consolidate)
-        lay.addWidget(self.btn_consol)
+        r2.addWidget(self.btn_consol)
 
-        # Clear checks (hidden label, still functional)
+        # Clear checks
         self.btn_clear = QPushButton("✖")
         self.btn_clear.setEnabled(False)
         self.btn_clear.setFixedSize(28, 28)
@@ -2393,18 +2400,17 @@ class GanttTab(QWidget):
             "QPushButton:enabled:hover { background:#f5f6fa; }"
         )
         self.btn_clear.clicked.connect(self._clear_checks)
-        lay.addWidget(self.btn_clear)
+        r2.addWidget(self.btn_clear)
 
         self.check_label = QLabel("")
         self.check_label.setStyleSheet("color:#555; font-size:10px;")
-        lay.addWidget(self.check_label)
+        r2.addWidget(self.check_label)
 
-        vl.addWidget(w)
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setFixedHeight(1)
-        sep.setStyleSheet("background:#e2e4ea; border:none;")
-        vl.addWidget(sep)
+        vl.addWidget(row2)
+
+        sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setFixedHeight(1); sep2.setStyleSheet("background:#e2e4ea; border:none;")
+        vl.addWidget(sep2)
         return outer
 
     @staticmethod
