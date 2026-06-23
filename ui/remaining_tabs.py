@@ -1570,10 +1570,14 @@ class AlertsTab(QWidget):
         self.conflict_grp.setTitle(f"⚠ Capacity Conflicts ({len(conflicts)})")
         self.conflict_table.setRowCount(len(conflicts))
         for ri, c in enumerate(conflicts):
-            for ci, val in enumerate([
-                c["plan_date"], c["room_code"], c["process_name"], c["shift_no"],
-                c["planned_inner"], c["capacity_inner"], c["overrun_inner"]
-            ]):
+            if c.get("conflict_type") == "multi_process":
+                procs = ", ".join(c.get("processes", []))
+                row_vals = [c["plan_date"], c["room_code"], procs, c["shift_no"],
+                            "multi-process", "—", "—"]
+            else:
+                row_vals = [c["plan_date"], c["room_code"], c["process_name"], c["shift_no"],
+                            c["planned_inner"], c["capacity_inner"], c["overrun_inner"]]
+            for ci, val in enumerate(row_vals):
                 item = QTableWidgetItem(str(val))
                 item.setBackground(QBrush(QColor("#ffe0e0")))
                 self.conflict_table.setItem(ri, ci, item)
