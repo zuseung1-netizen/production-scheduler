@@ -2070,25 +2070,22 @@ class GanttTab(QWidget):
         lay.addWidget(btn_pull)
 
         # Snapshot: manual save + restore
-        btn_snap = QPushButton("📸")
-        btn_snap.setFixedSize(32, 32)
-        btn_snap.setToolTip("Save plan snapshot")
-        btn_snap.setStyleSheet(
+        _SNAP_CSS = (
             "QPushButton { border:1px solid #e2e4ea; border-radius:5px; background:#fff;"
-            " font-size:14px; }"
+            " font-size:11px; font-weight:600; color:#3a4255; padding:0 8px; }"
             "QPushButton:hover { background:#f5f6fa; }"
         )
+        btn_snap = QPushButton("Snapshot")
+        btn_snap.setFixedHeight(32)
+        btn_snap.setToolTip("Save plan snapshot")
+        btn_snap.setStyleSheet(_SNAP_CSS)
         btn_snap.clicked.connect(self._save_snapshot_manual)
         lay.addWidget(btn_snap)
 
-        btn_restore = QPushButton("⏪")
-        btn_restore.setFixedSize(32, 32)
-        btn_restore.setToolTip("Restore plan from snapshot")
-        btn_restore.setStyleSheet(
-            "QPushButton { border:1px solid #e2e4ea; border-radius:5px; background:#fff;"
-            " font-size:14px; }"
-            "QPushButton:hover { background:#f5f6fa; }"
-        )
+        btn_restore = QPushButton("Time Machine")
+        btn_restore.setFixedHeight(32)
+        btn_restore.setToolTip("Browse and restore plan snapshots")
+        btn_restore.setStyleSheet(_SNAP_CSS)
         btn_restore.clicked.connect(self._restore_snapshot_dialog)
         lay.addWidget(btn_restore)
 
