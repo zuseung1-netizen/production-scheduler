@@ -795,6 +795,7 @@ class PlanRepo:
         data.setdefault("block_type", None)
         data.setdefault("memo", None)
         data.setdefault("is_closing_shift", 0)
+        data.setdefault("stack_order", 0)
         with get_connection() as conn:
             cur = conn.execute("""
                 INSERT INTO production_plan
@@ -803,14 +804,14 @@ class PlanRepo:
                      plan_date,shift_no,qty_planned,qty_produced,
                      is_locked,is_consolidated,consolidation_group,
                      material_group_id,block_type,memo,is_closing_shift,
-                     created_at,updated_at)
+                     stack_order,created_at,updated_at)
                 VALUES
                     (:entity_type,:entity_code,:so_number,:sku_code,:line_item,
                      :process_name,:process_seq,:is_final_seq,:room_code,
                      :plan_date,:shift_no,:qty_planned,:qty_produced,
                      :is_locked,:is_consolidated,:consolidation_group,
                      :material_group_id,:block_type,:memo,:is_closing_shift,
-                     :created_at,:updated_at)
+                     :stack_order,:created_at,:updated_at)
             """, data)
             return cur.lastrowid
 
@@ -828,6 +829,17 @@ class PlanRepo:
                 raise ValueError(f"Plan {plan_id} not found in DB — update had no effect")
         _log_plan_history(plan_id, "MODIFIED", old,
                           {**(old or {}), **fields}, reason)
+
+    @staticmethod
+    def update_stack_orders(cell_plans: list):
+        """Bulk-update stack_order for plans within one cell.
+        cell_plans: [(plan_id, new_stack_order), ...]
+        """
+        with get_connection() as conn:
+            for pid, order in cell_plans:
+                conn.execute(
+                    "UPDATE production_plan SET stack_order=? WHERE plan_id=?",
+                    (order, pid))
 
     @staticmethod
     def delete(plan_id: int, reason: str = None):

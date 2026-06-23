@@ -783,6 +783,13 @@ class GanttCanvas(QWidget):
         self._drag_rect     : Optional[QRect]  = None
         self._drag_invalid  : bool             = False
         self._drag_split    : bool             = False   # Ctrl+drag → split mode
+        # Stack reorder state (same-cell vertical reorder)
+        self._stack_drag      : bool       = False
+        self._stack_guide_y   : int        = -1    # guide line Y pixel
+        self._stack_guide_idx : int        = 0     # insertion index
+        self._stack_orig_col  : int        = -1    # column of origin cell
+        self._stack_orig_row  : int        = -1    # row index of origin cell
+        self._stack_cell_plans: list       = []    # plans in origin cell, sorted
         # (room_code, process_name) pairs that are valid — populated in load_data
         self._room_proc_set   : set = set()
         self._company_holidays: set = set()   # date ISO strings from DB
@@ -906,10 +913,11 @@ class GanttCanvas(QWidget):
                 continue
             slot_plans[(col, rk)].append(p["plan_id"])
 
-        # Assign vertical index within each slot (sorted by plan_id for stability)
+        # Assign vertical index within each slot — stack_order ASC, then plan_id
         self._plan_layout = {}
+        pid_to_so = {p["plan_id"]: p.get("stack_order", 0) for p in self._plans}
         for sk, pids in slot_plans.items():
-            pids_sorted = sorted(pids)
+            pids_sorted = sorted(pids, key=lambda pid: (pid_to_so.get(pid, 0), pid))
             for i, pid in enumerate(pids_sorted):
                 self._plan_layout[pid] = (i, len(pids_sorted))
 
@@ -1063,7 +1071,9 @@ class GanttCanvas(QWidget):
         self._draw_grid(p)
         self._draw_today_line(p)
         self._draw_plans(p)
-        if self._drag_rect:
+        if self._stack_drag:
+            self._draw_stack_guide(p)
+        elif self._drag_rect:
             self._draw_drag_ghost(p)
         p.end()
 
@@ -1537,6 +1547,25 @@ class GanttCanvas(QWidget):
             p.setPen(QPen(QColor(30, 80, 200), 2, Qt.PenStyle.DashLine))
             p.drawRect(self._drag_rect)
 
+    def _draw_stack_guide(self, p: QPainter):
+        """Blue horizontal insertion guide line for same-cell stack reorder."""
+        if not self._stack_drag or self._stack_guide_y < 0 or self._stack_orig_col < 0:
+            return
+        col_w = self._col_w()
+        x0 = self._stack_orig_col * col_w + 4
+        x1 = (self._stack_orig_col + 1) * col_w - 4
+        y  = self._stack_guide_y
+        guide_color = QColor(37, 99, 235)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        # horizontal line
+        p.setPen(QPen(guide_color, 3, Qt.PenStyle.SolidLine))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawLine(x0 + 8, y, x1, y)
+        # circle anchor at left
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(guide_color))
+        p.drawEllipse(QPointF(x0 + 4, float(y)), 5.0, 5.0)
+
     # ── Mouse events ──────────────────────────────────────────────────────────
 
     def mousePressEvent(self, event):
@@ -1555,6 +1584,23 @@ class GanttCanvas(QWidget):
                 rect = self._cell_map.get(plan["plan_id"])
                 if rect:
                     self._drag_offset = pos - rect.topLeft()
+                # Capture origin cell for potential stack reorder
+                orig_col = self._date_to_col(plan["plan_date"], plan["shift_no"])
+                orig_row = self._row_for_plan(plan)
+                if orig_col is not None and orig_row is not None:
+                    self._stack_orig_col = orig_col
+                    self._stack_orig_row = orig_row
+                    pid_to_so = {p["plan_id"]: p.get("stack_order", 0)
+                                 for p in self._plans}
+                    self._stack_cell_plans = sorted(
+                        [p for p in self._plans
+                         if self._date_to_col(p["plan_date"], p["shift_no"]) == orig_col
+                         and self._row_for_plan(p) == orig_row],
+                        key=lambda p: (pid_to_so.get(p["plan_id"], 0), p["plan_id"]))
+                else:
+                    self._stack_orig_col = -1
+                    self._stack_orig_row = -1
+                    self._stack_cell_plans = []
                 self.planSelected.emit(plan)
 
     def mouseMoveEvent(self, event):
@@ -1566,30 +1612,48 @@ class GanttCanvas(QWidget):
                 if plan:
                     rect = self._cell_map.get(plan["plan_id"])
                     if rect:
-                        self._drag_rect = QRect(pos - self._drag_offset, rect.size())
-                        if "Room" in self.y_dims:
-                            row = self._row_at_y(pos.y())
-                            if 0 <= row < len(self._rows):
-                                rk = self._rows[row]
-                                room_idx = self.y_dims.index("Room")
-                                parts = rk.split("|")
-                                target_room = parts[room_idx] if room_idx < len(parts) else ""
-                                proc = plan.get("process_name") or ""
-                                # Check 1: room doesn't support the process
-                                self._drag_invalid = bool(target_room) and (target_room, proc) not in self._room_proc_set
-                                # Check 2: target slot is CLOSED or HOLD in calendar
-                                if not self._drag_invalid and target_room:
-                                    ghost_cx = self._drag_rect.center().x()
-                                    col = ghost_cx // self._col_w()
-                                    if 0 <= col < self._col_count():
-                                        t_date, t_shift = self._col_to_date_shift(col)
-                                        t_date_str = t_date.strftime("%Y-%m-%d") if hasattr(t_date, "strftime") else str(t_date)
-                                        if self._slot_closed.get((target_room, t_date_str, t_shift)):
-                                            self._drag_invalid = True
+                        col_w    = self._col_w()
+                        cur_col  = pos.x() // col_w
+                        has_stack = len(self._stack_cell_plans) > 1
+
+                        if has_stack and cur_col == self._stack_orig_col:
+                            # ── STACK REORDER MODE ──────────────────────────
+                            self._stack_drag    = True
+                            self._drag_rect     = None
+                            self._drag_invalid  = False
+                            row_y = (self._row_y_list[self._stack_orig_row]
+                                     if 0 <= self._stack_orig_row < len(self._row_y_list) else 0)
+                            n     = len(self._stack_cell_plans)
+                            rel_y = pos.y() - row_y
+                            idx   = round(rel_y / CARD_H)
+                            self._stack_guide_idx = max(0, min(n, idx))
+                            self._stack_guide_y   = row_y + self._stack_guide_idx * CARD_H
+                        else:
+                            # ── REGULAR DRAG MODE ───────────────────────────
+                            self._stack_drag    = False
+                            self._stack_guide_y = -1
+                            self._drag_rect = QRect(pos - self._drag_offset, rect.size())
+                            if "Room" in self.y_dims:
+                                row = self._row_at_y(pos.y())
+                                if 0 <= row < len(self._rows):
+                                    rk = self._rows[row]
+                                    room_idx = self.y_dims.index("Room")
+                                    parts = rk.split("|")
+                                    target_room = parts[room_idx] if room_idx < len(parts) else ""
+                                    proc = plan.get("process_name") or ""
+                                    self._drag_invalid = bool(target_room) and (target_room, proc) not in self._room_proc_set
+                                    if not self._drag_invalid and target_room:
+                                        ghost_cx = self._drag_rect.center().x()
+                                        col = ghost_cx // col_w
+                                        if 0 <= col < self._col_count():
+                                            t_date, t_shift = self._col_to_date_shift(col)
+                                            t_date_str = t_date.strftime("%Y-%m-%d") if hasattr(t_date, "strftime") else str(t_date)
+                                            if self._slot_closed.get((target_room, t_date_str, t_shift)):
+                                                self._drag_invalid = True
+                                else:
+                                    self._drag_invalid = False
                             else:
                                 self._drag_invalid = False
-                        else:
-                            self._drag_invalid = False
                         self.update()
         plan = self._plan_at(pos)
         new_hover = plan["plan_id"] if plan else None
@@ -1646,8 +1710,52 @@ class GanttCanvas(QWidget):
         self.setCursor(Qt.CursorShape.ArrowCursor)
         super().leaveEvent(event)
 
+    def _reset_drag_state(self):
+        self._drag_plan_id    = None
+        self._drag_rect       = None
+        self._drag_invalid    = False
+        self._drag_split      = False
+        self._stack_drag      = False
+        self._stack_guide_y   = -1
+        self._stack_guide_idx = 0
+        self._stack_cell_plans= []
+        self._stack_orig_col  = -1
+        self._stack_orig_row  = -1
+
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self._drag_plan_id:
+            # ── STACK REORDER DROP ───────────────────────────────────────────
+            if self._stack_drag:
+                drag_plan = next(
+                    (p for p in self._stack_cell_plans
+                     if p["plan_id"] == self._drag_plan_id), None)
+                if drag_plan and not drag_plan["is_locked"]:
+                    orig_idx = next(
+                        (i for i, p in enumerate(self._stack_cell_plans)
+                         if p["plan_id"] == self._drag_plan_id), 0)
+                    others = [p for p in self._stack_cell_plans
+                              if p["plan_id"] != self._drag_plan_id]
+                    insert_at = self._stack_guide_idx
+                    # Adjust for removed element shift
+                    if insert_at > orig_idx:
+                        insert_at -= 1
+                    insert_at = max(0, min(len(others), insert_at))
+                    others.insert(insert_at, drag_plan)
+                    if [p["plan_id"] for p in others] != \
+                       [p["plan_id"] for p in self._stack_cell_plans]:
+                        PlanRepo.update_stack_orders(
+                            [(p["plan_id"], i) for i, p in enumerate(others)])
+                        if self.parent_tab:
+                            self.parent_tab.refresh()
+                        else:
+                            self.load_data()
+                elif drag_plan and drag_plan["is_locked"]:
+                    QMessageBox.information(self, "Locked",
+                                            "This plan is locked. Unlock it first.")
+                self._reset_drag_state()
+                self.update()
+                return
+
             if self._drag_rect:
                 if self._drag_invalid:
                     QMessageBox.warning(
@@ -1711,10 +1819,7 @@ class GanttCanvas(QWidget):
                             QMessageBox.information(
                                 self, "Locked",
                                 "This plan is locked. Unlock it first.")
-            self._drag_plan_id = None
-            self._drag_rect    = None
-            self._drag_invalid = False
-            self._drag_split   = False
+            self._reset_drag_state()
             self.update()
 
     def _do_split_drop(self, plan: Dict, new_date, new_shift: int, new_room: str):

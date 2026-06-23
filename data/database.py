@@ -240,6 +240,10 @@ def init_db():
         c.execute(
             "ALTER TABLE production_plan ADD COLUMN is_closing_shift INTEGER NOT NULL DEFAULT 0"
         )
+    if "stack_order" not in plan_cols:
+        c.execute(
+            "ALTER TABLE production_plan ADD COLUMN stack_order INTEGER NOT NULL DEFAULT 0"
+        )
 
     # ── Material Demand Groups ────────────────────────────────────────────────
     # Records which SO-LineItems contributed to a merged material plan.
