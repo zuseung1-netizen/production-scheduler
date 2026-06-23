@@ -141,6 +141,9 @@ class ItemMasterWidget(QWidget):
         self.table = _make_table(self.COLS, editable=True)
         self.table.doubleClicked.connect(self._on_double_click)
         self.table.itemChanged.connect(self._on_cell_changed)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(
+            lambda pos: self._context_menu(pos))
         layout.addWidget(self.table)
 
         self._status = QLabel()
@@ -283,6 +286,17 @@ class ItemMasterWidget(QWidget):
         for item_type, code in items:
             (SKURepo.delete if item_type == "SKU" else MaterialRepo.delete)(code)
         self._load()
+
+    def _context_menu(self, pos):
+        rows = sorted({i.row() for i in self.table.selectedItems()})
+        if not rows:
+            return
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        n = len(rows)
+        act = menu.addAction(f"🗑 Delete ({n})" if n > 1 else "🗑 Delete")
+        act.triggered.connect(self._delete)
+        menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def _save_changes(self):
         if not self._changed_cells:
@@ -526,6 +540,8 @@ class RoomMasterWidget(QWidget):
         self.table = _make_table(self.COLS)
         self.table.doubleClicked.connect(self._edit)
         self.table.itemChanged.connect(self._on_cell_changed)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._context_menu)
         layout.addWidget(self.table)
 
         self._status = QLabel()
@@ -580,6 +596,17 @@ class RoomMasterWidget(QWidget):
         for rc, pn in items:
             RoomRepo.delete(rc, pn)
         self._load()
+
+    def _context_menu(self, pos):
+        rows = sorted({i.row() for i in self.table.selectedItems()})
+        if not rows:
+            return
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        n = len(rows)
+        act = menu.addAction(f"🗑 Delete ({n})" if n > 1 else "🗑 Delete")
+        act.triggered.connect(self._delete)
+        menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def _upload(self):
         from utils.excel_io import parse_room_preview
@@ -1403,6 +1430,8 @@ class SKUProcessWidget(QWidget):
 
         self.table = _make_table(self.COLS)
         self.table.doubleClicked.connect(self._edit)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._context_menu)
         layout.addWidget(self.table)
 
         # Info label
@@ -1465,6 +1494,17 @@ class SKUProcessWidget(QWidget):
         for sku, seq in items:
             SKUProcessRepo.delete(sku, seq)
         self._load()
+
+    def _context_menu(self, pos):
+        rows = sorted({i.row() for i in self.table.selectedItems()})
+        if not rows:
+            return
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        n = len(rows)
+        act = menu.addAction(f"🗑 Delete ({n})" if n > 1 else "🗑 Delete")
+        act.triggered.connect(self._delete)
+        menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def _validate(self):
         sku_filter = self.sku_filter.currentText()
@@ -1698,6 +1738,8 @@ class ProcessRoutingWidget(QWidget):
         self.table = _make_table(self.COLS)
         self.table.doubleClicked.connect(self._edit)
         self.table.itemChanged.connect(self._on_cell_changed)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._context_menu)
         layout.addWidget(self.table)
 
         self.info_label = QLabel()
@@ -1784,6 +1826,17 @@ class ProcessRoutingWidget(QWidget):
         for et, code, seq in items:
             ProcessRoutingRepo.delete(et, code, seq)
         self._load()
+
+    def _context_menu(self, pos):
+        rows = sorted({i.row() for i in self.table.selectedItems()})
+        if not rows:
+            return
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        n = len(rows)
+        act = menu.addAction(f"🗑 Delete ({n})" if n > 1 else "🗑 Delete")
+        act.triggered.connect(self._delete)
+        menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def _toggle_edit_mode(self):
         self._edit_mode = not self._edit_mode
