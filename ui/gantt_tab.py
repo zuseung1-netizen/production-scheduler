@@ -1421,13 +1421,19 @@ class GanttCanvas(QWidget):
                 p.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
                 p.drawText(_br, Qt.AlignmentFlag.AlignCenter, _lbl)
 
-            # Due-date badge (amber/red pill, show when within 7 days of due)
+            # Production deadline = due_date - post_lead_days
             due = so["due_date"] if so else None
-            if due:
-                due_dt  = datetime.strptime(due, "%Y-%m-%d").date()
-                days_to = (due_dt - date.today()).days
+            prod_deadline = None
+            if due and so:
+                _lead = int((self._skus.get(so["sku_code"]) or {}).get("post_lead_days") or 0)
+                prod_deadline = (datetime.strptime(due, "%Y-%m-%d").date()
+                                 - timedelta(days=_lead))
+
+            # Due-date badge (amber/red pill — based on prod_deadline)
+            if prod_deadline:
+                days_to = (prod_deadline - date.today()).days
                 if days_to <= 7:
-                    due_str = f"{due_dt.month}.{due_dt.day}"
+                    due_str = f"{prod_deadline.month}.{prod_deadline.day}"
                     tag_bg  = DUE_TAG_LATE_BG if days_to < 0 else DUE_TAG_BG
                     tag_fg  = DUE_TAG_LATE_FG if days_to < 0 else DUE_TAG_FG
                     fw = QFontMetrics(f_tag).horizontalAdvance(due_str) + 8
@@ -1471,10 +1477,9 @@ class GanttCanvas(QWidget):
                            QFontMetrics(f_l3).elidedText(
                                so_str, Qt.TextElideMode.ElideRight, tw))
 
-            if not is_mat and due:
-                due_dt_card = datetime.strptime(due, "%Y-%m-%d").date()
-                days_left = (due_dt_card - date.today()).days
-                due_label = f"Due {due_dt_card.strftime('%m/%d')}"
+            if not is_mat and prod_deadline:
+                days_left = (prod_deadline - date.today()).days
+                due_label = f"Prd {prod_deadline.strftime('%m/%d')}"
                 if days_left < 0:
                     due_clr = DUE_TAG_LATE_FG
                 elif days_left <= 3:
@@ -1604,13 +1609,17 @@ class GanttCanvas(QWidget):
                                       plan["line_item"]), {})
                 grp = plan.get("consolidation_group") or "-"
                 customer = so.get("customer_name") or ""
+                _raw_due = so.get("due_date", "")
+                _lead    = int((self._skus.get(plan["sku_code"]) or {}).get("post_lead_days") or 0)
+                _prd_dl  = (datetime.strptime(_raw_due, "%Y-%m-%d").date()
+                            - timedelta(days=_lead)).strftime("%Y-%m-%d") if _raw_due else ""
                 tip = (f"SO: {plan['so_number']}  SKU: {plan['sku_code']}  "
                        f"Line: {plan['line_item']}\n"
                        f"Customer: {customer}\n"
                        f"Room: {plan['room_code']}  Process: {plan['process_name']}\n"
                        f"Date: {plan['plan_date']}  Shift: {plan['shift_no']}\n"
                        f"Planned: {plan['qty_planned']}  Produced: {plan['qty_produced']}\n"
-                       f"Due: {so.get('due_date','')}  "
+                       f"Due: {_raw_due}  Prod deadline: {_prd_dl}\n"
                        f"{'🔒 LOCKED' if plan['is_locked'] else 'unlocked'}\n"
                        f"Consol group: {grp}  "
                        f"{'⭐ FINAL' if plan.get('is_final_seq') else ''}")
