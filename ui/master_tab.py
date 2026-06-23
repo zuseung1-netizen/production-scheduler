@@ -123,9 +123,8 @@ class ItemMasterWidget(QWidget):
         # action buttons
         bbar = QHBoxLayout()
         for label, slot in [
-            ("➕ Add SKU",        self._add_sku),
-            ("➕ Add Material",   self._add_material),
-            ("🗑 Delete",         self._delete),
+            ("➕ Add Item",        self._add_item),
+            ("🗑 Delete",          self._delete),
         ]:
             b = QPushButton(label); b.clicked.connect(slot); bbar.addWidget(b)
         self._btn_save = QPushButton("💾 Save Changes")
@@ -247,18 +246,16 @@ class ItemMasterWidget(QWidget):
 
     # ── CRUD ───────────────────────────────────────────────────────────────
 
-    def _add_sku(self):
-        dlg = SKUEditDialog({}, self)
-        if dlg.exec():
-            SKURepo.upsert(dlg.result)
-            self._load()
-
-    def _add_material(self):
+    def _add_item(self):
         from data.repositories import MaterialRepo
-        dlg = MaterialEditDialog({}, self)
-        if dlg.exec():
+        dlg = AddItemDialog(self)
+        if not dlg.exec():
+            return
+        if dlg.entity_type == "SKU":
+            SKURepo.upsert(dlg.result)
+        else:
             MaterialRepo.upsert(dlg.result)
-            self._load()
+        self._load()
 
     def _open_edit_dialog(self, item_type: str, code: str):
         from data.repositories import SKURepo, MaterialRepo
@@ -352,6 +349,101 @@ class ItemMasterWidget(QWidget):
         if path:
             ok, msg = download_item_template(path)
             (QMessageBox.information if ok else QMessageBox.warning)(self, "Template", msg)
+
+
+class AddItemDialog(QDialog):
+    """Unified Add dialog — choose SKU or MATERIAL, fill in details."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add Item")
+        self.setMinimumWidth(420)
+        self.result = {}
+        self.entity_type = "SKU"
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self._type_combo = QComboBox()
+        self._type_combo.addItems(["SKU", "MATERIAL"])
+        self._type_combo.currentTextChanged.connect(self._on_type_changed)
+        form.addRow("Entity Type:", self._type_combo)
+
+        self._code_label = QLabel("SKU Code:")
+        self.code = QLineEdit()
+        form.addRow(self._code_label, self.code)
+
+        self._name_label = QLabel("SKU Name:")
+        self.name = QLineEdit()
+        form.addRow(self._name_label, self.name)
+
+        self.uom = QSpinBox(); self.uom.setRange(1, 99999); self.uom.setValue(1)
+        form.addRow("UoM (qty/EA):", self.uom)
+
+        self.lead = QSpinBox(); self.lead.setRange(0, 365); self.lead.setValue(0)
+        self._lead_label = QLabel("Post Lead Days:")
+        form.addRow(self._lead_label, self.lead)
+
+        self.campaign = QCheckBox("Allow grouping (batch same-SKU orders)")
+        self.campaign.setChecked(True)
+        self._campaign_row_label = QLabel("Allow Grouping:")
+        form.addRow(self._campaign_row_label, self.campaign)
+
+        self.note = QLineEdit()
+        form.addRow("Note:", self.note)
+
+        layout.addLayout(form)
+
+        self._hint = QLabel("")
+        self._hint.setStyleSheet("color:#6b7280;font-size:10px;")
+        self._hint.setWordWrap(True)
+        layout.addWidget(self._hint)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self._ok)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+        self._on_type_changed("SKU")
+
+    def _on_type_changed(self, t: str):
+        self.entity_type = t
+        is_sku = t == "SKU"
+        self._code_label.setText("SKU Code:" if is_sku else "Material Code:")
+        self._name_label.setText("SKU Name:" if is_sku else "Material Name:")
+        self._lead_label.setText("Post Lead Days:" if is_sku else "Post Lead Days (QC):")
+        self._campaign_row_label.setVisible(is_sku)
+        self.campaign.setVisible(is_sku)
+        self._hint.setText(
+            "When enabled, same-SKU orders within max_consolidation_days are merged into one run."
+            if is_sku else
+            "Semi-finished / intermediate material used in process routing.")
+
+    def _ok(self):
+        code = self.code.text().strip()
+        if not code:
+            label = "SKU Code" if self.entity_type == "SKU" else "Material Code"
+            QMessageBox.warning(self, "Error", f"{label} is required")
+            return
+        if self.entity_type == "SKU":
+            self.result = {
+                "sku_code":       code,
+                "sku_name":       self.name.text().strip(),
+                "uom":            self.uom.value(),
+                "post_lead_days": self.lead.value(),
+                "campaign_mode":  1 if self.campaign.isChecked() else 0,
+                "note":           self.note.text() or None,
+            }
+        else:
+            self.result = {
+                "material_code":  code,
+                "material_name":  self.name.text().strip(),
+                "uom":            self.uom.value(),
+                "post_lead_days": self.lead.value(),
+                "note":           self.note.text() or None,
+            }
+        self.accept()
 
 
 class SKUEditDialog(QDialog):
