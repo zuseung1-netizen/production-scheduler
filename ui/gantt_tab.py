@@ -1550,9 +1550,6 @@ class GanttCanvas(QWidget):
             self.update()
         if plan:
             self.setCursor(Qt.CursorShape.OpenHandCursor)
-            slot_idx, slot_total = self._plan_layout.get(plan["plan_id"], (0, 1))
-            stack_hint = (f"  ⚠ {slot_total} plans in this slot — "
-                          f"card {slot_idx + 1} of {slot_total}\n") if slot_total > 1 else ""
             is_mat = plan.get("entity_type") == "MATERIAL"
             if is_mat:
                 gid     = plan.get("material_group_id")
@@ -1562,7 +1559,6 @@ class GanttCanvas(QWidget):
                     f"  qty:{m['qty_required']}  due:{m['due_date']}"
                     for m in members) or "  (no demand group)"
                 tip = (f"[MATERIAL PLAN]\n"
-                       f"{stack_hint}"
                        f"Material: {plan['entity_code']}\n"
                        f"Process: {plan['process_name']}  "
                        f"Room: {plan['room_code']}  Shift: {plan['shift_no']}\n"
@@ -1578,7 +1574,6 @@ class GanttCanvas(QWidget):
                 customer = so.get("customer_name") or ""
                 tip = (f"SO: {plan['so_number']}  SKU: {plan['sku_code']}  "
                        f"Line: {plan['line_item']}\n"
-                       f"{stack_hint}"
                        f"Customer: {customer}\n"
                        f"Room: {plan['room_code']}  Process: {plan['process_name']}\n"
                        f"Date: {plan['plan_date']}  Shift: {plan['shift_no']}\n"
