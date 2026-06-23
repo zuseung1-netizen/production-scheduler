@@ -268,6 +268,10 @@ class SOTab(QWidget):
         menu.addAction("📅 Set Start-No-Earlier", lambda: self._set_start_date(so_no, sku, li))
         menu.addSeparator()
         menu.addAction("📦 Allocate Inventory", lambda: self._open_inv_allocation(so_no, sku, li))
+        menu.addSeparator()
+        act_del = menu.addAction("🗑 Delete SO")
+        act_del.setToolTip("Permanently remove this SO and its unlocked plans")
+        act_del.triggered.connect(lambda: self._delete_so(so_no, sku, li))
         menu.exec(QCursor.pos())
 
     def _edit_row(self):
@@ -406,6 +410,27 @@ class SOTab(QWidget):
         if QMessageBox.question(self, "Close SO", f"Close {so_no}/{sku}/{li}?") == QMessageBox.StandardButton.Yes:
             SORepo.close(so_no, sku, li)
             self.refresh()
+
+    def _delete_so(self, so_no, sku, li):
+        from data.repositories import PlanRepo
+        locked_plans = [p for p in PlanRepo.for_so(so_no, sku, li)
+                        if p.get("is_locked")]
+        warn = ""
+        if locked_plans:
+            warn = (f"\n\n⚠ {len(locked_plans)} locked plan(s) will NOT be deleted. "
+                    "Unlock them first if you also want to remove them.")
+        ans = QMessageBox.question(
+            self, "Delete SO",
+            f"Permanently delete SO  {so_no} / {sku} / {li}?\n"
+            f"Unlocked plans and inventory allocations will also be removed."
+            f"{warn}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        SORepo.delete(so_no, sku, li)
+        self.refresh()
+        if self.main_window and hasattr(self.main_window, "gantt_tab"):
+            self.main_window.gantt_tab.refresh()
 
     def _set_priority(self, so_no, sku, li):
         so = SORepo.get(so_no, sku, li)

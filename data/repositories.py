@@ -526,6 +526,23 @@ class SORepo:
         return _rows_to_dicts(rows)
 
     @staticmethod
+    def delete(so_number: str, sku_code: str, line_item: str):
+        """Hard-delete an SO row and its unlocked production plans + inventory allocations."""
+        with get_connection() as conn:
+            conn.execute(
+                "DELETE FROM so_inventory_allocation "
+                "WHERE so_number=? AND sku_code=? AND line_item=?",
+                (so_number, sku_code, line_item))
+            conn.execute(
+                "DELETE FROM production_plan "
+                "WHERE so_number=? AND sku_code=? AND line_item=? AND is_locked=0",
+                (so_number, sku_code, line_item))
+            conn.execute(
+                "DELETE FROM sales_order "
+                "WHERE so_number=? AND sku_code=? AND line_item=?",
+                (so_number, sku_code, line_item))
+
+    @staticmethod
     def close(so_number: str, sku_code: str, line_item: str,
               batch_id: str = None):
         existing = SORepo.get(so_number, sku_code, line_item)
