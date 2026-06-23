@@ -106,6 +106,15 @@ class Scheduler:
             for room in self.rooms
             for rp in self.room_procs[room]
         }
+        # Room type exclusivity: how many routing steps allow each room type.
+        # Lower count = more exclusive = should be tried first by default.
+        excl: Dict[str, int] = {}
+        for r in ProcessRoutingRepo.all():
+            for rt in (r.get("allowed_room_types") or "").split(","):
+                rt = rt.strip()
+                if rt:
+                    excl[rt] = excl.get(rt, 0) + 1
+        self._room_type_exclusivity: Dict[str, int] = excl
 
     # ── Public API ───────────────────────────────────────────────────────────
 
@@ -311,7 +320,7 @@ class Scheduler:
 
             candidates = self._candidates(
                 sim_slot_map, step["process_name"], eligible, d0, upper_d, upper_s,
-                sku_code)
+                sku_code, step.get("room_type_priority") or "")
 
             step_allocated: List[Tuple] = []
             step_rem = qty_to_plan
@@ -1358,9 +1367,10 @@ class Scheduler:
                 else:
                     upper_d, upper_s = d1, shift_max
 
+            rtp = step.get("room_type_priority") or ""
             candidates = self._candidates(
                 slot_map, step["process_name"], eligible, d0, upper_d, upper_s,
-                sku_code)
+                sku_code, rtp)
 
             # Final step has no slots in constrained window → fall back to full
             # date range so production is always scheduled, even if it will be late.
@@ -1375,7 +1385,7 @@ class Scheduler:
                 upper_d, upper_s = d1, shift_max
                 candidates = self._candidates(
                     slot_map, step["process_name"], eligible, d0, upper_d, upper_s,
-                    sku_code)
+                    sku_code, rtp)
 
             allocated: List[Tuple] = []
             step_rem = qty_to_plan
@@ -1605,7 +1615,8 @@ class Scheduler:
             d0_eff = max(earliest, _date(date_from))
             candidates = self._candidates(
                 slot_map, step["process_name"], eligible,
-                d0_eff, upper_d, upper_s, mat_code)
+                d0_eff, upper_d, upper_s, mat_code,
+                step.get("room_type_priority") or "")
 
             allocated: List[Tuple] = []
             step_rem = total_qty
@@ -1652,7 +1663,8 @@ class Scheduler:
     # ── Shared slot utilities ────────────────────────────────────────────────
 
     def _candidates(self, slot_map, process_name, eligible_rooms,
-                    d0, d_upper, shift_upper, sku_code: str = ""):
+                    d0, d_upper, shift_upper, sku_code: str = "",
+                    room_type_priority: str = ""):
         eligible_codes = {r["room_code"] for r in eligible_rooms}
         rp_lookup      = {r["room_code"]: r for r in eligible_rooms}
         raw = []
@@ -1670,23 +1682,38 @@ class Scheduler:
                 continue
             raw.append((ds, sno, room, rp_lookup[room]))
 
+        # Room type rank: lower = tried first within the same (date, shift).
+        # Explicit priority list overrides the automatic exclusivity heuristic.
+        if room_type_priority:
+            priority_list = [t.strip() for t in room_type_priority.split(",") if t.strip()]
+            def _rt_rank(room_type: str) -> int:
+                try:
+                    return priority_list.index(room_type)
+                except ValueError:
+                    return len(priority_list)
+        else:
+            def _rt_rank(room_type: str) -> int:
+                # More exclusive room types (fewer SKUs allowed) come first.
+                return self._room_type_exclusivity.get(room_type, 0)
+
         if self.assign_mode == "UPH":
             def uph_key(item):
                 ds, sno, room, rp = item
                 hc = self._hc_dist_cache.get((ds, sno), {}).get(
                     (room, process_name), 0)
-                # Opt-A: prefer slots adjacent to already-placed same-SKU blocks
                 adj = (1 if sku_code and self._is_same_sku_adjacent(
                            room, process_name, ds, sno, sku_code) else 0)
-                return (-_date(ds).toordinal(), -sno, -adj, -calc_uph(rp, hc))
+                rt  = _rt_rank(rp.get("room_type", ""))
+                return (-_date(ds).toordinal(), -sno, rt, -adj, -calc_uph(rp, hc))
             raw.sort(key=uph_key)
         else:
             def cap_key(item):
                 ds, sno, room, rp = item
-                c = slot_map.get((ds, room, process_name, sno), 0.0)
+                c   = slot_map.get((ds, room, process_name, sno), 0.0)
                 adj = (1 if sku_code and self._is_same_sku_adjacent(
                            room, process_name, ds, sno, sku_code) else 0)
-                return (-_date(ds).toordinal(), -sno, -adj, -c)
+                rt  = _rt_rank(rp.get("room_type", ""))
+                return (-_date(ds).toordinal(), -sno, rt, -adj, -c)
             raw.sort(key=cap_key)
         return raw
 

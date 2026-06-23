@@ -321,7 +321,7 @@ def parse_room_preview(path: str) -> Tuple[bool, str, List[str], List[List[str]]
 def parse_process_routing_preview(path: str) -> Tuple[bool, str, List[str], List[List[str]]]:
     headers = ["Entity Type", "Entity Code", "Process Seq", "Process Name",
                "Allowed Room Types", "Requires Material", "Is Final",
-               "Min Gap Shifts", "Note"]
+               "Min Gap Shifts", "Room Type Priority", "Note"]
     if not HAS_OPENPYXL:
         return False, "openpyxl not installed", headers, []
     if not os.path.exists(path):
@@ -333,7 +333,6 @@ def parse_process_routing_preview(path: str) -> Tuple[bool, str, List[str], List
         for row in ws.iter_rows(min_row=2, values_only=True):
             if not row[0] or str(row[0]).startswith("#"):
                 continue
-            # reorder to match headers: ET, code, seq, name, allowed, reqmat, final, gap, note
             rows.append([
                 _safe_str(row[0]),  # EntityType
                 _safe_str(row[1]),  # EntityCode
@@ -343,6 +342,7 @@ def parse_process_routing_preview(path: str) -> Tuple[bool, str, List[str], List
                 _safe_str(row[5] if len(row) > 5 else ""),  # RequiresMaterial
                 _safe_str(row[6] if len(row) > 6 else ""),  # IsFinal
                 _safe_str(row[8] if len(row) > 8 else ""),  # MinGapShifts (col 9)
+                _safe_str(row[9] if len(row) > 9 else ""),  # RoomTypePriority (col 10)
                 _safe_str(row[7] if len(row) > 7 else ""),  # Note (col 8)
             ])
         return True, "", headers, rows
@@ -1025,8 +1025,8 @@ def upload_items(path: str) -> Tuple[bool, str]:
 
 PR_HEADERS    = ["EntityType", "EntityCode", "ProcessSeq", "ProcessName",
                  "AllowedRoomTypes", "RequiresMaterialCode", "IsFinalSeq", "Note",
-                 "MinGapShifts"]
-PR_COL_WIDTHS = [12, 16, 10, 20, 22, 20, 12, 30, 14]
+                 "MinGapShifts", "RoomTypePriority"]
+PR_COL_WIDTHS = [12, 16, 10, 20, 22, 20, 12, 30, 14, 22]
 
 
 def download_process_routing_template(path: str) -> Tuple[bool, str]:
@@ -1034,15 +1034,17 @@ def download_process_routing_template(path: str) -> Tuple[bool, str]:
         return False, "openpyxl not installed"
     wb = Workbook(); ws = wb.active; ws.title = "ProcessRouting"
     _write_header(ws, PR_HEADERS); _col_widths(ws, PR_COL_WIDTHS)
-    ws.append(["SKU",      "SKU-A",   1, "FILL-STD",  "TYPE-A",      "MAT-001", 0, "Step 1 needs MAT-001", 0])
-    ws.append(["SKU",      "SKU-A",   2, "PACK-STD",  "TYPE-A",      "",        1, "Final step",            0])
-    ws.append(["MATERIAL", "MAT-001", 1, "SEMI-PROC", "TYPE-B",      "",        1, "Material final step",   0])
+    ws.append(["SKU",      "SKU-A",   1, "FILL-STD",  "TYPE-A,TYPE-B", "MAT-001", 0, "Step 1 needs MAT-001", 0, "TYPE-A,TYPE-B"])
+    ws.append(["SKU",      "SKU-A",   2, "PACK-STD",  "TYPE-A",        "",        1, "Final step",            0, ""])
+    ws.append(["MATERIAL", "MAT-001", 1, "SEMI-PROC", "TYPE-B",        "",        1, "Material final step",   0, ""])
     ws.append([])
     ws.append(["# EntityType: SKU or MATERIAL"])
     ws.append(["# IsFinalSeq: 1 = final (MRP trigger), 0 = intermediate"])
     ws.append(["# RequiresMaterialCode: leave blank if not needed"])
     ws.append(["# MinGapShifts: empty shifts required between previous step end and this step start"])
     ws.append(["#   0 = adjacent shift OK  |  1 = 1 shift gap  |  2 = 2 shifts gap (≈1 day in 2-shift)"])
+    ws.append(["# RoomTypePriority: ordered comma-separated room types to try first (leave blank = auto exclusivity heuristic)"])
+    ws.append(["#   e.g. TYPE-A,TYPE-B  means TYPE-A is tried before TYPE-B within the same date/shift"])
     wb.save(path)
     return True, path
 
@@ -1096,6 +1098,7 @@ def upload_process_routing(path: str, confirmed: bool = False) -> Tuple[bool, st
             fin  = int(row[6]) if row[6] is not None else 0
             note = str(row[7]) if row[7] else None
             gap  = int(row[8]) if len(row) > 8 and row[8] is not None else 0
+            rtp  = str(row[9]).strip() if len(row) > 9 and row[9] else None
             if not all([et, code, seq, proc, alwd]): continue
             seen_entities.add((et, code))
             rows_to_insert.append({
@@ -1105,6 +1108,7 @@ def upload_process_routing(path: str, confirmed: bool = False) -> Tuple[bool, st
                 "requires_material_code": rmat or None,
                 "is_final_seq": fin, "note": note,
                 "min_gap_shifts": gap,
+                "room_type_priority": rtp,
             })
             count += 1
 

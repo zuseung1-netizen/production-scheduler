@@ -160,23 +160,25 @@ class ProcessRoutingRepo:
         data.setdefault("requires_material_code", None)
         data.setdefault("min_gap_shifts", 0)
         data.setdefault("note", None)
+        data.setdefault("room_type_priority", None)
         with get_connection() as conn:
             conn.execute("""
                 INSERT INTO process_routing
                     (entity_type,entity_code,process_seq,process_name,
                      allowed_room_types,is_final_seq,requires_material_code,
-                     min_gap_shifts,note)
+                     min_gap_shifts,note,room_type_priority)
                 VALUES
                     (:entity_type,:entity_code,:process_seq,:process_name,
                      :allowed_room_types,:is_final_seq,:requires_material_code,
-                     :min_gap_shifts,:note)
+                     :min_gap_shifts,:note,:room_type_priority)
                 ON CONFLICT(entity_type,entity_code,process_seq) DO UPDATE SET
                     process_name=excluded.process_name,
                     allowed_room_types=excluded.allowed_room_types,
                     is_final_seq=excluded.is_final_seq,
                     requires_material_code=excluded.requires_material_code,
                     min_gap_shifts=excluded.min_gap_shifts,
-                    note=excluded.note
+                    note=excluded.note,
+                    room_type_priority=excluded.room_type_priority
             """, data)
 
     @staticmethod

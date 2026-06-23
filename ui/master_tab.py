@@ -1696,7 +1696,8 @@ class MaterialEditDialog(QDialog):
 
 class ProcessRoutingWidget(QWidget):
     COLS = ["Entity Type", "Entity Code", "Seq", "Process Name",
-            "Allowed Room Types", "Needs Material", "Final", "Min Gap (shifts)", "Note"]
+            "Allowed Room Types", "Needs Material", "Final", "Min Gap (shifts)",
+            "Room Type Priority", "Note"]
     _READONLY_COLS = {0, 1, 2}  # Entity Type, Entity Code, Seq are PK
 
     def __init__(self, parent=None):
@@ -1765,11 +1766,12 @@ class ProcessRoutingWidget(QWidget):
             final_txt = "✅" if r["is_final_seq"] else ""
             gap_val   = int(r.get("min_gap_shifts") or 0)
             gap_txt   = str(gap_val)
+            rtp       = r.get("room_type_priority") or ""
             for ci, val in enumerate([
                 r["entity_type"], r["entity_code"], r["process_seq"],
                 r["process_name"], r["allowed_room_types"],
                 r.get("requires_material_code") or "",
-                final_txt, gap_txt, r["note"] or ""
+                final_txt, gap_txt, rtp, r["note"] or ""
             ]):
                 item = QTableWidgetItem(str(val))
                 if ci in self._READONLY_COLS:
@@ -1782,6 +1784,8 @@ class ProcessRoutingWidget(QWidget):
                     item.setBackground(QBrush(QColor("#fff0d0")))
                 if gap_val > 0 and ci == 7:
                     item.setBackground(QBrush(QColor("#e8f0ff")))
+                if rtp and ci == 8:
+                    item.setBackground(QBrush(QColor("#f0e8ff")))
                 self.table.setItem(ri, ci, item)
         self._loading = False
 
@@ -1847,7 +1851,7 @@ class ProcessRoutingWidget(QWidget):
             self.table.setEditTriggers(
                 QAbstractItemView.EditTrigger.DoubleClicked |
                 QAbstractItemView.EditTrigger.EditKeyPressed)
-            self.info_label.setText("✏ Edit mode — Final column: '✅' or blank; Min Gap: integer")
+            self.info_label.setText("✏ Edit mode — Final: '✅' or blank  |  Min Gap: integer  |  Room Type Priority: e.g. TYPE-A,TYPE-B")
             self.info_label.setStyleSheet(
                 "color:#7a5800; background:#fff9c4; padding:4px; border-radius:4px;")
         else:
@@ -1887,7 +1891,8 @@ class ProcessRoutingWidget(QWidget):
                 final_txt    = self.table.item(ri, 6).text().strip()
                 is_final     = 1 if final_txt in ("✅", "1", "yes", "true") else 0
                 min_gap      = int(self.table.item(ri, 7).text() or 0)
-                note         = self.table.item(ri, 8).text() or None
+                rtp          = self.table.item(ri, 8).text().strip() or None
+                note         = self.table.item(ri, 9).text() or None
                 if not allowed:
                     errors.append(f"Row {ri+1}: Allowed Room Types cannot be empty")
                     continue
@@ -1900,6 +1905,7 @@ class ProcessRoutingWidget(QWidget):
                     "requires_material_code": req_mat,
                     "is_final_seq":           is_final,
                     "min_gap_shifts":         min_gap,
+                    "room_type_priority":     rtp,
                     "note":                   note,
                 })
                 saved += 1
@@ -2027,17 +2033,26 @@ class ProcessRoutingEditDialog(QDialog):
             "Empty shifts required between the previous step's end and this step's start.\n"
             "0 = adjacent shift OK  |  1 = 1 shift gap  |  2 ≈ 1 day (2-shift system)")
 
+        self.rtp = QLineEdit(data.get("room_type_priority") or "")
+        self.rtp.setPlaceholderText("e.g. TYPE-A,TYPE-B  (leave blank = auto exclusivity)")
+        self.rtp.setToolTip(
+            "Override room type assignment priority for this step.\n"
+            "Comma-separated list: leftmost type tried first.\n"
+            "Leave blank to use automatic exclusivity heuristic\n"
+            "(more exclusive room types = fewer SKUs allowed = tried first).")
+
         self.note = QLineEdit(data.get("note") or "")
 
-        form.addRow("Entity Type:",         self.etype)
-        form.addRow("Entity Code:",         self.ecode)
-        form.addRow("Sequence:",            self.seq)
-        form.addRow("Process Name:",        self.proc)
-        form.addRow("Allowed Room Types:",  self.allowed)
-        form.addRow("Requires Material:",   self.req_mat)
-        form.addRow("",                     self.is_final)
-        form.addRow("Min Gap Before Step:", self.min_gap)
-        form.addRow("Note:",                self.note)
+        form.addRow("Entity Type:",           self.etype)
+        form.addRow("Entity Code:",           self.ecode)
+        form.addRow("Sequence:",              self.seq)
+        form.addRow("Process Name:",          self.proc)
+        form.addRow("Allowed Room Types:",    self.allowed)
+        form.addRow("Requires Material:",     self.req_mat)
+        form.addRow("",                       self.is_final)
+        form.addRow("Min Gap Before Step:",   self.min_gap)
+        form.addRow("Room Type Priority:",    self.rtp)
+        form.addRow("Note:",                  self.note)
         layout.addLayout(form)
 
         btns = QDialogButtonBox(
@@ -2078,6 +2093,7 @@ class ProcessRoutingEditDialog(QDialog):
                 MaterialRepo.upsert(dlg.result)
                 self.req_mat.addItem(dlg.result["material_code"])
 
+        rtp = self.rtp.text().strip() or None
         self.result = {
             "entity_type":            self.etype.currentText(),
             "entity_code":            self.ecode.currentText().strip(),
@@ -2087,6 +2103,7 @@ class ProcessRoutingEditDialog(QDialog):
             "requires_material_code": req_mat,
             "is_final_seq":           1 if self.is_final.isChecked() else 0,
             "min_gap_shifts":         self.min_gap.value(),
+            "room_type_priority":     rtp,
             "note":                   self.note.text() or None,
         }
         self.accept()

@@ -1493,20 +1493,15 @@ class GanttCanvas(QWidget):
                            QFontMetrics(f_l3).elidedText(
                                so_str, Qt.TextElideMode.ElideRight, tw))
 
-            if not is_mat and prod_deadline:
-                days_left = (prod_deadline - date.today()).days
-                due_label = f"Prd {prod_deadline.strftime('%m/%d')}"
-                if days_left < 0:
-                    due_clr = DUE_TAG_LATE_FG
-                elif days_left <= 3:
-                    due_clr = DUE_TAG_FG
-                else:
-                    due_clr = CARD_TEXT_L3
-                p.setPen(QPen(due_clr))
-                p.setFont(f_l3)
-                p.drawText(QRect(tx, ty + 35, tw, 10),
-                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                           due_label)
+            if not is_mat:
+                customer_name = (so or {}).get("customer_name") or ""
+                if customer_name:
+                    p.setPen(QPen(CARD_TEXT_L3))
+                    p.setFont(f_l3)
+                    p.drawText(QRect(tx, ty + 35, tw, 10),
+                               Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                               QFontMetrics(f_l3).elidedText(
+                                   customer_name, Qt.TextElideMode.ElideRight, tw))
 
             if plan.get("consolidation_group"):
                 consol_groups.setdefault(plan["consolidation_group"], []).append(rect)

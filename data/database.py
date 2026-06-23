@@ -82,6 +82,10 @@ def init_db():
             c.execute("ALTER TABLE process_routing DROP COLUMN min_gap_hours")
         except Exception:
             pass  # SQLite < 3.35 — column stays but is unused
+    if "room_type_priority" not in existing_cols:
+        c.execute(
+            "ALTER TABLE process_routing ADD COLUMN room_type_priority TEXT"
+        )
 
     # ── calendar.deduct_minutes migration ────────────────────────────────────
     cal_cols = [r[1] for r in c.execute("PRAGMA table_info(calendar)").fetchall()]
