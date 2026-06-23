@@ -21,7 +21,8 @@ from utils.korean_holidays import is_holiday, holiday_name
 from utils.excel_io import (
     upload_sku, download_sku_template,
     upload_room, download_room_template,
-    upload_sku_process, download_sku_process_template
+    upload_sku_process, download_sku_process_template,
+    download_item_template, upload_items,
 )
 
 
@@ -96,7 +97,7 @@ class MasterTab(QWidget):
 class ItemMasterWidget(QWidget):
     """Single tab for both SKU and Material masters."""
 
-    COLS    = ["Type", "Code", "Name", "UoM", "Post Lead Days", "Campaign", "Note"]
+    COLS    = ["Type", "Code", "Name", "UoM", "Post Lead Days", "Allow Grouping", "Note"]
     _SKU_BG  = QColor("#ddeeff")
     _MAT_BG  = QColor("#ddf0dd")
     _MISS_BG = QColor("#ffe0b2")
@@ -131,8 +132,7 @@ class ItemMasterWidget(QWidget):
         self._btn_save.clicked.connect(self._save_changes)
         bbar.addWidget(self._btn_save)
         for label, slot in [
-            ("📤 Upload SKU",      self._upload_sku),
-            ("📤 Upload Material", self._upload_material),
+            ("📤 Upload Items",    self._upload_items),
             ("⬇ Templates",       self._templates),
         ]:
             b = QPushButton(label); b.clicked.connect(slot); bbar.addWidget(b)
@@ -203,7 +203,7 @@ class ItemMasterWidget(QWidget):
             ]):
                 item = QTableWidgetItem(str(val))
                 item.setBackground(QBrush(bg))
-                if ci in (0, 1, 5):  # Type / Code / Campaign are read-only (toggle via dialog)
+                if ci in (0, 1, 5):  # Type / Code / Allow Grouping are read-only (toggle via dialog)
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.table.setItem(ri, ci, item)
 
@@ -300,7 +300,7 @@ class ItemMasterWidget(QWidget):
                 name = self.table.item(ri, 2).text().strip()
                 uom  = int(self.table.item(ri, 3).text())
                 lead = int(self.table.item(ri, 4).text())
-                # col 5 = Campaign (read-only display, not editable inline)
+                # col 5 = Allow Grouping (read-only display, toggle via edit dialog)
                 note = self.table.item(ri, 6).text() or None
                 if item_type == "SKU":
                     # preserve existing campaign_mode — inline save doesn't change it
@@ -328,62 +328,30 @@ class ItemMasterWidget(QWidget):
 
     # ── upload / template ──────────────────────────────────────────────────
 
-    def _upload_sku(self):
-        from utils.excel_io import parse_sku_preview
+    def _upload_items(self):
+        from utils.excel_io import parse_item_preview
         path, _ = QFileDialog.getOpenFileName(
-            self, "Upload SKU Master Excel", "", "Excel (*.xlsx)")
+            self, "Upload Item Master Excel", "", "Excel (*.xlsx)")
         if not path:
             return
-        ok, err, headers, rows = parse_sku_preview(path)
+        ok, err, headers, rows = parse_item_preview(path)
         if not ok:
             QMessageBox.warning(self, "Parse Error", err)
             return
-        dlg = UploadPreviewDialog("SKU Master — Upload Preview", headers, rows, self)
+        dlg = UploadPreviewDialog("Item Master — Upload Preview", headers, rows, self)
         if not dlg.exec() or not dlg._confirmed:
             return
-        ok, msg = upload_sku(path)
-        (QMessageBox.information if ok else QMessageBox.warning)(self, "Upload SKU", msg)
-        if ok:
-            self._load()
-
-    def _upload_material(self):
-        from utils.excel_io import upload_material, parse_material_preview
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Upload Material Master Excel", "", "Excel (*.xlsx)")
-        if not path:
-            return
-        ok, err, headers, rows = parse_material_preview(path)
-        if not ok:
-            QMessageBox.warning(self, "Parse Error", err)
-            return
-        dlg = UploadPreviewDialog("Material Master — Upload Preview", headers, rows, self)
-        if not dlg.exec() or not dlg._confirmed:
-            return
-        ok, msg = upload_material(path)
-        (QMessageBox.information if ok else QMessageBox.warning)(self, "Upload Material", msg)
+        ok, msg = upload_items(path)
+        (QMessageBox.information if ok else QMessageBox.warning)(self, "Upload Items", msg)
         if ok:
             self._load()
 
     def _templates(self):
-        menu = QMenu(self)
-        act_sku = menu.addAction("SKU Master template (.xlsx)")
-        act_mat = menu.addAction("Material Master template (.xlsx)")
-        act = menu.exec(QCursor.pos())
-        if act == act_sku:
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Save SKU Template", "SKU_template.xlsx", "Excel (*.xlsx)")
-            if path:
-                ok, msg = download_sku_template(path)
-                (QMessageBox.information if ok else QMessageBox.warning)(
-                    self, "Template", msg)
-        elif act == act_mat:
-            from utils.excel_io import download_material_template
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Save Material Template", "Material_template.xlsx", "Excel (*.xlsx)")
-            if path:
-                ok, msg = download_material_template(path)
-                (QMessageBox.information if ok else QMessageBox.warning)(
-                    self, "Template", msg)
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Item Master Template", "01_Item_Master.xlsx", "Excel (*.xlsx)")
+        if path:
+            ok, msg = download_item_template(path)
+            (QMessageBox.information if ok else QMessageBox.warning)(self, "Template", msg)
 
 
 class SKUEditDialog(QDialog):
@@ -398,19 +366,19 @@ class SKUEditDialog(QDialog):
         self.name     = QLineEdit(data.get("sku_name", ""))
         self.uom      = QSpinBox(); self.uom.setRange(1, 9999); self.uom.setValue(data.get("uom", 1))
         self.lead     = QSpinBox(); self.lead.setRange(0, 365); self.lead.setValue(data.get("post_lead_days", 0))
-        self.campaign = QCheckBox("Enable campaign consolidation")
+        self.campaign = QCheckBox("Allow grouping (batch same-SKU orders)")
         self.campaign.setChecked(bool(int(data.get("campaign_mode", 1))))
         self.note     = QLineEdit(data.get("note") or "")
 
-        form.addRow("SKU Code:",       self.code)
-        form.addRow("SKU Name:",       self.name)
-        form.addRow("UoM (qty/EA):",   self.uom)
-        form.addRow("Post Lead Days:", self.lead)
-        form.addRow("Campaign Mode:",  self.campaign)
-        form.addRow("Note:",           self.note)
+        form.addRow("SKU Code:",        self.code)
+        form.addRow("SKU Name:",        self.name)
+        form.addRow("UoM (qty/EA):",    self.uom)
+        form.addRow("Post Lead Days:",  self.lead)
+        form.addRow("Allow Grouping:",  self.campaign)
+        form.addRow("Note:",            self.note)
         layout.addLayout(form)
 
-        note_lbl = QLabel("Campaign mode consolidates same-SKU orders within max_consolidation_days.\nDisable for SKUs where early production risks expiry.")
+        note_lbl = QLabel("When enabled, same-SKU orders within max_consolidation_days are merged into one production run.\nDisable for SKUs where batching risks early expiry.")
         note_lbl.setStyleSheet("color:#6b7280;font-size:10px;")
         note_lbl.setWordWrap(True)
         layout.addWidget(note_lbl)

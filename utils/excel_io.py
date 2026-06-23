@@ -930,6 +930,97 @@ def upload_material(path: str) -> Tuple[bool, str]:
         return False, str(e)
 
 
+# ─── Item Master (SKU + Material unified) Template & Upload ──────────────────
+
+ITEM_HEADERS    = ["EntityType", "Code", "Name", "UoM", "PostLeadDays", "AllowGrouping", "Note"]
+ITEM_COL_WIDTHS = [12, 16, 30, 8, 14, 14, 30]
+
+
+def parse_item_preview(path: str) -> Tuple[bool, str, List[str], List[List[str]]]:
+    headers = ["Entity Type", "Code", "Name", "UoM", "Post Lead Days", "Allow Grouping", "Note"]
+    if not HAS_OPENPYXL:
+        return False, "openpyxl not installed", headers, []
+    if not os.path.exists(path):
+        return False, f"File not found: {path}", headers, []
+    try:
+        wb = load_workbook(path, data_only=True)
+        ws = wb["ItemMaster"] if "ItemMaster" in wb.sheetnames else wb.active
+        rows = []
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if not row[0] or str(row[0]).startswith("#"):
+                continue
+            rows.append([_safe_str(row[i] if i < len(row) else "") for i in range(7)])
+        return True, "", headers, rows
+    except Exception as e:
+        return False, str(e), headers, []
+
+
+def download_item_template(path: str) -> Tuple[bool, str]:
+    if not HAS_OPENPYXL:
+        return False, "openpyxl not installed"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "ItemMaster"
+    _write_header(ws, ITEM_HEADERS)
+    _col_widths(ws, ITEM_COL_WIDTHS)
+    ws.append(["SKU",      "SKU-A",   "Sample Product A",  30, 0, 1, ""])
+    ws.append(["SKU",      "SKU-B",   "Sample Product B",  30, 0, 1, ""])
+    ws.append(["MATERIAL", "MAT-001", "Semi-finished A",    1, 1, "", "QC lead 1 day"])
+    note_row = ws.max_row + 2
+    ws.cell(row=note_row, column=1, value="# EntityType: SKU or MATERIAL")
+    ws.cell(row=note_row + 1, column=1, value="# AllowGrouping: 1=batch same-SKU orders, 0=plan each order individually (SKU only)")
+    wb.save(path)
+    return True, path
+
+
+def upload_items(path: str) -> Tuple[bool, str]:
+    """Unified SKU + Material upload from a single ItemMaster sheet."""
+    if not HAS_OPENPYXL:
+        return False, "openpyxl not installed"
+    try:
+        from data.repositories import MaterialRepo
+        wb = load_workbook(path, data_only=True)
+        ws = wb["ItemMaster"] if "ItemMaster" in wb.sheetnames else wb.active
+        sku_count = mat_count = 0
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if not row[0]:
+                continue
+            entity_type = str(row[0]).strip().upper()
+            if entity_type.startswith("#"):
+                continue
+            code  = str(row[1]).strip() if row[1] else ""
+            name  = str(row[2]).strip() if row[2] else ""
+            uom   = int(row[3]) if row[3] else 1
+            lead  = int(row[4]) if row[4] else 0
+            allow = row[5]
+            note  = str(row[6]) if row[6] else None
+            if not code:
+                continue
+            if entity_type == "SKU":
+                campaign = 1 if (allow is None or allow == "" or int(allow) != 0) else 0
+                SKURepo.upsert({
+                    "sku_code":       code,
+                    "sku_name":       name,
+                    "uom":            uom,
+                    "post_lead_days": lead,
+                    "campaign_mode":  campaign,
+                    "note":           note,
+                })
+                sku_count += 1
+            elif entity_type == "MATERIAL":
+                MaterialRepo.upsert({
+                    "material_code":  code,
+                    "material_name":  name,
+                    "uom":            uom,
+                    "post_lead_days": lead,
+                    "note":           note,
+                })
+                mat_count += 1
+        return True, f"Imported {sku_count} SKU(s), {mat_count} material(s)"
+    except Exception as e:
+        return False, str(e)
+
+
 # ─── Process Routing Template & Upload ───────────────────────────────────────
 
 PR_HEADERS    = ["EntityType", "EntityCode", "ProcessSeq", "ProcessName",
