@@ -496,7 +496,7 @@ class SKUEditDialog(QDialog):
 # ─── Room / Process Master ────────────────────────────────────────────────────
 
 class RoomMasterWidget(QWidget):
-    COLS = ["Room Code", "Process Name", "Type", "UPPH", "UPH Fixed",
+    COLS = ["Room Code", "Process Name", "Process Type", "Room Type", "UPPH", "UPH Fixed",
             "HC Min", "HC Max", "HC Fixed", "Changeover (shifts)", "Note"]
     _READONLY_COLS = {0, 1}  # Room Code, Process Name are PK
 
@@ -541,6 +541,7 @@ class RoomMasterWidget(QWidget):
         for ri, r in enumerate(rows):
             for ci, val in enumerate([
                 r["room_code"], r["process_name"], r["process_type"],
+                r.get("room_type") or "",
                 r["upph"] or "", r["uph_fixed"] or "",
                 r["hc_min"] or "", r["hc_max"] or "", r["hc_fixed"] or "",
                 r.get("changeover_shifts") or 0,
@@ -645,18 +646,19 @@ class RoomMasterWidget(QWidget):
                 room_code         = self.table.item(ri, 0).text().strip()
                 process_name      = self.table.item(ri, 1).text().strip()
                 process_type      = self.table.item(ri, 2).text().strip() or "MANUAL"
-                upph              = float(self.table.item(ri, 3).text() or 0) or None
-                uph_fixed         = float(self.table.item(ri, 4).text() or 0) or None
-                hc_min            = int(self.table.item(ri, 5).text() or 0) or None
-                hc_max            = int(self.table.item(ri, 6).text() or 0) or None
-                hc_fixed          = int(self.table.item(ri, 7).text() or 0) or None
-                changeover_shifts = int(self.table.item(ri, 8).text() or 0)
-                note              = self.table.item(ri, 9).text() or None
+                room_type         = self.table.item(ri, 3).text().strip() or orig.get("room_type", "TYPE-A")
+                upph              = float(self.table.item(ri, 4).text() or 0) or None
+                uph_fixed         = float(self.table.item(ri, 5).text() or 0) or None
+                hc_min            = int(self.table.item(ri, 6).text() or 0) or None
+                hc_max            = int(self.table.item(ri, 7).text() or 0) or None
+                hc_fixed          = int(self.table.item(ri, 8).text() or 0) or None
+                changeover_shifts = int(self.table.item(ri, 9).text() or 0)
+                note              = self.table.item(ri, 10).text() or None
                 RoomRepo.upsert({
                     "room_code":          room_code,
                     "process_name":       process_name,
                     "process_type":       process_type,
-                    "room_type":          orig.get("room_type", "TYPE-A"),
+                    "room_type":          room_type,
                     "upph":               upph,
                     "uph_fixed":          uph_fixed,
                     "hc_min":             hc_min,
