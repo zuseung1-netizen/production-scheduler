@@ -842,14 +842,20 @@ class GanttCanvas(QWidget):
     def _build_layout_and_heights(self):
         """Assign vertical slot index to each plan (for stacking) and compute
         per-row heights based on the max number of plans in any slot of that row.
+        Uses the actual rendered column index as the slot key so that day-view
+        (shift_no ignored) and shift-view produce correct non-overlapping stacks.
         """
         from collections import defaultdict
-        # slot key: (plan_date, shift_no, row_key) — defines one visual cell
+        # slot key: (col_index, row_key) — col_index already accounts for
+        # shift_view vs day-view, so plans that render in the same visual cell
+        # are grouped together regardless of their shift_no.
         slot_plans: Dict[Tuple, List[int]] = defaultdict(list)
         for p in self._plans:
-            rk = self._plan_row_key(p)
-            sk = (p["plan_date"], p["shift_no"], rk)
-            slot_plans[sk].append(p["plan_id"])
+            rk  = self._plan_row_key(p)
+            col = self._date_to_col(p["plan_date"], p["shift_no"])
+            if col is None:
+                continue
+            slot_plans[(col, rk)].append(p["plan_id"])
 
         # Assign vertical index within each slot (sorted by plan_id for stability)
         self._plan_layout = {}
@@ -860,7 +866,7 @@ class GanttCanvas(QWidget):
 
         # Row heights: max cards-per-slot in each row × CARD_H
         row_max: Dict[str, int] = {}
-        for (_, _, rk), pids in slot_plans.items():
+        for (_, rk), pids in slot_plans.items():
             row_max[rk] = max(row_max.get(rk, 1), len(pids))
 
         self._row_y_list  = []
@@ -1308,10 +1314,10 @@ class GanttCanvas(QWidget):
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawRoundedRect(rect.adjusted(1, 1, -1, -1), CARD_RADIUS, CARD_RADIUS)
 
-            # ── Stack badge (N/M) when multiple plans share this slot ─────────
+            # ── Stack position badge when multiple plans share this slot ──────
             slot_idx, slot_total = self._plan_layout.get(plan["plan_id"], (0, 1))
             if slot_total > 1:
-                _sb_txt  = f"{slot_idx + 1}/{slot_total}"
+                _sb_txt  = f"#{slot_idx + 1}"
                 _sb_font = QFont("Segoe UI", 6, QFont.Weight.Bold)
                 _sb_w    = QFontMetrics(_sb_font).horizontalAdvance(_sb_txt) + 6
                 _sb_h    = 11
