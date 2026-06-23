@@ -4002,3 +4002,414 @@ class ScenarioTab(QWidget):
 
     def refresh(self):
         self._load_saved()
+
+
+# ─── Labor Utilization Tab ────────────────────────────────────────────────────
+
+class LaborUtilizationTab(QWidget):
+    """
+    Grid view: X-axis = Date × Shift, Y-axis = Room × Process
+    Cell = distributed HC allocated to that room/process in each shift.
+    Footer rows show Total HC, CRP HC, and Util %.
+    """
+
+    _COL_ZERO  = QColor(241, 245, 249)   # 0 HC — light gray
+    _COL_OK    = QColor(209, 250, 229)   # < 80 % — green
+    _COL_WARN  = QColor(254, 249, 195)   # 80–99 % — yellow
+    _COL_OVER  = QColor(254, 226, 226)   # ≥ 100 % — red
+    _COL_ROOM  = QColor(226, 232, 240)   # room header row
+    _COL_TOTAL = QColor(219, 234, 254)   # footer rows (blue tint)
+    _COL_TOTAL_OVER = QColor(254, 202, 202)   # Util% cell when ≥ 100 %
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._loaded = False
+        self._last_col_keys = []
+        self._last_flat_rows = []
+        self._last_dist: Dict = {}
+        self._build_ui()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+
+        # ── Controls ─────────────────────────────────────────────────────────
+        ctrl = QHBoxLayout()
+        ctrl.setSpacing(6)
+
+        ctrl.addWidget(QLabel("From:"))
+        self._from_edit = QDateEdit()
+        self._from_edit.setCalendarPopup(True)
+        self._from_edit.setDate(QDate.currentDate())
+        self._from_edit.setFixedWidth(110)
+        ctrl.addWidget(self._from_edit)
+
+        ctrl.addWidget(QLabel("To:"))
+        self._to_edit = QDateEdit()
+        self._to_edit.setCalendarPopup(True)
+        self._to_edit.setDate(QDate.currentDate().addDays(13))
+        self._to_edit.setFixedWidth(110)
+        ctrl.addWidget(self._to_edit)
+
+        btn_refresh = QPushButton("▶ Refresh")
+        btn_refresh.setFixedWidth(90)
+        btn_refresh.clicked.connect(self._load_table)
+        ctrl.addWidget(btn_refresh)
+
+        ctrl.addSpacing(16)
+
+        # Legend chips
+        for bg, fg, label in [
+            ("#d1fae5", "#166534", "< 80%"),
+            ("#fef9c3", "#854d0e", "80–99%"),
+            ("#fee2e2", "#991b1b", "≥ 100%"),
+            ("#f1f5f9", "#64748b", "0 HC"),
+        ]:
+            chip = QLabel(f"  {label}  ")
+            chip.setStyleSheet(
+                f"background:{bg}; color:{fg}; border-radius:3px; "
+                f"font-size:11px; padding:2px 4px;")
+            ctrl.addWidget(chip)
+
+        ctrl.addStretch()
+
+        btn_export = QPushButton("📥 Export")
+        btn_export.setFixedWidth(90)
+        btn_export.clicked.connect(self._export_excel)
+        btn_export.setStyleSheet(
+            "background:#2563EB; color:white; font-weight:bold; "
+            "border:none; border-radius:5px; padding:5px 10px;")
+        ctrl.addWidget(btn_export)
+
+        root.addLayout(ctrl)
+
+        # ── Status label ─────────────────────────────────────────────────────
+        self._status_lbl = QLabel("")
+        self._status_lbl.setStyleSheet("color:#64748b; font-size:11px;")
+        root.addWidget(self._status_lbl)
+
+        # ── Table ─────────────────────────────────────────────────────────────
+        self._table = QTableWidget()
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setMinimumSectionSize(70)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setAlternatingRowColors(False)
+        self._table.setStyleSheet(
+            "QTableWidget { gridline-color: #CBD5E1; }"
+            "QHeaderView::section { background:#334155; color:white; "
+            "  font-weight:bold; font-size:11px; padding:4px; border:none; }")
+        root.addWidget(self._table)
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def refresh(self):
+        if not self._loaded:
+            self._load_table()
+
+    def invalidate(self):
+        """Call after auto-plan to force reload on next tab visit."""
+        self._loaded = False
+
+    # ── Data loading ──────────────────────────────────────────────────────────
+
+    def _load_table(self):
+        d_from = self._from_edit.date().toString("yyyy-MM-dd")
+        d_to   = self._to_edit.date().toString("yyyy-MM-dd")
+
+        if d_from > d_to:
+            QMessageBox.warning(self, "Invalid Range",
+                                "From date must be ≤ To date.")
+            return
+
+        self._status_lbl.setText("Loading…")
+        self.repaint()
+
+        dist = scheduler.compute_hc_distribution_preview(d_from, d_to)
+
+        if not dist:
+            self._table.setRowCount(0)
+            self._table.setColumnCount(0)
+            self._status_lbl.setText(
+                "No HC data for this range. "
+                "Check CRP file path (App Config → CRP File Path).")
+            self._loaded = True
+            return
+
+        # ── Column keys: sorted (date_str, shift_no) ─────────────────────────
+        shifts_all = ShiftRepo.all()
+        shift_order = {s["shift_no"]: i for i, s in
+                       enumerate(sorted(shifts_all, key=lambda x: x["shift_no"]))}
+        col_keys = sorted(dist.keys(),
+                          key=lambda k: (k[0], shift_order.get(k[1], k[1])))
+
+        # ── Row keys: (room, process) in master-defined order ─────────────────
+        rooms = RoomRepo.rooms()
+        seen: set = set()
+        flat_rows: List = []   # ("room_header", room, "") or ("proc", room, proc)
+        for room in rooms:
+            procs_for_room = [rp["process_name"]
+                              for rp in RoomRepo.processes_for_room(room)]
+            if not procs_for_room:
+                continue
+            flat_rows.append(("room_header", room, ""))
+            for proc in procs_for_room:
+                key = (room, proc)
+                if key not in seen:
+                    seen.add(key)
+                    flat_rows.append(("proc", room, proc))
+
+        if not flat_rows:
+            self._status_lbl.setText("No Room/Process masters found.")
+            self._loaded = True
+            return
+
+        N_FOOTER = 3
+        n_cols = 1 + len(col_keys)
+        n_rows = len(flat_rows) + N_FOOTER
+
+        self._table.setRowCount(n_rows)
+        self._table.setColumnCount(n_cols)
+
+        # Column headers
+        headers = ["Room / Process"] + [
+            f"{k[0][5:].replace('-', '/')}  S{k[1]}" for k in col_keys
+        ]
+        self._table.setHorizontalHeaderLabels(headers)
+
+        f_bold  = QFont("Segoe UI", 9)
+        f_bold.setBold(True)
+        f_norm  = QFont("Segoe UI", 9)
+
+        def _cell(text: str, font=None, bg=None, fg=None,
+                  center=True, selectable=True) -> QTableWidgetItem:
+            it = QTableWidgetItem(text)
+            if center:
+                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if font:
+                it.setFont(font)
+            if bg:
+                it.setBackground(QBrush(bg))
+            if fg:
+                it.setForeground(QBrush(fg))
+            if not selectable:
+                it.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            return it
+
+        # ── Data rows ─────────────────────────────────────────────────────────
+        for ri, (rtype, room, proc) in enumerate(flat_rows):
+            if rtype == "room_header":
+                it = _cell(f"  {room}", font=f_bold, bg=self._COL_ROOM,
+                           center=False, selectable=False)
+                self._table.setItem(ri, 0, it)
+                self._table.setSpan(ri, 0, 1, n_cols)
+                self._table.setRowHeight(ri, 22)
+            else:
+                self._table.setItem(
+                    ri, 0,
+                    _cell(f"    {proc}", font=f_norm, center=False))
+                self._table.setRowHeight(ri, 24)
+
+                for ci, col_key in enumerate(col_keys):
+                    hc_map    = dist.get(col_key, {})
+                    hc        = hc_map.get((room, proc), 0)
+                    crp_total = crp_manager.get_total_hc(col_key[0], col_key[1])
+
+                    text = str(hc) if hc > 0 else "—"
+                    bg   = self._COL_ZERO
+                    if hc > 0 and crp_total > 0:
+                        util = hc / crp_total
+                        bg = (self._COL_OVER  if util >= 1.0 else
+                              self._COL_WARN  if util >= 0.8 else
+                              self._COL_OK)
+                    elif hc > 0:
+                        bg = self._COL_OK
+
+                    self._table.setItem(ri, ci + 1, _cell(text, bg=bg))
+
+        # ── Footer rows ───────────────────────────────────────────────────────
+        footer_labels = ["Total HC", "CRP HC", "Util %"]
+        for fi, lbl in enumerate(footer_labels):
+            r = len(flat_rows) + fi
+            self._table.setItem(
+                r, 0,
+                _cell(lbl, font=f_bold, bg=self._COL_TOTAL,
+                      center=False, selectable=False))
+            self._table.setRowHeight(r, 24)
+
+        for ci, col_key in enumerate(col_keys):
+            hc_map    = dist.get(col_key, {})
+            total_hc  = sum(hc_map.values())
+            crp_total = crp_manager.get_total_hc(col_key[0], col_key[1])
+            util_pct  = round(total_hc / crp_total * 100) if crp_total > 0 else 0
+
+            values = [
+                str(total_hc),
+                str(crp_total) if crp_total > 0 else "—",
+                f"{util_pct}%" if crp_total > 0 else "—",
+            ]
+            for fi, txt in enumerate(values):
+                r  = len(flat_rows) + fi
+                bg = self._COL_TOTAL
+                fg = None
+                if fi == 2 and crp_total > 0:   # Util% row
+                    if util_pct >= 100:
+                        bg = self._COL_TOTAL_OVER
+                        fg = QColor(153, 27, 27)
+                    elif util_pct >= 80:
+                        fg = QColor(133, 77, 14)
+                self._table.setItem(
+                    r, ci + 1,
+                    _cell(txt, font=f_bold, bg=bg, fg=fg, selectable=False))
+
+        self._table.resizeColumnsToContents()
+        # Freeze first column width after resize
+        self._table.setColumnWidth(0, max(self._table.columnWidth(0), 180))
+
+        # Cache for export
+        self._last_col_keys  = col_keys
+        self._last_flat_rows = flat_rows
+        self._last_dist      = dist
+
+        n_shifts = len(col_keys)
+        n_rooms  = sum(1 for r in flat_rows if r[0] == "room_header")
+        self._status_lbl.setText(
+            f"{n_shifts} shift(s) across {d_from} – {d_to}  |  "
+            f"{n_rooms} room(s)  |  "
+            f"Color threshold: HC / CRP total  (80% = yellow, 100% = red)")
+        self._loaded = True
+
+    # ── Excel Export ──────────────────────────────────────────────────────────
+
+    def _export_excel(self):
+        if not self._last_col_keys:
+            QMessageBox.warning(self, "No Data",
+                                "Click Refresh to load data first.")
+            return
+
+        d_from = self._from_edit.date().toString("yyyy-MM-dd")
+        d_to   = self._to_edit.date().toString("yyyy-MM-dd")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Labor Utilization",
+            f"LaborUtil_{d_from}_{d_to}.xlsx", "Excel (*.xlsx)")
+        if not path:
+            return
+
+        try:
+            import openpyxl
+            from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Labor Utilization"
+
+            def _fill(hex6: str) -> PatternFill:
+                return PatternFill("solid", fgColor=hex6)
+
+            FILL_ROOM  = _fill("E2E8F0")
+            FILL_TOTAL = _fill("DBEAFE")
+            FILL_TOT_OVER = _fill("FECACA")
+            FILL_OK    = _fill("D1FAE5")
+            FILL_WARN  = _fill("FEF9C3")
+            FILL_OVER  = _fill("FEE2E2")
+            FILL_ZERO  = _fill("F1F5F9")
+
+            f_bold   = Font(bold=True)
+            f_hdr    = Font(bold=True, color="FFFFFF")
+            aln_c    = Alignment(horizontal="center", vertical="center")
+            aln_l    = Alignment(horizontal="left",   vertical="center")
+            thin     = Side(style="thin", color="CBD5E1")
+            brd      = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+            col_keys  = self._last_col_keys
+            flat_rows = self._last_flat_rows
+            dist      = self._last_dist
+            n_cols    = len(col_keys)
+
+            # ── Header row ────────────────────────────────────────────────────
+            hdr_fill = _fill("334155")
+            c = ws.cell(1, 1, "Room / Process")
+            c.font = f_hdr; c.fill = hdr_fill; c.alignment = aln_l; c.border = brd
+            for ci, col_key in enumerate(col_keys):
+                label = f"{col_key[0][5:].replace('-', '/')}  S{col_key[1]}"
+                c = ws.cell(1, ci + 2, label)
+                c.font = f_hdr; c.fill = hdr_fill; c.alignment = aln_c; c.border = brd
+            ws.row_dimensions[1].height = 22
+
+            # ── Data rows ─────────────────────────────────────────────────────
+            for ri, (rtype, room, proc) in enumerate(flat_rows):
+                r_excel = ri + 2
+                if rtype == "room_header":
+                    c = ws.cell(r_excel, 1, f"  {room}")
+                    c.font = f_bold; c.fill = FILL_ROOM; c.alignment = aln_l
+                    ws.merge_cells(start_row=r_excel, start_column=1,
+                                   end_row=r_excel, end_column=n_cols + 1)
+                    ws.row_dimensions[r_excel].height = 18
+                else:
+                    c = ws.cell(r_excel, 1, f"    {proc}")
+                    c.alignment = aln_l; c.border = brd
+                    ws.row_dimensions[r_excel].height = 18
+
+                    for ci, col_key in enumerate(col_keys):
+                        hc_map    = dist.get(col_key, {})
+                        hc        = hc_map.get((room, proc), 0)
+                        crp_total = crp_manager.get_total_hc(col_key[0], col_key[1])
+
+                        c = ws.cell(r_excel, ci + 2,
+                                    hc if hc > 0 else "")
+                        c.alignment = aln_c; c.border = brd
+
+                        if hc == 0:
+                            c.fill = FILL_ZERO
+                        elif crp_total > 0:
+                            util = hc / crp_total
+                            c.fill = (FILL_OVER if util >= 1.0 else
+                                      FILL_WARN if util >= 0.8 else FILL_OK)
+                        else:
+                            c.fill = FILL_OK
+
+            # ── Footer rows ───────────────────────────────────────────────────
+            footer_labels = ["Total HC", "CRP HC", "Util %"]
+            base = len(flat_rows) + 2
+            for fi, lbl in enumerate(footer_labels):
+                r_excel = base + fi
+                c = ws.cell(r_excel, 1, lbl)
+                c.font = f_bold; c.fill = FILL_TOTAL; c.alignment = aln_l
+                ws.row_dimensions[r_excel].height = 18
+
+                for ci, col_key in enumerate(col_keys):
+                    hc_map    = dist.get(col_key, {})
+                    total_hc  = sum(hc_map.values())
+                    crp_total = crp_manager.get_total_hc(col_key[0], col_key[1])
+                    util_pct  = round(total_hc / crp_total * 100) if crp_total > 0 else 0
+
+                    if fi == 0:
+                        val = total_hc
+                        fill = FILL_TOTAL
+                    elif fi == 1:
+                        val = crp_total if crp_total > 0 else ""
+                        fill = FILL_TOTAL
+                    else:
+                        val  = f"{util_pct}%" if crp_total > 0 else ""
+                        fill = FILL_TOT_OVER if util_pct >= 100 else FILL_TOTAL
+
+                    c = ws.cell(r_excel, ci + 2, val)
+                    c.font = f_bold; c.fill = fill
+                    c.alignment = aln_c; c.border = brd
+
+            # ── Column widths ─────────────────────────────────────────────────
+            ws.column_dimensions["A"].width = 30
+            for ci in range(n_cols):
+                col_letter = ws.cell(1, ci + 2).column_letter
+                ws.column_dimensions[col_letter].width = 12
+
+            wb.save(path)
+            QMessageBox.information(self, "Export Complete",
+                                    f"Saved:\n{path}")
+
+        except Exception as exc:
+            QMessageBox.critical(self, "Export Error", str(exc))
