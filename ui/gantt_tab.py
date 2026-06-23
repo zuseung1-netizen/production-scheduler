@@ -727,6 +727,7 @@ class GanttCanvas(QWidget):
         self._status_filter: str    = ""   # "on_time" | "at_risk" | "late" | ""
 
         self._checked  : Set[int] = set()
+        self._hover_plan_id : Optional[int]    = None  # card under mouse cursor
         self._drag_plan_id  : Optional[int]    = None
         self._drag_origin   : Optional[QPoint] = None
         self._drag_offset   : QPoint = QPoint(0, 0)
@@ -1301,6 +1302,28 @@ class GanttCanvas(QWidget):
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRoundedRect(rect, CARD_RADIUS, CARD_RADIUS)
 
+            # ── Hover highlight ───────────────────────────────────────────────
+            if plan["plan_id"] == self._hover_plan_id:
+                p.setPen(QPen(QColor(37, 99, 235, 200), 2))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRoundedRect(rect.adjusted(1, 1, -1, -1), CARD_RADIUS, CARD_RADIUS)
+
+            # ── Stack badge (N/M) when multiple plans share this slot ─────────
+            slot_idx, slot_total = self._plan_layout.get(plan["plan_id"], (0, 1))
+            if slot_total > 1:
+                _sb_txt  = f"{slot_idx + 1}/{slot_total}"
+                _sb_font = QFont("Segoe UI", 6, QFont.Weight.Bold)
+                _sb_w    = QFontMetrics(_sb_font).horizontalAdvance(_sb_txt) + 6
+                _sb_h    = 11
+                _sb_r    = QRect(rect.right() - _sb_w - 2,
+                                 rect.bottom() - _sb_h - 1, _sb_w, _sb_h)
+                p.setBrush(QBrush(QColor(37, 99, 235, 200)))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.drawRoundedRect(_sb_r, 3, 3)
+                p.setPen(QPen(Qt.GlobalColor.white))
+                p.setFont(_sb_font)
+                p.drawText(_sb_r, Qt.AlignmentFlag.AlignCenter, _sb_txt)
+
             # ── PILL ROW (top PILL_H px) ──────────────────────────────────────
             pill_y = rect.y() + PILL_MARGIN
             cb = cb_vis
@@ -1515,7 +1538,15 @@ class GanttCanvas(QWidget):
                             self._drag_invalid = False
                         self.update()
         plan = self._plan_at(pos)
+        new_hover = plan["plan_id"] if plan else None
+        if new_hover != self._hover_plan_id:
+            self._hover_plan_id = new_hover
+            self.update()
         if plan:
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            slot_idx, slot_total = self._plan_layout.get(plan["plan_id"], (0, 1))
+            stack_hint = (f"  ⚠ {slot_total} plans in this slot — "
+                          f"card {slot_idx + 1} of {slot_total}\n") if slot_total > 1 else ""
             is_mat = plan.get("entity_type") == "MATERIAL"
             if is_mat:
                 gid     = plan.get("material_group_id")
@@ -1525,6 +1556,7 @@ class GanttCanvas(QWidget):
                     f"  qty:{m['qty_required']}  due:{m['due_date']}"
                     for m in members) or "  (no demand group)"
                 tip = (f"[MATERIAL PLAN]\n"
+                       f"{stack_hint}"
                        f"Material: {plan['entity_code']}\n"
                        f"Process: {plan['process_name']}  "
                        f"Room: {plan['room_code']}  Shift: {plan['shift_no']}\n"
@@ -1540,6 +1572,7 @@ class GanttCanvas(QWidget):
                 customer = so.get("customer_name") or ""
                 tip = (f"SO: {plan['so_number']}  SKU: {plan['sku_code']}  "
                        f"Line: {plan['line_item']}\n"
+                       f"{stack_hint}"
                        f"Customer: {customer}\n"
                        f"Room: {plan['room_code']}  Process: {plan['process_name']}\n"
                        f"Date: {plan['plan_date']}  Shift: {plan['shift_no']}\n"
@@ -1549,6 +1582,15 @@ class GanttCanvas(QWidget):
                        f"Consol group: {grp}  "
                        f"{'⭐ FINAL' if plan.get('is_final_seq') else ''}")
             QToolTip.showText(QCursor.pos(), tip, self)
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def leaveEvent(self, event):
+        if self._hover_plan_id is not None:
+            self._hover_plan_id = None
+            self.update()
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self._drag_plan_id:
