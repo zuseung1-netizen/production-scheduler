@@ -303,7 +303,7 @@ class GanttHeaderWidget(QWidget):
         super().__init__(parent)
         self.setFixedHeight(self._TOTAL_H)
         self.shift_view      : bool = False
-        self.horizon_days    : int  = 28
+        self.horizon_days    : int  = 90
         self.start_date      : date = date.today()
         self._shifts         : list = []
         self._scroll_h       : int  = 0
@@ -714,7 +714,7 @@ class GanttCanvas(QWidget):
         # y_dims: ordered list of dimension names, e.g. ["Room"] or ["SKU", "Process"]
         self.y_dims: List[str] = ["Room"]
         self.shift_view   = False
-        self.horizon_days = 28
+        self.horizon_days = 90
         self.start_date   : date = date.today()
 
         self._plans    : List[Dict] = []
@@ -2281,6 +2281,7 @@ class GanttTab(QWidget):
             cb.addItems(Y_DIM_OPTIONS)
             cb.setCurrentText(default_dim)
             cb.setStyleSheet(_DIM_CSS)
+            cb.setMaximumWidth(90)
             cb.currentTextChanged.connect(self._on_dim_changed)
             cb.setToolTip(f"Y-axis depth {i+1}")
             self._dim_combos.append(cb)
@@ -2310,8 +2311,8 @@ class GanttTab(QWidget):
         hz_lay.setContentsMargins(2, 2, 2, 2)
         hz_lay.setSpacing(1)
         _HZ_BTN_CSS = (
-            "QPushButton { font-size:10px; font-weight:600; padding:3px 10px;"
-            " min-width:32px; border-radius:4px; border:none;"
+            "QPushButton { font-size:10px; font-weight:600; padding:3px 7px;"
+            " min-width:28px; border-radius:4px; border:none;"
             " color:#6b7280; background:transparent; }"
             "QPushButton:checked { background:#fff; color:#16213d;"
             " border:1px solid #cbd5e1; }"
@@ -2319,10 +2320,10 @@ class GanttTab(QWidget):
         self._horizon_btns: Dict[str, QPushButton] = {}
         hz_grp = QButtonGroup(self)
         hz_grp.setExclusive(True)
-        for lbl in ["2W", "4W", "6W", "3M"]:
+        for lbl in ["1M", "3M", "6M"]:
             hb = QPushButton(lbl)
             hb.setCheckable(True)
-            hb.setChecked(lbl == "4W")
+            hb.setChecked(lbl == "3M")
             hb.setStyleSheet(_HZ_BTN_CSS)
             hb.clicked.connect(lambda _c, t=lbl: self._on_horizon_changed(t))
             hz_lay.addWidget(hb)
@@ -3062,8 +3063,8 @@ class GanttTab(QWidget):
     def _on_horizon_changed(self, text: str):
         if not hasattr(self, "canvas"):
             return
-        mapping = {"2W": 14, "4W": 28, "6W": 42, "3M": 90}
-        self.canvas.horizon_days = mapping.get(text, 28)
+        mapping = {"1M": 30, "3M": 90, "6M": 180}
+        self.canvas.horizon_days = mapping.get(text, 90)
         # Sync button group visual state
         if hasattr(self, "_horizon_btns"):
             for lbl, hb in self._horizon_btns.items():
