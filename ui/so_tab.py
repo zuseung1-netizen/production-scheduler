@@ -1602,7 +1602,7 @@ class IOCreateDialog(QDialog):
         self.result = {
             "so_number":   self.io_number,
             "sku_code":    sku,
-            "line_item":   "L01",
+            "line_item":   "0",
             "customer_name": None,
             "qty":         self._qty_spin.value(),
             "due_date":    self._due_edit.date().toString("yyyy-MM-dd"),
