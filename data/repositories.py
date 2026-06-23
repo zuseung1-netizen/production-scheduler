@@ -1002,6 +1002,21 @@ class PlanRepo:
         return _rows_to_dicts(rows)
 
     @staticmethod
+    def history_by_reason(reason: str, action: str = None) -> List[Dict]:
+        with get_connection() as conn:
+            if action:
+                rows = conn.execute(
+                    "SELECT * FROM plan_history WHERE reason=? AND action=? "
+                    "ORDER BY changed_at ASC",
+                    (reason, action)).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM plan_history WHERE reason=? "
+                    "ORDER BY changed_at ASC",
+                    (reason,)).fetchall()
+        return _rows_to_dicts(rows)
+
+    @staticmethod
     def impact_summary() -> List[Dict]:
         """Pull-in / push-out report.
 

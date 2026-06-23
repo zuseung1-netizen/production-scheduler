@@ -30,6 +30,8 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtSvg import QSvgRenderer
 
+import json
+
 from data.repositories import (
     PlanRepo, SORepo, SKURepo, ShiftRepo, RoomRepo,
     CalendarRepo, ConfigRepo, MaterialDemandRepo, CompanyHolidayRepo
@@ -282,13 +284,59 @@ class ConsolidationEngine:
                       if p.get("consolidation_group") == group_id]
         if not with_group:
             return False, f"Group {group_id} not found."
-        for p in with_group:
+
+        merge_reason  = f"consolidation-merge-{group_id}"
+        consol_reason = f"consolidation-{group_id}"
+
+        # ── 1. Re-insert plans that were merged (deleted) during consolidation ─
+        deleted_hist = PlanRepo.history_by_reason(merge_reason, "DELETED")
+        restored = 0
+        for h in deleted_hist:
+            old = json.loads(h["old_value"]) if h.get("old_value") else None
+            if not old:
+                continue
+            old.pop("plan_id", None)
+            old["is_consolidated"]    = 0
+            old["consolidation_group"] = None
+            old["is_locked"]          = 0
+            PlanRepo.insert(old)
+            restored += 1
+
+        # ── 2. Restore anchor plans to their pre-consolidation state ───────────
+        modified_hist = PlanRepo.history_by_reason(consol_reason, "MODIFIED")
+        anchor_originals: Dict[int, Dict] = {}
+        for h in modified_hist:
+            pid = h.get("plan_id")
+            if pid and pid not in anchor_originals:
+                old = json.loads(h["old_value"]) if h.get("old_value") else None
+                if old:
+                    anchor_originals[pid] = old
+
+        reverted = 0
+        for pid, old in anchor_originals.items():
+            if PlanRepo.get(pid):
+                PlanRepo.update(pid, {
+                    "plan_date":           old.get("plan_date"),
+                    "shift_no":            old.get("shift_no"),
+                    "qty_planned":         old.get("qty_planned"),
+                    "is_consolidated":     0,
+                    "consolidation_group": None,
+                    "is_locked":          0,
+                    "memo":                old.get("memo") or "",
+                }, reason=f"break-consolidation-{group_id}")
+                reverted += 1
+
+        # ── 3. Fallback: clear consolidation flags on any remaining group plans ─
+        still_in_group = [p for p in PlanRepo.all()
+                          if p.get("consolidation_group") == group_id]
+        for p in still_in_group:
             PlanRepo.update(p["plan_id"], {
-                "is_consolidated": 0,
-                "consolidation_group": None,
-                "is_locked": 0,
+                "is_consolidated": 0, "consolidation_group": None, "is_locked": 0,
             }, reason=f"break-consolidation-{group_id}")
-        return True, f"Consolidation group {group_id} broken ({len(with_group)} blocks)."
+
+        return True, (f"Consolidation {group_id} broken.\n"
+                      f"{restored} merged block(s) restored, "
+                      f"{reverted} anchor block(s) reverted.")
 
 
 # ─── Frozen date-axis header ──────────────────────────────────────────────────
