@@ -25,6 +25,55 @@ from utils.excel_io import (
 )
 
 
+class UploadPreviewDialog(QDialog):
+    """Generic upload preview — shows parsed Excel rows in a table before confirming."""
+
+    def __init__(self, title: str, headers: list, rows: list, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumSize(900, 520)
+        self._confirmed = False
+
+        layout = QVBoxLayout(self)
+
+        summary = QLabel(f"{len(rows)} row(s) to upload")
+        summary.setStyleSheet(
+            "font-weight:bold; font-size:12px; padding:6px;")
+        layout.addWidget(summary)
+
+        table = QTableWidget()
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setRowCount(len(rows))
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents)
+        table.setAlternatingRowColors(True)
+        for ri, row in enumerate(rows):
+            for ci, val in enumerate(row):
+                table.setItem(ri, ci, QTableWidgetItem(str(val)))
+        layout.addWidget(table)
+
+        bbar = QHBoxLayout()
+        bbar.addStretch()
+        btn_cancel  = QPushButton("Cancel")
+        btn_confirm = QPushButton("✅ Confirm Upload")
+        btn_confirm.setStyleSheet(
+            "background:#2563EB; color:white; font-weight:bold;"
+            "border:none; border-radius:5px; padding:6px 18px;")
+        btn_confirm.setEnabled(len(rows) > 0)
+        btn_cancel.clicked.connect(self.reject)
+        btn_confirm.clicked.connect(self._confirm)
+        bbar.addWidget(btn_cancel)
+        bbar.addWidget(btn_confirm)
+        layout.addLayout(bbar)
+
+    def _confirm(self):
+        self._confirmed = True
+        self.accept()
+
+
 class MasterTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -280,25 +329,40 @@ class ItemMasterWidget(QWidget):
     # ── upload / template ──────────────────────────────────────────────────
 
     def _upload_sku(self):
+        from utils.excel_io import parse_sku_preview
         path, _ = QFileDialog.getOpenFileName(
             self, "Upload SKU Master Excel", "", "Excel (*.xlsx)")
-        if path:
-            ok, msg = upload_sku(path)
-            (QMessageBox.information if ok else QMessageBox.warning)(
-                self, "Upload SKU", msg)
-            if ok:
-                self._load()
+        if not path:
+            return
+        ok, err, headers, rows = parse_sku_preview(path)
+        if not ok:
+            QMessageBox.warning(self, "Parse Error", err)
+            return
+        dlg = UploadPreviewDialog("SKU Master — Upload Preview", headers, rows, self)
+        if not dlg.exec() or not dlg._confirmed:
+            return
+        ok, msg = upload_sku(path)
+        (QMessageBox.information if ok else QMessageBox.warning)(self, "Upload SKU", msg)
+        if ok:
+            self._load()
 
     def _upload_material(self):
-        from utils.excel_io import upload_material
+        from utils.excel_io import upload_material, parse_material_preview
         path, _ = QFileDialog.getOpenFileName(
             self, "Upload Material Master Excel", "", "Excel (*.xlsx)")
-        if path:
-            ok, msg = upload_material(path)
-            (QMessageBox.information if ok else QMessageBox.warning)(
-                self, "Upload Material", msg)
-            if ok:
-                self._load()
+        if not path:
+            return
+        ok, err, headers, rows = parse_material_preview(path)
+        if not ok:
+            QMessageBox.warning(self, "Parse Error", err)
+            return
+        dlg = UploadPreviewDialog("Material Master — Upload Preview", headers, rows, self)
+        if not dlg.exec() or not dlg._confirmed:
+            return
+        ok, msg = upload_material(path)
+        (QMessageBox.information if ok else QMessageBox.warning)(self, "Upload Material", msg)
+        if ok:
+            self._load()
 
     def _templates(self):
         menu = QMenu(self)
@@ -457,11 +521,21 @@ class RoomMasterWidget(QWidget):
         self._load()
 
     def _upload(self):
+        from utils.excel_io import parse_room_preview
         path, _ = QFileDialog.getOpenFileName(self, "Upload Room Excel", "", "Excel (*.xlsx)")
-        if path:
-            ok, msg = upload_room(path)
-            (QMessageBox.information if ok else QMessageBox.warning)(self, "Upload", msg)
-            if ok: self._load()
+        if not path:
+            return
+        ok, err, headers, rows = parse_room_preview(path)
+        if not ok:
+            QMessageBox.warning(self, "Parse Error", err)
+            return
+        dlg = UploadPreviewDialog("Room / Process — Upload Preview", headers, rows, self)
+        if not dlg.exec() or not dlg._confirmed:
+            return
+        ok, msg = upload_room(path)
+        (QMessageBox.information if ok else QMessageBox.warning)(self, "Upload", msg)
+        if ok:
+            self._load()
 
     def _template(self):
         path, _ = QFileDialog.getSaveFileName(self, "Save Template", "Room_template.xlsx", "Excel (*.xlsx)")
@@ -1332,9 +1406,18 @@ class SKUProcessWidget(QWidget):
             self.info_label.setStyleSheet("color: green;")
 
     def _upload(self):
+        from utils.excel_io import parse_process_routing_preview
         path, _ = QFileDialog.getOpenFileName(
             self, "Upload SKU Process Excel", "", "Excel (*.xlsx)")
         if not path:
+            return
+
+        ok, err, headers, rows = parse_process_routing_preview(path)
+        if not ok:
+            QMessageBox.warning(self, "Parse Error", err)
+            return
+        dlg = UploadPreviewDialog("SKU Process Routing — Upload Preview", headers, rows, self)
+        if not dlg.exec() or not dlg._confirmed:
             return
 
         ok, summary, warnings = upload_sku_process(path)
@@ -1713,10 +1796,18 @@ class ProcessRoutingWidget(QWidget):
             self.info_label.setStyleSheet("color:green;")
 
     def _upload(self):
-        from utils.excel_io import upload_process_routing
+        from utils.excel_io import upload_process_routing, parse_process_routing_preview
         path, _ = QFileDialog.getOpenFileName(
             self, "Upload Routing Excel", "", "Excel (*.xlsx)")
         if not path:
+            return
+
+        ok, err, headers, rows = parse_process_routing_preview(path)
+        if not ok:
+            QMessageBox.warning(self, "Parse Error", err)
+            return
+        dlg = UploadPreviewDialog("Process Routing — Upload Preview", headers, rows, self)
+        if not dlg.exec() or not dlg._confirmed:
             return
 
         ok, summary, warnings = upload_process_routing(path)

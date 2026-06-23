@@ -2274,15 +2274,23 @@ class InventoryTab(QWidget):
                 self.alloc_table.setItem(ri, ci, QTableWidgetItem(str(v)))
 
     def _upload(self):
-        from utils.excel_io import upload_inventory
+        from utils.excel_io import upload_inventory, parse_inventory_preview
+        from ui.master_tab import UploadPreviewDialog
         path, _ = QFileDialog.getOpenFileName(
             self, "Upload Inventory Excel", "", "Excel (*.xlsx)")
-        if path:
-            ok, msg = upload_inventory(path)
-            (QMessageBox.information if ok else QMessageBox.warning)(
-                self, "Upload", msg)
-            if ok:
-                self.refresh()
+        if not path:
+            return
+        ok, err, headers, rows = parse_inventory_preview(path)
+        if not ok:
+            QMessageBox.warning(self, "Parse Error", err)
+            return
+        dlg = UploadPreviewDialog("Inventory — Upload Preview", headers, rows, self)
+        if not dlg.exec() or not dlg._confirmed:
+            return
+        ok, msg = upload_inventory(path)
+        (QMessageBox.information if ok else QMessageBox.warning)(self, "Upload", msg)
+        if ok:
+            self.refresh()
 
     def _template(self):
         from utils.excel_io import download_inventory_template

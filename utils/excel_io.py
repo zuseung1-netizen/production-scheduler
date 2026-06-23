@@ -249,6 +249,127 @@ def _parse_date(val) -> str:
     return s
 
 
+# ─── Parse-only preview helpers (no DB writes) ───────────────────────────────
+
+def _safe_str(v) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, float) and v == int(v):
+        return str(int(v))
+    return str(v).strip()
+
+
+def parse_sku_preview(path: str) -> Tuple[bool, str, List[str], List[List[str]]]:
+    headers = ["SKU Code", "SKU Name", "UoM", "Post Lead Days", "Note"]
+    if not HAS_OPENPYXL:
+        return False, "openpyxl not installed", headers, []
+    if not os.path.exists(path):
+        return False, f"File not found: {path}", headers, []
+    try:
+        wb = load_workbook(path, data_only=True)
+        ws = wb["SKUMaster"] if "SKUMaster" in wb.sheetnames else wb.active
+        rows = []
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if not row[0]:
+                continue
+            rows.append([_safe_str(row[i] if i < len(row) else "") for i in range(5)])
+        return True, "", headers, rows
+    except Exception as e:
+        return False, str(e), headers, []
+
+
+def parse_material_preview(path: str) -> Tuple[bool, str, List[str], List[List[str]]]:
+    headers = ["Material Code", "Material Name", "UoM", "Post Lead Days", "Note"]
+    if not HAS_OPENPYXL:
+        return False, "openpyxl not installed", headers, []
+    if not os.path.exists(path):
+        return False, f"File not found: {path}", headers, []
+    try:
+        wb = load_workbook(path, data_only=True)
+        ws = wb["MaterialMaster"] if "MaterialMaster" in wb.sheetnames else wb.active
+        rows = []
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if not row[0]:
+                continue
+            rows.append([_safe_str(row[i] if i < len(row) else "") for i in range(5)])
+        return True, "", headers, rows
+    except Exception as e:
+        return False, str(e), headers, []
+
+
+def parse_room_preview(path: str) -> Tuple[bool, str, List[str], List[List[str]]]:
+    headers = ["Room Code", "Process Name", "Process Type", "Room Type",
+               "UPPH", "UPH Fixed", "HC Min", "HC Max", "HC Fixed",
+               "Changeover Shifts", "Note"]
+    if not HAS_OPENPYXL:
+        return False, "openpyxl not installed", headers, []
+    if not os.path.exists(path):
+        return False, f"File not found: {path}", headers, []
+    try:
+        wb = load_workbook(path, data_only=True)
+        ws = wb["RoomMaster"] if "RoomMaster" in wb.sheetnames else wb.active
+        rows = []
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if not row[0]:
+                continue
+            rows.append([_safe_str(row[i] if i < len(row) else "") for i in range(11)])
+        return True, "", headers, rows
+    except Exception as e:
+        return False, str(e), headers, []
+
+
+def parse_process_routing_preview(path: str) -> Tuple[bool, str, List[str], List[List[str]]]:
+    headers = ["Entity Type", "Entity Code", "Process Seq", "Process Name",
+               "Allowed Room Types", "Requires Material", "Is Final",
+               "Min Gap Shifts", "Note"]
+    if not HAS_OPENPYXL:
+        return False, "openpyxl not installed", headers, []
+    if not os.path.exists(path):
+        return False, f"File not found: {path}", headers, []
+    try:
+        wb = load_workbook(path, data_only=True)
+        ws = wb["ProcessRouting"] if "ProcessRouting" in wb.sheetnames else wb.active
+        rows = []
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if not row[0] or str(row[0]).startswith("#"):
+                continue
+            # reorder to match headers: ET, code, seq, name, allowed, reqmat, final, gap, note
+            rows.append([
+                _safe_str(row[0]),  # EntityType
+                _safe_str(row[1]),  # EntityCode
+                _safe_str(row[2]),  # ProcessSeq
+                _safe_str(row[3]),  # ProcessName
+                _safe_str(row[4]),  # AllowedRoomTypes
+                _safe_str(row[5] if len(row) > 5 else ""),  # RequiresMaterial
+                _safe_str(row[6] if len(row) > 6 else ""),  # IsFinal
+                _safe_str(row[8] if len(row) > 8 else ""),  # MinGapShifts (col 9)
+                _safe_str(row[7] if len(row) > 7 else ""),  # Note (col 8)
+            ])
+        return True, "", headers, rows
+    except Exception as e:
+        return False, str(e), headers, []
+
+
+def parse_inventory_preview(path: str) -> Tuple[bool, str, List[str], List[List[str]]]:
+    headers = ["SKU Code", "Lot Number", "Qty Available",
+               "Production Date", "Expiry Date", "Note"]
+    if not HAS_OPENPYXL:
+        return False, "openpyxl not installed", headers, []
+    if not os.path.exists(path):
+        return False, f"File not found: {path}", headers, []
+    try:
+        wb = load_workbook(path, data_only=True)
+        ws = wb["Inventory"] if "Inventory" in wb.sheetnames else wb.active
+        rows = []
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if not row[0] or str(row[0]).startswith("#"):
+                continue
+            rows.append([_safe_str(row[i] if i < len(row) else "") for i in range(6)])
+        return True, "", headers, rows
+    except Exception as e:
+        return False, str(e), headers, []
+
+
 # ─── SKU Master Template & Upload ─────────────────────────────────────────────
 
 SKU_HEADERS = ["SKUCode", "SKUName", "UoM", "PostLeadDays", "Note"]
