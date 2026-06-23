@@ -2247,17 +2247,17 @@ class GanttTab(QWidget):
         btn_win.clicked.connect(self._on_new_window)
         lay.addWidget(btn_win)
 
-        # Defragment button
-        btn_defrag = QPushButton("⚡ Defrag")
-        btn_defrag.setToolTip(
-            "Reorder unlocked plans within each room+process\n"
-            "to group same-SKU blocks consecutively (fewer changeovers).")
-        btn_defrag.setStyleSheet(
+        # Weekly reorganize button
+        btn_reorg = QPushButton("🔀 Reorganize")
+        btn_reorg.setToolTip(
+            "Within each ISO week, group same-SKU plans consecutively per room+process.\n"
+            "Reduces changeovers without moving plans across week boundaries.")
+        btn_reorg.setStyleSheet(
             "QPushButton { background:#fff; color:#1d4ed8; border:1px solid #93c5fd;"
             " border-radius:5px; padding:5px 10px; font-size:11px; font-weight:600; }"
             "QPushButton:hover { background:#eff6ff; }")
-        btn_defrag.clicked.connect(self._on_defrag)
-        lay.addWidget(btn_defrag)
+        btn_reorg.clicked.connect(self._on_weekly_reorganize)
+        lay.addWidget(btn_reorg)
 
         # Bottom border drawn via a separator widget
         outer = QWidget()
@@ -2350,24 +2350,29 @@ class GanttTab(QWidget):
             self.main_window._refresh_crp()
 
     def _on_defrag(self):
+        self._on_weekly_reorganize()
+
+    def _on_weekly_reorganize(self):
         d0 = self.canvas.start_date.strftime("%Y-%m-%d")
         d1 = (self.canvas.start_date + timedelta(
             days=self.canvas.horizon_days - 1)).strftime("%Y-%m-%d")
         from PyQt6.QtWidgets import QApplication as _App
         _App.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            result = scheduler.defragment(d0, d1)
+            result = scheduler.weekly_reorganize(d0, d1)
         finally:
             _App.restoreOverrideCursor()
-        moved = result["moved"]
-        skipped = result["skipped_groups"]
-        msg = (f"Defragment complete.\n"
-               f"{moved} plan(s) relocated to group same-SKU blocks.")
+        moved   = result["moved"]
+        frozen  = result.get("frozen", 0)
+        skipped = result.get("skipped_groups", 0)
+        msg = f"Weekly reorganize complete.\n{moved} plan(s) regrouped by SKU within each week."
+        if frozen:
+            msg += f"\n{frozen} plan(s) frozen in place (deadline or gap constraint)."
         if skipped:
-            msg += f"\n{skipped} room+process group(s) skipped (would exceed due date)."
-        QMessageBox.information(self, "Defragment", msg)
+            msg += f"\n{skipped} group(s) skipped (would exceed due date)."
+        QMessageBox.information(self, "Weekly Reorganize", msg)
         if moved and self.main_window:
-            self.main_window.notify(f"Defrag: {moved} plans reordered")
+            self.main_window.notify(f"Reorganize: {moved} plans resequenced")
         self.refresh()
 
     def _on_new_window(self):

@@ -1163,9 +1163,22 @@ class AppConfigWidget(QWidget):
         self.assign_mode.setCurrentIndex(0 if cur_mode == "CAPACITY" else 1)
         form.addRow("Room Assignment Mode:", self.assign_mode)
 
-        self.defrag_enabled = QCheckBox("Run defragment pass after auto-plan")
-        self.defrag_enabled.setChecked(ConfigRepo.get("defrag_enabled", "1") == "1")
-        form.addRow("Defragment:", self.defrag_enabled)
+        self.campaign_window = QSpinBox()
+        self.campaign_window.setRange(1, 90)
+        self.campaign_window.setSuffix(" days")
+        self.campaign_window.setValue(int(ConfigRepo.get("max_consolidation_days", "7")))
+        self.campaign_window.setToolTip(
+            "Same-SKU SOs with due dates within this window are merged into one campaign lot.\n"
+            "Larger value = fewer lots/BMRs (better for GMP), but larger recall scope per lot.")
+        form.addRow("Campaign Window:", self.campaign_window)
+
+        self.weekly_reorg_enabled = QCheckBox("Run weekly reorganize after auto-plan")
+        self.weekly_reorg_enabled.setChecked(
+            ConfigRepo.get("weekly_reorganize_enabled", "1") == "1")
+        self.weekly_reorg_enabled.setToolTip(
+            "After scheduling, groups same-SKU plans consecutively within each ISO week\n"
+            "to reduce changeovers. Plans never cross week boundaries.")
+        form.addRow("Weekly Reorganize:", self.weekly_reorg_enabled)
 
         self.crp_path = QLineEdit(ConfigRepo.get("crp_excel_path", ""))
         btn_browse = QPushButton("Browse…")
@@ -1260,7 +1273,9 @@ class AppConfigWidget(QWidget):
         ConfigRepo.set("crp_excel_path",     self.crp_path.text())
         ConfigRepo.set("room_assign_mode",   self.assign_mode.currentText())
         ConfigRepo.set("material_due_merge_days", str(self.merge_days.value()))
-        ConfigRepo.set("defrag_enabled",     "1" if self.defrag_enabled.isChecked() else "0")
+        ConfigRepo.set("max_consolidation_days",  str(self.campaign_window.value()))
+        ConfigRepo.set("weekly_reorganize_enabled",
+                       "1" if self.weekly_reorg_enabled.isChecked() else "0")
         QMessageBox.information(self, "Saved", "Settings saved.")
 
 
