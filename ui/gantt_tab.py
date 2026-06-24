@@ -867,11 +867,21 @@ class GanttCanvas(QWidget):
         self._build_layout_and_heights()
         self._build_hc_map()
         self._build_closed_map()
-        # Populate HC utilisation by date for the header second row
+        # LABOR bar: 공정배정인원/전체인원 = urgency-distributed HC / total CRP HC
         try:
             d0_str = self.start_date.strftime("%Y-%m-%d")
             d1_str = (self.start_date + timedelta(days=self.horizon_days - 1)).strftime("%Y-%m-%d")
-            self._hc_util_by_date = scheduler.compute_hc_utilization_by_date(d0_str, d1_str)
+            # Numerator: sum distributed HC per day from _hc_map (shifts with plans only)
+            day_alloc: Dict[str, float] = {}
+            for (ds, sno), (alloc, _) in self._hc_map.items():
+                day_alloc[ds] = day_alloc.get(ds, 0.0) + alloc
+            # Denominator: total CRP HC per day across all shifts
+            avl = scheduler.get_available_hc_by_date(d0_str, d1_str)
+            self._hc_util_by_date = {
+                ds: (day_alloc.get(ds, 0.0) / sum(shifts.values()) * 100)
+                for ds, shifts in avl.items()
+                if sum(shifts.values()) > 0
+            }
         except Exception:
             self._hc_util_by_date = {}
         self._update_size()
