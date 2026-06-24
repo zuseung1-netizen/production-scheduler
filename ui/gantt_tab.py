@@ -454,9 +454,14 @@ class GanttHeaderWidget(QWidget):
                 color  = (UTIL_HIGH if ratio > 0.9 else
                           UTIL_MED  if ratio > 0.6 else
                           (UTIL_LOW if ratio > 0 else QColor(214, 218, 227)))
-                p.setBrush(QBrush(color))
+                # Track: faint trough (matches LABOR bar style)
+                p.setBrush(QBrush(QColor(50, 82, 138)))
                 p.setPen(Qt.PenStyle.NoPen)
-                p.drawRoundedRect(QRect(x + 2, bar_y, max(fill_w, 0), bar_h), 2, 2)
+                p.drawRoundedRect(QRect(x + 2, bar_y, cw_, bar_h), 2, 2)
+                if fill_w > 0:
+                    p.setBrush(QBrush(color))
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.drawRoundedRect(QRect(x + 2, bar_y, fill_w, bar_h), 2, 2)
                 # Cap tag badge (red background when over 90%)
                 if ratio > 0.9:
                     tag_txt = f"{int(ratio * 100)}%"
