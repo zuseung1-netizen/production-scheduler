@@ -914,8 +914,14 @@ class GanttCanvas(QWidget):
                 m["so_number"] for m in members_sorted if m.get("so_number")))
             # is_locked: True if any member is locked
             merged_plan["is_locked"]    = any(m["is_locked"] for m in members_sorted)
-            # Earliest due: pick from sos dict if available
-            merged_plan["_earliest_so"] = members_sorted[0]   # keep for due badge
+            # Earliest due date across all merged SOs
+            _due_dates = [
+                so_r["due_date"]
+                for m in members_sorted
+                for so_r in [self._sos.get((m["so_number"], m["sku_code"], m["line_item"]))]
+                if so_r and so_r.get("due_date")
+            ]
+            merged_plan["_earliest_due"] = min(_due_dates) if _due_dates else None
             merged.append(merged_plan)
             summary_groups[rep_id] = member_ids
 
@@ -1529,7 +1535,11 @@ class GanttCanvas(QWidget):
                 p.drawText(_br, Qt.AlignmentFlag.AlignCenter, _lbl)
 
             # Production deadline = due_date - post_lead_days
-            due = so["due_date"] if so else None
+            # In summary mode use earliest due across all merged SOs
+            if plan.get("_earliest_due"):
+                due = plan["_earliest_due"]
+            else:
+                due = so["due_date"] if so else None
             prod_deadline = None
             if due and so:
                 _lead = int((self._skus.get(so["sku_code"]) or {}).get("post_lead_days") or 0)
