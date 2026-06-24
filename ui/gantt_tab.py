@@ -815,6 +815,11 @@ class GanttCanvas(QWidget):
         self._room_proc_set   : set = set()
         self._company_holidays: set = set()   # date ISO strings from DB
 
+        # Summarize mode — collapse same (date,shift,room,process,sku) into one card
+        self._summarize          : bool            = False
+        self._summarized_plans   : List[Dict]      = []   # merged plan dicts
+        self._summary_groups     : Dict[int, List[int]] = {}  # rep_id → member_ids
+
         self._cell_map      : Dict[int, QRect] = {}
         self._check_rects   : Dict[int, QRect] = {}
         self._check_hit_rects: Dict[int, QRect] = {}
@@ -854,6 +859,7 @@ class GanttCanvas(QWidget):
         self._company_holidays = CompanyHolidayRepo.date_set()
         self._build_rows()
         self._build_cap_map()
+        self._build_summarized_plans()
         self._build_layout_and_heights()
         self._build_hc_map()
         self._build_closed_map()
@@ -866,6 +872,59 @@ class GanttCanvas(QWidget):
             self._hc_util_by_date = {}
         self._update_size()
         self.update()
+
+    # ── Summarize mode ───────────────────────────────────────────────────────
+
+    def toggle_summarize(self, on: bool):
+        self._summarize = on
+        self._build_summarized_plans()
+        self._build_layout_and_heights()
+        self._update_size()
+        self.update()
+
+    def _build_summarized_plans(self):
+        """Collapse plans sharing (date,shift,room,process,entity_code) into one card."""
+        if not self._summarize:
+            self._summarized_plans = []
+            self._summary_groups   = {}
+            return
+
+        from collections import defaultdict
+        groups: Dict[Tuple, List[Dict]] = defaultdict(list)
+        for p in self._plans:
+            key = (p["plan_date"], p["shift_no"], p["room_code"],
+                   p["process_name"], p["entity_code"], p["entity_type"])
+            groups[key].append(p)
+
+        merged: List[Dict] = []
+        summary_groups: Dict[int, List[int]] = {}
+        for key, members in groups.items():
+            members_sorted = sorted(members, key=lambda x: x["plan_id"])
+            rep             = members_sorted[0]
+            total_qty       = sum(m["qty_planned"] for m in members_sorted)
+            member_ids      = [m["plan_id"] for m in members_sorted]
+            rep_id          = rep["plan_id"]
+
+            merged_plan = dict(rep)  # copy all fields from representative
+            merged_plan["qty_planned"]  = total_qty
+            merged_plan["_merged_ids"]  = member_ids
+            merged_plan["_merged_count"]= len(members_sorted)
+            # so_number: list of unique SO numbers for tooltip
+            merged_plan["_so_list"]     = list(dict.fromkeys(
+                m["so_number"] for m in members_sorted if m.get("so_number")))
+            # is_locked: True if any member is locked
+            merged_plan["is_locked"]    = any(m["is_locked"] for m in members_sorted)
+            # Earliest due: pick from sos dict if available
+            merged_plan["_earliest_so"] = members_sorted[0]   # keep for due badge
+            merged.append(merged_plan)
+            summary_groups[rep_id] = member_ids
+
+        self._summarized_plans = merged
+        self._summary_groups   = summary_groups
+
+    @property
+    def _display_plans(self) -> List[Dict]:
+        return self._summarized_plans if self._summarize else self._plans
 
     def set_search_filter(self, text: str):
         self._search_filter = text
@@ -927,7 +986,7 @@ class GanttCanvas(QWidget):
         # shift_view vs day-view, so plans that render in the same visual cell
         # are grouped together regardless of their shift_no.
         slot_plans: Dict[Tuple, List[int]] = defaultdict(list)
-        for p in self._plans:
+        for p in self._display_plans:
             rk  = self._plan_row_key(p)
             col = self._date_to_col(p["plan_date"], p["shift_no"])
             if col is None:
@@ -936,7 +995,7 @@ class GanttCanvas(QWidget):
 
         # Assign vertical index within each slot — stack_order ASC, then plan_id
         self._plan_layout = {}
-        pid_to_so = {p["plan_id"]: p.get("stack_order", 0) for p in self._plans}
+        pid_to_so = {p["plan_id"]: p.get("stack_order", 0) for p in self._display_plans}
         for sk, pids in slot_plans.items():
             pids_sorted = sorted(pids, key=lambda pid: (pid_to_so.get(pid, 0), pid))
             for i, pid in enumerate(pids_sorted):
@@ -1305,15 +1364,17 @@ class GanttCanvas(QWidget):
         f_tag = QFont("Segoe UI", 7, QFont.Weight.Bold)
         f_lock = QFont("Segoe UI", 7)
 
-        for plan in self._plans:
+        for plan in self._display_plans:
             rect = self._plan_rect(plan)
             if not rect:
                 continue
+            is_merged = len(plan.get("_merged_ids", [])) > 1
             self._cell_map[plan["plan_id"]] = rect
             cb_vis = self._checkbox_rect(rect)
             self._check_rects[plan["plan_id"]] = cb_vis
             cx = cb_vis.x() + cb_vis.width() // 2
             cy = cb_vis.y() + cb_vis.height() // 2
+            # Merged cards: register hit rect but block checkbox toggle in mousePressEvent
             self._check_hit_rects[plan["plan_id"]] = QRect(cx - 10, cy - 10, 20, 20)
 
             # Search filter: dim non-matching plans
@@ -1515,16 +1576,24 @@ class GanttCanvas(QWidget):
                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                        qty_str)
 
-            if not is_mat and plan.get("so_number"):
-                so_str = plan["so_number"]
-                p.setPen(QPen(CARD_TEXT_L3))
-                p.setFont(f_l3)
-                p.drawText(QRect(tx, ty + 25, tw, 10),
-                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                           QFontMetrics(f_l3).elidedText(
-                               so_str, Qt.TextElideMode.ElideRight, tw))
-
             if not is_mat:
+                if is_merged:
+                    n_so = plan["_merged_count"]
+                    so_str = f"{n_so} SOs"
+                    p.setPen(QPen(QColor(100, 130, 200)))
+                    p.setFont(f_l3)
+                    p.drawText(QRect(tx, ty + 25, tw, 10),
+                               Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                               so_str)
+                elif plan.get("so_number"):
+                    p.setPen(QPen(CARD_TEXT_L3))
+                    p.setFont(f_l3)
+                    p.drawText(QRect(tx, ty + 25, tw, 10),
+                               Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                               QFontMetrics(f_l3).elidedText(
+                                   plan["so_number"], Qt.TextElideMode.ElideRight, tw))
+
+            if not is_mat and not is_merged:
                 customer_name = (so or {}).get("customer_name") or ""
                 if customer_name:
                     p.setPen(QPen(CARD_TEXT_L3))
@@ -1594,7 +1663,9 @@ class GanttCanvas(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             for pid, hit_rect in self._check_hit_rects.items():
                 if hit_rect.contains(pos):
-                    self._toggle_check(pid)
+                    # Disable checkbox in summarize mode — merged cards can't be checked
+                    if not self._summarize:
+                        self._toggle_check(pid)
                     return
             plan = self._plan_at(pos)
             if plan:
@@ -1792,7 +1863,7 @@ class GanttCanvas(QWidget):
                     cursor_y = int(event.pos().y())
                     if 0 <= col < self._col_count():
                         new_date, new_shift = self._col_to_date_shift(col)
-                        plan = next((p for p in self._plans
+                        plan = next((p for p in self._display_plans
                                      if p["plan_id"] == self._drag_plan_id), None)
                         if plan and not plan["is_locked"]:
                             new_room = plan["room_code"]
@@ -1810,27 +1881,39 @@ class GanttCanvas(QWidget):
                             if self._drag_split:
                                 self._do_split_drop(plan, new_date, new_shift, new_room)
                             elif date_changed or room_changed:
+                                is_merged = len(plan.get("_merged_ids", [])) > 1
+                                n_label   = (f"{plan['_merged_count']} plans"
+                                             if is_merged else
+                                             f"plan #{self._drag_plan_id}")
                                 reason, ok = QInputDialog.getText(
                                     self, "Move Reason",
-                                    f"Reason for moving plan #{self._drag_plan_id}?")
+                                    f"Reason for moving {n_label}?")
                                 if ok:
-                                    if self.parent_tab:
-                                        self.parent_tab.push_undo({
-                                            "type":     "move",
-                                            "label":    f"Move Plan #{self._drag_plan_id}",
-                                            "plan_id":  self._drag_plan_id,
-                                            "plan_date": plan["plan_date"],
-                                            "shift_no":  plan["shift_no"],
-                                            "room_code": plan["room_code"],
-                                        })
+                                    member_ids = (plan["_merged_ids"]
+                                                  if is_merged
+                                                  else [self._drag_plan_id])
                                     fields: Dict = {
                                         "plan_date": new_date.strftime("%Y-%m-%d"),
                                         "shift_no":  new_shift,
                                     }
                                     if room_changed:
                                         fields["room_code"] = new_room
-                                    PlanRepo.update(self._drag_plan_id, fields,
-                                                    reason=reason)
+                                    for mid in member_ids:
+                                        if self.parent_tab and not is_merged:
+                                            self.parent_tab.push_undo({
+                                                "type":     "move",
+                                                "label":    f"Move Plan #{mid}",
+                                                "plan_id":  mid,
+                                                "plan_date": plan["plan_date"],
+                                                "shift_no":  plan["shift_no"],
+                                                "room_code": plan["room_code"],
+                                            })
+                                        real = next(
+                                            (rp for rp in self._plans
+                                             if rp["plan_id"] == mid), None)
+                                        if real and real["is_locked"]:
+                                            continue
+                                        PlanRepo.update(mid, fields, reason=reason)
                                     self.planMoved.emit(
                                         self._drag_plan_id,
                                         plan["plan_date"],
@@ -1910,7 +1993,7 @@ class GanttCanvas(QWidget):
         self.update()
 
     def _plan_at(self, pos: QPoint) -> Optional[Dict]:
-        for plan in self._plans:
+        for plan in self._display_plans:
             rect = self._cell_map.get(plan["plan_id"])
             if rect and rect.contains(pos):
                 return plan
@@ -1922,19 +2005,33 @@ class GanttCanvas(QWidget):
         plan = self._plan_at(pos)
         menu = QMenu(self)
         if plan:
-            pid    = plan["plan_id"]
-            locked = plan["is_locked"]
-            grp    = plan.get("consolidation_group")
-            menu.addAction("🔓 Unlock" if locked else "🔒 Lock",
-                           lambda: self._toggle_lock(pid))
-            menu.addAction("✂ Split",     lambda: self._split_plan(plan))
-            menu.addAction("⬅ Pull Out", lambda: self._pull_out(plan))
-            if grp:
-                menu.addAction(f"🔗 Break Consolidation ({grp})",
-                               lambda: self._break_consol(grp))
-            menu.addSeparator()
-            menu.addAction("📝 Edit Memo",  lambda: self._edit_memo(plan))
-            menu.addAction("🗑 Delete Plan", lambda: self._delete_plan(pid))
+            pid       = plan["plan_id"]
+            locked    = plan["is_locked"]
+            grp       = plan.get("consolidation_group")
+            is_merged = len(plan.get("_merged_ids", [])) > 1
+            member_ids = plan.get("_merged_ids", [pid])
+
+            lock_lbl = "🔓 Unlock" if locked else "🔒 Lock"
+            if is_merged:
+                lock_lbl += f" ({plan['_merged_count']} plans)"
+            menu.addAction(lock_lbl,
+                           lambda: self._toggle_lock_merged(member_ids, locked))
+            if not is_merged:
+                menu.addAction("✂ Split",     lambda: self._split_plan(plan))
+                menu.addAction("⬅ Pull Out", lambda: self._pull_out(plan))
+                if grp:
+                    menu.addAction(f"🔗 Break Consolidation ({grp})",
+                                   lambda: self._break_consol(grp))
+                menu.addSeparator()
+                menu.addAction("📝 Edit Memo",  lambda: self._edit_memo(plan))
+                menu.addAction("🗑 Delete Plan", lambda: self._delete_plan(pid))
+            else:
+                menu.addSeparator()
+                so_list = plan.get("_so_list", [])
+                menu.addAction(
+                    f"📋 {plan['_merged_count']} plans: "
+                    + ", ".join(so_list[:4])
+                    + (" …" if len(so_list) > 4 else "")).setEnabled(False)
         else:
             col = pos.x() // self._col_w()
             row = self._row_at_y(pos.y())
@@ -1969,6 +2066,13 @@ class GanttCanvas(QWidget):
                     "was_locked": was_locked,
                 })
                 self.parent_tab.refresh()
+
+    def _toggle_lock_merged(self, member_ids: list, currently_locked: bool):
+        """Lock or unlock all member plan_ids at once."""
+        for mid in member_ids:
+            PlanRepo.lock(mid, not currently_locked)
+        if self.parent_tab:
+            self.parent_tab.refresh()
 
     def _split_plan(self, plan):
         qty = plan["qty_planned"]
@@ -2393,6 +2497,30 @@ class GanttTab(QWidget):
         btn_win.setStyleSheet(_icon_css)
         btn_win.clicked.connect(self._on_new_window)
         lay.addWidget(btn_win)
+
+        # Summarize toggle
+        self._btn_sum = QPushButton("⊞  Summary")
+        self._btn_sum.setCheckable(True)
+        self._btn_sum.setFixedHeight(32)
+        self._btn_sum.setToolTip(
+            "Collapse cards: same SKU + Room + Process + Date into one summarized card.\n"
+            "Qty is summed. Drag moves all constituent plans together.")
+        _sum_css_off = (
+            "QPushButton { background:#fff; color:#3a4255; border:1px solid #d4d7e0;"
+            " border-radius:5px; padding:0 10px; font-size:11px; font-weight:600; }"
+            "QPushButton:hover { background:#f5f6fa; }"
+        )
+        _sum_css_on = (
+            "QPushButton { background:#1d4ed8; color:#fff; border:none;"
+            " border-radius:5px; padding:0 10px; font-size:11px; font-weight:600; }"
+            "QPushButton:hover { background:#1e40af; }"
+        )
+        self._btn_sum.setStyleSheet(_sum_css_off)
+        def _on_sum_toggle(checked):
+            self._btn_sum.setStyleSheet(_sum_css_on if checked else _sum_css_off)
+            self._canvas.toggle_summarize(checked)
+        self._btn_sum.toggled.connect(_on_sum_toggle)
+        lay.addWidget(self._btn_sum)
 
         # Weekly reorganize button
         btn_reorg = QPushButton("🔀 Reorganize")
