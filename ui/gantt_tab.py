@@ -857,6 +857,7 @@ class GanttCanvas(QWidget):
         self._checked = self._checked & valid_ids
         self._room_proc_set    = {(r["room_code"], r["process_name"]) for r in RoomRepo.all()}
         self._company_holidays = CompanyHolidayRepo.date_set()
+        self._build_mat_first_use(plans)
         self._build_rows()
         self._build_cap_map()
         self._build_summarized_plans()
@@ -881,6 +882,25 @@ class GanttCanvas(QWidget):
         self._build_layout_and_heights()
         self._update_size()
         self.update()
+
+    def _build_mat_first_use(self, plans):
+        """Build plan_id → first-use date for MATERIAL cards.
+        First-use date = earliest SKU plan_date for the same SO/SKU/Line
+        that is on or after this material plan's plan_date.
+        """
+        from collections import defaultdict
+        sku_dates: Dict[Tuple, List[str]] = defaultdict(list)
+        for p in plans:
+            if p.get("entity_type") != "MATERIAL":
+                sku_dates[(p["so_number"], p["sku_code"], p["line_item"])].append(
+                    p["plan_date"])
+        self._mat_first_use: Dict[int, str] = {}
+        for p in plans:
+            if p.get("entity_type") == "MATERIAL":
+                key = (p["so_number"], p["sku_code"], p["line_item"])
+                later = [d for d in sku_dates.get(key, [])
+                         if d >= p["plan_date"]]
+                self._mat_first_use[p["plan_id"]] = min(later) if later else None
 
     def _build_summarized_plans(self):
         """Collapse plans sharing (date,shift,room,process,entity_code) into one card."""
@@ -1534,37 +1554,57 @@ class GanttCanvas(QWidget):
                 p.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
                 p.drawText(_br, Qt.AlignmentFlag.AlignCenter, _lbl)
 
-            # Production deadline = due_date - post_lead_days
-            # In summary mode use earliest due across all merged SOs
-            if plan.get("_earliest_due"):
-                due = plan["_earliest_due"]
+            if is_mat:
+                # Material card: show first-use date (when SKU process consumes it)
+                _fuse = self._mat_first_use.get(plan["plan_id"])
+                if _fuse:
+                    _fd   = datetime.strptime(_fuse, "%Y-%m-%d").date()
+                    _dlbl = f"{_fd.month}.{_fd.day}"
+                    _days = (_fd - date.today()).days
+                    _tbg  = QColor(207, 250, 254)   # light cyan
+                    _tfg  = QColor(8, 145, 178) if _days >= 0 else QColor(194, 52, 47)
+                    _fw   = QFontMetrics(f_tag).horizontalAdvance(_dlbl) + 8
+                    _fh   = 12
+                    _tx   = lock_right - _fw - (2 if not plan["is_locked"] else 0)
+                    _ty   = pill_y + (PILL_H - _fh) // 2
+                    _tr   = QRect(_tx, _ty, _fw, _fh)
+                    p.setBrush(QBrush(_tbg))
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.drawRoundedRect(_tr, 3, 3)
+                    p.setPen(QPen(_tfg))
+                    p.setFont(f_tag)
+                    p.drawText(_tr, Qt.AlignmentFlag.AlignCenter, _dlbl)
             else:
-                due = so["due_date"] if so else None
-            prod_deadline = None
-            if due and so:
-                _lead = int((self._skus.get(so["sku_code"]) or {}).get("post_lead_days") or 0)
-                prod_deadline = (datetime.strptime(due, "%Y-%m-%d").date()
-                                 - timedelta(days=_lead))
+                # SKU card: production deadline = due_date - post_lead_days
+                # In summary mode use earliest due across all merged SOs
+                if plan.get("_earliest_due"):
+                    due = plan["_earliest_due"]
+                else:
+                    due = so["due_date"] if so else None
+                prod_deadline = None
+                if due and so:
+                    _lead = int((self._skus.get(so["sku_code"]) or {}).get("post_lead_days") or 0)
+                    prod_deadline = (datetime.strptime(due, "%Y-%m-%d").date()
+                                     - timedelta(days=_lead))
 
-            # Due-date badge (amber/red pill — based on prod_deadline, always shown)
-            if prod_deadline:
-                days_to = (prod_deadline - date.today()).days
-                due_str = f"{prod_deadline.month}.{prod_deadline.day}"
-                tag_bg  = DUE_TAG_LATE_BG if days_to < 0 else (
-                          DUE_TAG_BG if days_to <= 7 else QColor(220, 230, 245))
-                tag_fg  = DUE_TAG_LATE_FG if days_to < 0 else (
-                          DUE_TAG_FG if days_to <= 7 else QColor(80, 100, 140))
-                fw = QFontMetrics(f_tag).horizontalAdvance(due_str) + 8
-                fh = 12
-                tx = lock_right - fw - (2 if not plan["is_locked"] else 0)
-                ty_tag = pill_y + (PILL_H - fh) // 2
-                tr = QRect(tx, ty_tag, fw, fh)
-                p.setBrush(QBrush(tag_bg))
-                p.setPen(Qt.PenStyle.NoPen)
-                p.drawRoundedRect(tr, 3, 3)
-                p.setPen(QPen(tag_fg))
-                p.setFont(f_tag)
-                p.drawText(tr, Qt.AlignmentFlag.AlignCenter, due_str)
+                if prod_deadline:
+                    days_to = (prod_deadline - date.today()).days
+                    due_str = f"{prod_deadline.month}.{prod_deadline.day}"
+                    tag_bg  = DUE_TAG_LATE_BG if days_to < 0 else (
+                              DUE_TAG_BG if days_to <= 7 else QColor(220, 230, 245))
+                    tag_fg  = DUE_TAG_LATE_FG if days_to < 0 else (
+                              DUE_TAG_FG if days_to <= 7 else QColor(80, 100, 140))
+                    fw = QFontMetrics(f_tag).horizontalAdvance(due_str) + 8
+                    fh = 12
+                    tx = lock_right - fw - (2 if not plan["is_locked"] else 0)
+                    ty_tag = pill_y + (PILL_H - fh) // 2
+                    tr = QRect(tx, ty_tag, fw, fh)
+                    p.setBrush(QBrush(tag_bg))
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.drawRoundedRect(tr, 3, 3)
+                    p.setPen(QPen(tag_fg))
+                    p.setFont(f_tag)
+                    p.drawText(tr, Qt.AlignmentFlag.AlignCenter, due_str)
 
             # ── TEXT ZONE ─────────────────────────────────────────────────────
             tx  = rect.x() + TEXT_PAD_L
