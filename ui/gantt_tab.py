@@ -951,10 +951,13 @@ class GanttCanvas(QWidget):
 
     def _build_mat_first_use(self, plans):
         """Build plan_id → first-use date for MATERIAL cards.
-        First-use date = earliest SKU plan_date for the same SO/SKU/Line
-        that is on or after this material plan's plan_date.
+        Material plans have empty so_number/sku_code/line_item — they are
+        demand-group aggregates.  Use material_group_id → _mat_groups members
+        to find which (so, sku, line) combos consume this material, then find
+        the earliest SKU plan date >= this material plan's date.
         """
         from collections import defaultdict
+        # Index SKU plan dates by (so_number, sku_code, line_item)
         sku_dates: Dict[Tuple, List[str]] = defaultdict(list)
         for p in plans:
             if p.get("entity_type") != "MATERIAL":
@@ -962,11 +965,16 @@ class GanttCanvas(QWidget):
                     p["plan_date"])
         self._mat_first_use: Dict[int, str] = {}
         for p in plans:
-            if p.get("entity_type") == "MATERIAL":
-                key = (p["so_number"], p["sku_code"], p["line_item"])
-                later = [d for d in sku_dates.get(key, [])
-                         if d >= p["plan_date"]]
-                self._mat_first_use[p["plan_id"]] = min(later) if later else None
+            if p.get("entity_type") != "MATERIAL":
+                continue
+            gid     = p.get("material_group_id")
+            members = self._mat_groups.get(gid, []) if gid else []
+            mat_dt  = p["plan_date"]
+            candidates: List[str] = []
+            for m in members:
+                key = (m["so_number"], m["sku_code"], m["line_item"])
+                candidates.extend(d for d in sku_dates.get(key, []) if d >= mat_dt)
+            self._mat_first_use[p["plan_id"]] = min(candidates) if candidates else None
 
     def _build_summarized_plans(self):
         """Collapse plans sharing (date,shift,room,process,entity_code) into one card."""
