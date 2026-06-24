@@ -2050,10 +2050,15 @@ class InventoryTab(QWidget):
         btn_upload = QPushButton("📤 Upload Inventory")
         btn_tmpl   = QPushButton("⬇ Template")
         btn_alloc  = QPushButton("🔗 Allocate to SO")
+        btn_mb51   = QPushButton("📥 Upload MB51")
+        btn_mb51.setStyleSheet(
+            "background:#1d4ed8; color:white; font-weight:bold; "
+            "border:none; border-radius:4px; padding:4px 12px;")
         btn_upload.clicked.connect(self._upload)
         btn_tmpl.clicked.connect(self._template)
         btn_alloc.clicked.connect(self._open_allocate)
-        for b in (btn_upload, btn_tmpl, btn_alloc):
+        btn_mb51.clicked.connect(self._upload_mb51)
+        for b in (btn_upload, btn_tmpl, btn_alloc, btn_mb51):
             bar.addWidget(b)
 
         bar.addWidget(QLabel("  Filter SKU:"))
@@ -2064,7 +2069,7 @@ class InventoryTab(QWidget):
 
         bar.addWidget(QLabel("Status:"))
         self.status_filter = QComboBox()
-        self.status_filter.addItems(["ALL", "AVAILABLE", "ALLOCATED", "CONSUMED"])
+        self.status_filter.addItems(["ALL", "AVAILABLE", "ALLOCATED", "CONSUMED", "BLOCKED"])
         self.status_filter.currentTextChanged.connect(self.refresh)
         bar.addWidget(self.status_filter)
 
@@ -2105,6 +2110,8 @@ class InventoryTab(QWidget):
         self.inv_table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
         self.inv_table.itemChanged.connect(self._on_inv_cell_changed)
+        self.inv_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.inv_table.customContextMenuRequested.connect(self._inv_context_menu)
         ig_l.addWidget(self.inv_table)
         layout.addWidget(inv_grp, stretch=1)
 
@@ -2159,6 +2166,7 @@ class InventoryTab(QWidget):
             "ALLOCATED": QColor("#ffe0a0"),
             "CONSUMED":  QColor("#d0d0d0"),
             "EXPIRED":   QColor("#ffcccc"),
+            "BLOCKED":   QColor("#f87171"),
         }
         for ri, r in enumerate(rows):
             vals = [
@@ -2326,6 +2334,91 @@ class InventoryTab(QWidget):
             from data.repositories import AllocationRepo
             AllocationRepo.deallocate(alloc_id)
             self.refresh()
+
+    def _inv_context_menu(self, pos):
+        row = self.inv_table.rowAt(pos.y())
+        if row < 0:
+            return
+        item = self.inv_table.item(row, 0)
+        if not item:
+            return
+        inv_data = item.data(Qt.ItemDataRole.UserRole)
+        if not inv_data:
+            return
+        inv_id = inv_data["inv_id"]
+        status = inv_data["status"]
+        lot    = inv_data["lot_number"]
+        sku    = inv_data["sku_code"]
+
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        if status != "BLOCKED":
+            act_block = menu.addAction(f"🔒 Block LOT {lot}")
+        else:
+            act_block = None
+        if status == "BLOCKED":
+            act_unblock = menu.addAction(f"🔓 Unblock LOT {lot}")
+        else:
+            act_unblock = None
+        menu.addSeparator()
+        act_realloc = menu.addAction(f"♻ Re-allocate SKU {sku}")
+
+        chosen = menu.exec(self.inv_table.viewport().mapToGlobal(pos))
+        if chosen is None:
+            return
+
+        from data.repositories import InventoryRepo, AllocationRepo
+        if chosen == act_block:
+            if QMessageBox.question(
+                self, "Block LOT",
+                f"Block LOT {lot}?\n\nAll SO allocations for this lot will be removed."
+            ) != QMessageBox.StandardButton.Yes:
+                return
+            AllocationRepo.deallocate_lot(inv_id)
+            InventoryRepo.block_lot(inv_id)
+            # Re-allocate the affected SKU from remaining available lots
+            AllocationRepo.reallocate_sku(sku)
+            self.refresh()
+            if self.main_window:
+                self.main_window.notify(f"LOT {lot} blocked and deallocated.")
+
+        elif chosen == act_unblock:
+            InventoryRepo.unblock_lot(inv_id)
+            AllocationRepo.reallocate_sku(sku)
+            self.refresh()
+            if self.main_window:
+                self.main_window.notify(f"LOT {lot} unblocked and re-allocated.")
+
+        elif chosen == act_realloc:
+            stats = AllocationRepo.reallocate_sku(sku)
+            self.refresh()
+            short = stats.get("sos_short", [])
+            msg = (f"Re-allocation complete for {sku}.\n"
+                   f"Allocated: {stats.get('allocated_total', 0):,} units.\n")
+            if short:
+                msg += f"Short SOs: {len(short)} (need additional production)."
+            QMessageBox.information(self, "Re-allocate", msg)
+
+    def _upload_mb51(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Upload MB51 Excel", "", "Excel (*.xlsx)")
+        if not path:
+            return
+        from utils.excel_io import parse_mb51
+        ok, msg, rows = parse_mb51(path)
+        if not ok:
+            QMessageBox.warning(self, "MB51 Parse Error", msg)
+            return
+        if not rows:
+            QMessageBox.information(self, "MB51", "No data rows found.")
+            return
+        dlg = MB51UploadDialog(rows, self)
+        if dlg.exec():
+            self.refresh()
+            if self.main_window:
+                self.main_window.notify(
+                    f"MB51 processed: {dlg.result.get('new_docs', 0)} new documents, "
+                    f"{len(dlg.result.get('affected_skus', []))} SKUs updated.")
 
 
 # ─── Inventory Allocation Dialog ──────────────────────────────────────────────
@@ -2954,6 +3047,133 @@ class ReleaseReportTab(QWidget):
                 self, "Export", f"Saved to {path}")
         except Exception as e:
             QMessageBox.warning(self, "Export Error", str(e))
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  MB51 UPLOAD DIALOG
+# ════════════════════════════════════════════════════════════════════════════
+
+class MB51UploadDialog(QDialog):
+    """Preview MB51 movements before committing to inventory."""
+
+    def __init__(self, rows, parent=None):
+        super().__init__(parent)
+        self.rows   = rows
+        self.result = {}
+        self.setWindowTitle("MB51 Upload Preview")
+        self.resize(820, 560)
+        self._build_ui()
+
+    def _build_ui(self):
+        vl = QVBoxLayout(self)
+
+        # ── Summary header ──
+        from collections import Counter
+        mv_counts = Counter(
+            str(r.get("movement_type") or "").strip()
+            for r in self.rows)
+        from data.repositories import MB51Repo
+        already = MB51Repo.processed_docs()
+        new_count = sum(
+            1 for r in self.rows
+            if (str(r.get("material_document") or "").strip(),
+                str(r.get("movement_type") or "").strip()) not in already)
+
+        info = QLabel(
+            f"Total rows: {len(self.rows)}  |  "
+            f"New documents: {new_count}  |  "
+            f"Already processed: {len(self.rows) - new_count}\n"
+            f"Movement types: " +
+            ", ".join(f"{mv}×{cnt}" for mv, cnt in sorted(mv_counts.items())))
+        info.setStyleSheet(
+            "background:#eff6ff; color:#1e3a5f; padding:8px; "
+            "border-radius:4px; font-size:12px;")
+        info.setWordWrap(True)
+        vl.addWidget(info)
+
+        # ── Row preview table ──
+        grp = QGroupBox("MB51 Rows (preview — first 200)")
+        gl = QVBoxLayout(grp)
+        tbl = QTableWidget()
+        cols = ["Posting Date", "Material", "Batch", "Qty",
+                "Move Type", "Mat.Doc", "Status"]
+        tbl.setColumnCount(len(cols))
+        tbl.setHorizontalHeaderLabels(cols)
+        tbl.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents)
+        tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        tbl.setAlternatingRowColors(True)
+
+        show = self.rows[:200]
+        tbl.setRowCount(len(show))
+        MV_COLORS = {"101": "#d4f0c0", "102": "#ffe0a0",
+                     "331": "#fef9c3", "332": "#e0f2fe"}
+        for ri, r in enumerate(show):
+            mv  = str(r.get("movement_type") or "").strip()
+            doc = str(r.get("material_document") or "").strip()
+            is_new = (doc, mv) not in already
+            vals = [
+                str(r.get("posting_date") or ""),
+                str(r.get("material")     or ""),
+                str(r.get("batch")        or ""),
+                str(r.get("quantity")     or ""),
+                mv,
+                doc,
+                "NEW" if is_new else "skip",
+            ]
+            bg = QColor(MV_COLORS.get(mv, "#ffffff")) if is_new else QColor("#f0f0f0")
+            for ci, v in enumerate(vals):
+                item = QTableWidgetItem(v)
+                item.setBackground(QBrush(bg))
+                if ci == 6 and not is_new:
+                    item.setForeground(QBrush(QColor("#999999")))
+                tbl.setItem(ri, ci, item)
+        gl.addWidget(tbl)
+        vl.addWidget(grp, stretch=1)
+
+        # ── Buttons ──
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_cancel = QPushButton("Cancel")
+        btn_confirm = QPushButton("✅ Confirm & Process")
+        btn_confirm.setStyleSheet(
+            "background:#16A34A; color:white; font-weight:bold; "
+            "border:none; border-radius:5px; padding:6px 18px;")
+        btn_confirm.setEnabled(new_count > 0)
+        btn_cancel.clicked.connect(self.reject)
+        btn_confirm.clicked.connect(self._confirm)
+        btn_row.addWidget(btn_cancel)
+        btn_row.addWidget(btn_confirm)
+        vl.addLayout(btn_row)
+
+    def _confirm(self):
+        from core.mb51_processor import MB51Processor
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            self.result = MB51Processor().process(self.rows)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        stats  = self.result
+        skus   = stats.get("affected_skus", [])
+        allocs = stats.get("allocation_stats", {})
+        short_all = []
+        for s in allocs.values():
+            short_all.extend(s.get("sos_short", []))
+
+        msg = (f"Processed {stats.get('new_docs', 0)} new documents.\n"
+               f"Skipped {stats.get('skipped_docs', 0)} already-processed.\n"
+               f"Affected SKUs: {', '.join(skus) or '—'}\n")
+        if short_all:
+            msg += (f"\n⚠ {len(short_all)} SO(s) still short after allocation "
+                    "(additional production may be needed):\n")
+            for s in short_all[:5]:
+                msg += f"  • {s['so_number']} / {s['line_item']}: -{s['short_qty']:,}\n"
+            if len(short_all) > 5:
+                msg += f"  … and {len(short_all)-5} more.\n"
+
+        QMessageBox.information(self, "MB51 Result", msg)
+        self.accept()
 
 
 # ════════════════════════════════════════════════════════════════════════════

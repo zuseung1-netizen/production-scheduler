@@ -1186,3 +1186,100 @@ def upload_inventory(path: str) -> Tuple[bool, str]:
         return True, f"Imported {count} inventory lots"
     except Exception as e:
         return False, str(e)
+
+
+# ─── MB51 Parser ─────────────────────────────────────────────────────────────
+
+# Canonical key → possible header names (lower-case, stripped)
+_MB51_COL_ALIASES: Dict[str, List[str]] = {
+    "posting_date":      ["posting date", "postingdate", "buchungsdatum", "post. date"],
+    "material":          ["material", "material code", "sku", "matnr"],
+    "batch":             ["batch", "batch number", "lot", "lot number", "charge", "charg"],
+    "quantity":          ["quantity", "qty", "menge", "amount"],
+    "movement_type":     ["movement type", "movementtype", "bwart", "mvt", "move type"],
+    "material_document": ["material document", "materialdocument", "matdoc",
+                          "doc no", "document", "mblnr", "mat. doc."],
+}
+
+_MB51_REQUIRED = list(_MB51_COL_ALIASES.keys())
+
+
+def parse_mb51(filepath: str) -> Tuple[bool, str, List[Dict]]:
+    """
+    Parse an MB51 Excel export using header-name matching (position-independent).
+    Returns (ok, message, rows).
+    Each row is a dict with keys: posting_date, material, batch,
+    quantity, movement_type, material_document.
+    """
+    if not HAS_OPENPYXL:
+        return False, "openpyxl not installed", []
+    try:
+        wb = load_workbook(filepath, data_only=True)
+        ws = wb.active
+
+        # Find first non-empty row → treat as header
+        header_row_idx = None
+        headers_raw: List[str] = []
+        for i, row in enumerate(ws.iter_rows(values_only=True)):
+            if any(c is not None for c in row):
+                headers_raw = [
+                    str(c).strip().lower() if c is not None else ""
+                    for c in row
+                ]
+                header_row_idx = i + 1  # 1-based for min_row
+                break
+
+        if header_row_idx is None:
+            return False, "Empty file", []
+
+        # Map canonical key → column index
+        col_map: Dict[str, int] = {}
+        for canonical, aliases in _MB51_COL_ALIASES.items():
+            for alias in aliases:
+                if alias in headers_raw:
+                    col_map[canonical] = headers_raw.index(alias)
+                    break
+
+        missing = [k for k in _MB51_REQUIRED if k not in col_map]
+        if missing:
+            return (False,
+                    f"Columns not found: {missing}. "
+                    f"Available headers: {[h for h in headers_raw if h]}",
+                    [])
+
+        rows: List[Dict] = []
+        for row in ws.iter_rows(min_row=header_row_idx + 1, values_only=True):
+            if all(c is None for c in row):
+                continue
+            def _get(key):
+                idx = col_map[key]
+                return row[idx] if idx < len(row) else None
+
+            mat = str(_get("material") or "").strip()
+            bat = str(_get("batch")    or "").strip()
+            if not mat and not bat:
+                continue
+
+            pd_raw = _get("posting_date")
+            pd_str = _parse_date(pd_raw) if pd_raw is not None else None
+
+            mv_raw = _get("movement_type")
+            mv_str = str(mv_raw).strip().lstrip("0") if mv_raw is not None else ""
+
+            try:
+                qty = float(_get("quantity") or 0)
+            except (TypeError, ValueError):
+                qty = 0.0
+
+            rows.append({
+                "posting_date":      pd_str,
+                "material":          mat,
+                "batch":             bat,
+                "quantity":          qty,
+                "movement_type":     mv_str,
+                "material_document": str(_get("material_document") or "").strip(),
+            })
+
+        return True, f"Parsed {len(rows)} rows", rows
+    except Exception as e:
+        return False, str(e), []

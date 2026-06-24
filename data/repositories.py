@@ -1542,6 +1542,53 @@ class InventoryRepo:
             return cur.lastrowid
 
     @staticmethod
+    def block_lot(inv_id: int):
+        """Block a lot (e.g. QC failure). Prevents allocation."""
+        with get_connection() as conn:
+            conn.execute(
+                "UPDATE inventory SET status='BLOCKED', updated_at=? WHERE inv_id=?",
+                (_now(), inv_id))
+
+    @staticmethod
+    def unblock_lot(inv_id: int):
+        """Restore a blocked lot to AVAILABLE."""
+        with get_connection() as conn:
+            conn.execute(
+                "UPDATE inventory SET status='AVAILABLE', updated_at=? WHERE inv_id=?",
+                (_now(), inv_id))
+
+    @staticmethod
+    def adjust_qty_from_mb51(sku_code: str, lot_number: str,
+                              delta: float, posting_date: str = None) -> int:
+        """Apply a signed qty delta from an MB51 movement.
+        delta > 0 = GR (add); delta < 0 = Sampling/reversal (deduct).
+        Creates the lot record if it does not yet exist (first GR).
+        Returns inv_id.
+        """
+        now = _now()
+        with get_connection() as conn:
+            existing = conn.execute(
+                "SELECT inv_id, qty_available FROM inventory "
+                "WHERE sku_code=? AND lot_number=?",
+                (sku_code, lot_number)).fetchone()
+            if existing:
+                new_qty = max(0, existing["qty_available"] + delta)
+                conn.execute(
+                    "UPDATE inventory SET qty_available=?, updated_at=? WHERE inv_id=?",
+                    (new_qty, now, existing["inv_id"]))
+                return existing["inv_id"]
+            if delta > 0:
+                cur = conn.execute("""
+                    INSERT INTO inventory
+                        (sku_code, lot_number, qty_available,
+                         production_date, expiry_date, status,
+                         note, created_at, updated_at)
+                    VALUES (?,?,?,?,NULL,'AVAILABLE','From MB51 GR',?,?)
+                """, (sku_code, lot_number, delta, posting_date, now, now))
+                return cur.lastrowid
+        return -1
+
+    @staticmethod
     def fefo_suggestion(sku_code: str, qty_needed: int) -> List[Dict]:
         """
         FEFO auto-suggestion: returns a list of (inv_id, lot_number,
@@ -1716,6 +1763,107 @@ class AllocationRepo:
         for r in rows:
             InventoryRepo.update_status(r["inv_id"], "AVAILABLE")
         return len(rows)
+
+    @staticmethod
+    def deallocate_lot(inv_id: int) -> int:
+        """Remove all SO allocations for one lot. Returns count removed."""
+        with get_connection() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM so_inventory_allocation WHERE inv_id=?",
+                (inv_id,)).fetchone()[0]
+            conn.execute(
+                "DELETE FROM so_inventory_allocation WHERE inv_id=?", (inv_id,))
+        return count
+
+    @staticmethod
+    def reallocate_sku(sku_code: str) -> Dict:
+        """Re-run SO allocation for a SKU from scratch.
+        Ordering: committed_due_date ASC → due_date ASC → priority ASC → received_at ASC.
+        Returns stats dict.
+        """
+        now = _now()
+        with get_connection() as conn:
+            # AVAILABLE lots in FEFO order (expiry ASC, null expiry last)
+            lots = _rows_to_dicts(conn.execute("""
+                SELECT inv_id, lot_number, qty_available
+                FROM inventory
+                WHERE sku_code=? AND status='AVAILABLE' AND qty_available > 0
+                ORDER BY COALESCE(expiry_date,'9999-12-31') ASC, lot_number ASC
+            """, (sku_code,)).fetchall())
+
+            # OPEN SOs ordered by urgency
+            sos = _rows_to_dicts(conn.execute("""
+                SELECT so_number, sku_code, line_item, qty,
+                       COALESCE(committed_due_date, due_date) AS eff_due,
+                       priority, received_at
+                FROM sales_order
+                WHERE sku_code=? AND status='OPEN'
+                ORDER BY COALESCE(committed_due_date, due_date) ASC,
+                         COALESCE(priority, 9999) ASC,
+                         received_at ASC
+            """, (sku_code,)).fetchall())
+
+            # Clear all existing allocations for this SKU's lots
+            inv_ids = [r["inv_id"] for r in lots]
+            if inv_ids:
+                placeholders = ",".join("?" * len(inv_ids))
+                conn.execute(
+                    f"DELETE FROM so_inventory_allocation WHERE inv_id IN ({placeholders})",
+                    inv_ids)
+                # Reset ALLOCATED → AVAILABLE (will re-set below as needed)
+                conn.execute(
+                    f"UPDATE inventory SET status='AVAILABLE', updated_at=? "
+                    f"WHERE inv_id IN ({placeholders}) AND status='ALLOCATED'",
+                    [now] + inv_ids)
+
+            lot_remaining = {r["inv_id"]: r["qty_available"] for r in lots}
+            stats = {"allocated_total": 0, "sos_short": []}
+
+            for so in sos:
+                actual_row = conn.execute("""
+                    SELECT COALESCE(SUM(qty_actual),0) AS produced
+                    FROM production_actual
+                    WHERE so_number=? AND sku_code=? AND line_item=?
+                """, (so["so_number"], sku_code, so["line_item"])).fetchone()
+                produced = actual_row["produced"] if actual_row else 0
+                needed = max(0, so["qty"] - produced)
+
+                for lot in lots:
+                    if needed <= 0:
+                        break
+                    avail = lot_remaining.get(lot["inv_id"], 0)
+                    if avail <= 0:
+                        continue
+                    alloc = min(needed, avail)
+                    conn.execute("""
+                        INSERT INTO so_inventory_allocation
+                            (so_number, sku_code, line_item,
+                             inv_id, lot_number, qty_allocated,
+                             allocated_at, note)
+                        VALUES (?,?,?,?,?,?,?,?)
+                    """, (so["so_number"], sku_code, so["line_item"],
+                          lot["inv_id"], lot["lot_number"], alloc,
+                          now, "Auto-allocated by MB51"))
+                    lot_remaining[lot["inv_id"]] -= alloc
+                    needed -= alloc
+                    stats["allocated_total"] += alloc
+
+                if needed > 0:
+                    stats["sos_short"].append({
+                        "so_number": so["so_number"],
+                        "line_item": so["line_item"],
+                        "short_qty": needed,
+                    })
+
+            # Mark fully exhausted lots as ALLOCATED
+            for lot in lots:
+                if lot_remaining.get(lot["inv_id"], 0) <= 0:
+                    conn.execute(
+                        "UPDATE inventory SET status='ALLOCATED', updated_at=? "
+                        "WHERE inv_id=?", (now, lot["inv_id"]))
+
+            conn.commit()
+        return stats
 
     @staticmethod
     def bulk_auto_allocate() -> dict:
@@ -1934,3 +2082,50 @@ class SKUProcessRepo:
     @staticmethod
     def validate_routing(sku_code: str) -> Tuple[bool, str]:
         return ProcessRoutingRepo.validate("SKU", sku_code)
+
+
+# ─── MB51 Processed Documents ────────────────────────────────────────────────
+
+class MB51Repo:
+    """Tracks which SAP material documents have been processed to prevent double-counting."""
+
+    @staticmethod
+    def processed_docs() -> set:
+        """Return set of (material_document, movement_type) tuples already processed."""
+        with get_connection() as conn:
+            rows = conn.execute(
+                "SELECT material_document, movement_type FROM mb51_processed_docs"
+            ).fetchall()
+        return {(str(r[0]), str(r[1])) for r in rows}
+
+    @staticmethod
+    def insert_doc(row: Dict):
+        now = _now()
+        with get_connection() as conn:
+            conn.execute("""
+                INSERT OR IGNORE INTO mb51_processed_docs
+                    (material_document, posting_date, material,
+                     batch, qty, movement_type, processed_at)
+                VALUES (?,?,?,?,?,?,?)
+            """, (
+                str(row.get("material_document", "")).strip(),
+                str(row.get("posting_date", "")).strip() if row.get("posting_date") else None,
+                str(row.get("material", "")).strip(),
+                str(row.get("batch", "")).strip(),
+                float(row.get("quantity", 0) or 0),
+                str(row.get("movement_type", "")).strip(),
+                now,
+            ))
+
+    @staticmethod
+    def all() -> List[Dict]:
+        with get_connection() as conn:
+            return _rows_to_dicts(conn.execute(
+                "SELECT * FROM mb51_processed_docs ORDER BY processed_at DESC"
+            ).fetchall())
+
+    @staticmethod
+    def clear():
+        with get_connection() as conn:
+            conn.execute("DELETE FROM mb51_processed_docs")
+            conn.commit()

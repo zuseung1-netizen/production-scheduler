@@ -433,6 +433,22 @@ def init_db():
         created_at      TEXT NOT NULL
     )""")
 
+    # ── MB51 Processed Documents ─────────────────────────────────────────────
+    # Dedup table: each uploaded material document is recorded here so that
+    # re-uploading the same MB51 file does not double-count movements.
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS mb51_processed_docs (
+        doc_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        material_document TEXT NOT NULL,
+        posting_date    TEXT,
+        material        TEXT,
+        batch           TEXT,
+        qty             REAL,
+        movement_type   TEXT,
+        processed_at    TEXT NOT NULL,
+        UNIQUE (material_document, movement_type)
+    )""")
+
     # ── Performance indices ───────────────────────────────────────────────────
     c.execute("CREATE INDEX IF NOT EXISTS idx_plan_date "
               "ON production_plan(plan_date)")
