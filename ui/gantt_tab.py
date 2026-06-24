@@ -351,6 +351,7 @@ class GanttHeaderWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedHeight(self._TOTAL_H)
+        self.setMouseTracking(True)
         self.shift_view      : bool = False
         self.horizon_days    : int  = 90
         self.start_date      : date = date.today()
@@ -360,24 +361,60 @@ class GanttHeaderWidget(QWidget):
         self._cap_map        : dict = {}
         self._company_holidays: set = set()
         self._hc_util_data   : dict = {}
+        self._hc_alloc_by_date: dict = {}
+        # Cached per-column raw values for tooltip (built during paintEvent)
+        self._col_cap_rendered: dict = {}  # col -> (used_inner, cap_inner)
 
     def _is_holiday(self, d: date) -> bool:
         return is_holiday(d) or d.isoformat() in self._company_holidays
 
     def sync_from(self, canvas: 'GanttCanvas'):
-        self.shift_view        = canvas.shift_view
-        self.horizon_days      = canvas.horizon_days
-        self.start_date        = canvas.start_date
-        self._shifts           = canvas._shifts
-        self._y_label_w        = canvas._y_label_w
-        self._cap_map          = canvas._cap_map
-        self._company_holidays = canvas._company_holidays
-        self._hc_util_data     = canvas._hc_util_by_date
+        self.shift_view          = canvas.shift_view
+        self.horizon_days        = canvas.horizon_days
+        self.start_date          = canvas.start_date
+        self._shifts             = canvas._shifts
+        self._y_label_w          = canvas._y_label_w
+        self._cap_map            = canvas._cap_map
+        self._company_holidays   = canvas._company_holidays
+        self._hc_util_data       = canvas._hc_util_by_date
+        self._hc_alloc_by_date   = canvas._hc_alloc_by_date
         self.update()
 
     def set_scroll_h(self, val: int):
         self._scroll_h = val
         self.update()
+
+    def mouseMoveEvent(self, event):
+        from PyQt6.QtWidgets import QToolTip
+        mx = event.position().x()
+        my = event.position().y()
+        yw = self._y_label_w
+        # Convert widget x to canvas x (accounting for horizontal scroll)
+        cx = mx + self._scroll_h
+        if cx < yw or self.shift_view:
+            QToolTip.hideText()
+            return
+        col = int((cx - yw) // DAY_W)
+        if col < 0 or col >= self.horizon_days:
+            QToolTip.hideText()
+            return
+        ds = (self.start_date + timedelta(days=col)).strftime("%Y-%m-%d")
+        tip = ""
+        if HEADER_H <= my < HEADER_H + UTIL_ROW_H:
+            # CAPACITY row
+            used, cap = self._col_cap_rendered.get(col, (0.0, 0.0))
+            if cap > 0:
+                tip = f"{used:,.0f} / {cap:,.0f}"
+        elif HEADER_H + UTIL_ROW_H <= my < HEADER_H + UTIL_H:
+            # LABOR row
+            pair = self._hc_alloc_by_date.get(ds)
+            if pair:
+                alloc, total = pair
+                tip = f"{alloc:,.0f} / {total:,.0f}"
+        if tip:
+            QToolTip.showText(event.globalPosition().toPoint(), tip, self)
+        else:
+            QToolTip.hideText()
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -411,7 +448,9 @@ class GanttHeaderWidget(QWidget):
                 if col is not None:
                     cu, cc = col_cap.get(col, (0.0, 0.0))
                     col_cap[col] = (cu + used, cc + cap)
+            self._col_cap_rendered = col_cap  # cache for tooltip
 
+            from PyQt6.QtGui import QFontMetrics as _FM
             for col in range(self.horizon_days):
                 d  = self.start_date + timedelta(days=col)
                 x  = yw + col * DAY_W
@@ -454,7 +493,7 @@ class GanttHeaderWidget(QWidget):
                 color  = (UTIL_HIGH if ratio > 0.9 else
                           UTIL_MED  if ratio > 0.6 else
                           (UTIL_LOW if ratio > 0 else QColor(214, 218, 227)))
-                # Track: faint trough (matches LABOR bar style)
+                # Track: faint trough
                 p.setBrush(QBrush(QColor(50, 82, 138)))
                 p.setPen(Qt.PenStyle.NoPen)
                 p.drawRoundedRect(QRect(x + 2, bar_y, cw_, bar_h), 2, 2)
@@ -462,16 +501,16 @@ class GanttHeaderWidget(QWidget):
                     p.setBrush(QBrush(color))
                     p.setPen(Qt.PenStyle.NoPen)
                     p.drawRoundedRect(QRect(x + 2, bar_y, fill_w, bar_h), 2, 2)
-                # Cap tag badge (red background when over 90%)
-                if ratio > 0.9:
-                    tag_txt = f"{int(ratio * 100)}%"
+                # % badge — always at right edge (100% position)
+                if cap > 0:
+                    tag_txt   = f"{int(ratio * 100)}%"
                     p.setFont(f_cap)
-                    from PyQt6.QtGui import QFontMetrics
-                    tag_w = QFontMetrics(f_cap).horizontalAdvance(tag_txt) + 6
-                    tag_h = 10
-                    tag_x = x + DAY_W - tag_w - 2
+                    tag_w     = _FM(f_cap).horizontalAdvance(tag_txt) + 6
+                    tag_h     = 10
+                    tag_x     = x + DAY_W - tag_w - 2
                     tag_y_pos = HEADER_H + (UTIL_ROW_H - tag_h) // 2
-                    p.setBrush(QBrush(QColor(194, 52, 47)))
+                    bg_color  = QColor(194, 52, 47) if ratio > 0.9 else QColor(30, 58, 110, 200)
+                    p.setBrush(QBrush(bg_color))
                     p.setPen(Qt.PenStyle.NoPen)
                     p.drawRoundedRect(QRect(tag_x, tag_y_pos, tag_w, tag_h), 2, 2)
                     p.setPen(QPen(Qt.GlobalColor.white))
@@ -484,7 +523,7 @@ class GanttHeaderWidget(QWidget):
                 hc_ratio = hc_pct / 100.0
                 hc_bar_y = HEADER_H + UTIL_ROW_H + (UTIL_ROW_H - bar_h) // 2
                 hc_fill_w = int(cw_ * min(hc_ratio, 1.0))
-                # Track: always draw a faint trough so 0% is still visible
+                # Track
                 p.setBrush(QBrush(QColor(50, 82, 138)))
                 p.setPen(Qt.PenStyle.NoPen)
                 p.drawRoundedRect(QRect(x + 2, hc_bar_y, cw_, bar_h), 2, 2)
@@ -496,16 +535,16 @@ class GanttHeaderWidget(QWidget):
                     p.setBrush(QBrush(hc_color))
                     p.setPen(Qt.PenStyle.NoPen)
                     p.drawRoundedRect(QRect(x + 2, hc_bar_y, hc_fill_w, bar_h), 2, 2)
-                # Percentage badge when util is high (mirrors Cap bar badge)
-                if hc_ratio > 0.9:
+                # % badge — always at right edge (100% position)
+                if ds_str in self._hc_util_data:
                     hc_tag_txt = f"{int(hc_pct)}%"
                     p.setFont(f_cap)
-                    from PyQt6.QtGui import QFontMetrics as _FM
-                    hc_tag_w = _FM(f_cap).horizontalAdvance(hc_tag_txt) + 6
-                    hc_tag_h = 10
-                    hc_tag_x = x + DAY_W - hc_tag_w - 2
-                    hc_tag_y = HEADER_H + UTIL_ROW_H + (UTIL_ROW_H - hc_tag_h) // 2
-                    p.setBrush(QBrush(QColor(194, 52, 47)))
+                    hc_tag_w   = _FM(f_cap).horizontalAdvance(hc_tag_txt) + 6
+                    hc_tag_h   = 10
+                    hc_tag_x   = x + DAY_W - hc_tag_w - 2
+                    hc_tag_y   = HEADER_H + UTIL_ROW_H + (UTIL_ROW_H - hc_tag_h) // 2
+                    hc_bg      = QColor(194, 52, 47) if hc_ratio > 0.9 else QColor(30, 58, 110, 200)
+                    p.setBrush(QBrush(hc_bg))
                     p.setPen(Qt.PenStyle.NoPen)
                     p.drawRoundedRect(QRect(hc_tag_x, hc_tag_y, hc_tag_w, hc_tag_h), 2, 2)
                     p.setPen(QPen(Qt.GlobalColor.white))
@@ -836,6 +875,8 @@ class GanttCanvas(QWidget):
         self._hc_map      : Dict[Tuple, Tuple] = {}
         # HC utilisation by date: date_str -> pct (0-100)
         self._hc_util_by_date: Dict[str, float] = {}
+        # Raw LABOR data for tooltip: date_str -> (alloc_hc, total_hc)
+        self._hc_alloc_by_date: Dict[str, Tuple[float, float]] = {}
         # plan_id -> (slot_index, total_in_slot) for vertical stacking
         self._plan_layout : Dict[int, Tuple[int, int]] = {}
         # O(1) row lookup built in _build_rows()
@@ -882,13 +923,17 @@ class GanttCanvas(QWidget):
                 day_alloc[ds] = day_alloc.get(ds, 0.0) + alloc
             # Denominator: total CRP HC per day across all shifts
             avl = scheduler.get_available_hc_by_date(d0_str, d1_str)
-            self._hc_util_by_date = {
-                ds: (day_alloc.get(ds, 0.0) / sum(shifts.values()) * 100)
-                for ds, shifts in avl.items()
-                if sum(shifts.values()) > 0
-            }
-        except Exception:
             self._hc_util_by_date = {}
+            self._hc_alloc_by_date = {}
+            for ds, shifts in avl.items():
+                total_hc = sum(shifts.values())
+                if total_hc > 0:
+                    alloc_hc = day_alloc.get(ds, 0.0)
+                    self._hc_util_by_date[ds] = alloc_hc / total_hc * 100
+                    self._hc_alloc_by_date[ds] = (alloc_hc, total_hc)
+        except Exception:
+            self._hc_util_by_date  = {}
+            self._hc_alloc_by_date = {}
         self._update_size()
         self.update()
 
