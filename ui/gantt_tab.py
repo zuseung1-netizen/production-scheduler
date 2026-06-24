@@ -1706,7 +1706,10 @@ class GanttCanvas(QWidget):
                     if rect:
                         col_w    = self._col_w()
                         cur_col  = pos.x() // col_w
-                        has_stack = len(self._stack_cell_plans) > 1
+                        # In summary mode, merged cards = multiple real plans in same cell;
+                        # stack reorder doesn't apply — always use regular drag.
+                        has_stack = (not self._summarize
+                                     and len(self._stack_cell_plans) > 1)
 
                         if has_stack and cur_col == self._stack_orig_col:
                             # ── STACK REORDER MODE ──────────────────────────
