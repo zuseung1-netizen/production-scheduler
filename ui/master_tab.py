@@ -1207,6 +1207,39 @@ class AppConfigWidget(QWidget):
             "to reduce changeovers. Plans never cross week boundaries.")
         form.addRow("Weekly Reorganize:", self.weekly_reorg_enabled)
 
+        # ── Pull-Forward Settings ─────────────────────────────────────────────
+        pf_label = QLabel("— Pull-Forward —")
+        pf_label.setStyleSheet("color:#64748B; font-size:11px;")
+        form.addRow(pf_label)
+
+        self.pf_util_thresh = QSpinBox()
+        self.pf_util_thresh.setRange(10, 100)
+        self.pf_util_thresh.setSuffix(" %")
+        self.pf_util_thresh.setValue(int(ConfigRepo.get("pull_forward_util_threshold", "90")))
+        self.pf_util_thresh.setToolTip(
+            "Pull plans forward only into slots whose utilization is below this threshold.\n"
+            "Lower = more aggressive filling. Default: 90%")
+        form.addRow("PF Util. Threshold:", self.pf_util_thresh)
+
+        self.pf_lookahead = QSpinBox()
+        self.pf_lookahead.setRange(1, 60)
+        self.pf_lookahead.setSuffix(" days")
+        self.pf_lookahead.setValue(int(ConfigRepo.get("pull_forward_lookahead_days", "14")))
+        self.pf_lookahead.setToolTip(
+            "Maximum number of days a plan can be pulled forward.\n"
+            "e.g. 14 = pull plans up to 2 weeks earlier. Default: 14")
+        form.addRow("PF Lookahead Window:", self.pf_lookahead)
+
+        self.pf_max_early = QSpinBox()
+        self.pf_max_early.setRange(1, 180)
+        self.pf_max_early.setSuffix(" days")
+        self.pf_max_early.setValue(int(ConfigRepo.get("pull_forward_max_early_days", "30")))
+        self.pf_max_early.setToolTip(
+            "For final-process plans: don't produce more than this many days before\n"
+            "the shipment-ready date (due_date − post_lead_days).\n"
+            "Prevents excess warehouse inventory build-up. Default: 30")
+        form.addRow("PF Max Early (final step):", self.pf_max_early)
+
         self.crp_path = QLineEdit(ConfigRepo.get("crp_excel_path", ""))
         btn_browse = QPushButton("Browse…")
         btn_browse.clicked.connect(self._browse_crp)
@@ -1303,6 +1336,9 @@ class AppConfigWidget(QWidget):
         ConfigRepo.set("max_consolidation_days",  str(self.campaign_window.value()))
         ConfigRepo.set("weekly_reorganize_enabled",
                        "1" if self.weekly_reorg_enabled.isChecked() else "0")
+        ConfigRepo.set("pull_forward_util_threshold", str(self.pf_util_thresh.value()))
+        ConfigRepo.set("pull_forward_lookahead_days",  str(self.pf_lookahead.value()))
+        ConfigRepo.set("pull_forward_max_early_days",  str(self.pf_max_early.value()))
         QMessageBox.information(self, "Saved", "Settings saved.")
 
 

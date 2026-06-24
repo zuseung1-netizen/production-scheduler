@@ -232,7 +232,16 @@ class Scheduler:
 
     def pull_forward(self, date_from: str, date_to: str) -> Dict:
         self._reload_masters()
+
+        # Read configurable parameters
+        util_thresh    = float(ConfigRepo.get("pull_forward_util_threshold", "90"))
+        lookahead_days = int(ConfigRepo.get("pull_forward_lookahead_days", "14"))
+        max_early_days = int(ConfigRepo.get("pull_forward_max_early_days", "30"))
+
         slot_map = self._build_slot_map(date_from, date_to)
+
+        # Snapshot total capacity after locked plans (used for utilization calc)
+        cap_for_util: Dict[SlotKey, float] = dict(slot_map)
 
         # _build_slot_map only subtracts locked plans.
         # Pull-forward works on existing unlocked plans, so we must also
@@ -249,30 +258,47 @@ class Scheduler:
                 slot_map[key] = max(0.0,
                     slot_map[key] - sku_to_inner(p["qty_planned"], uom))
 
+        sku_repo_all = {s["sku_code"]: s for s in SKURepo.all()}
+        so_cache: Dict[Tuple, Dict] = {}
+
         moved = 0
+        # Process latest-to-earliest so that campaign-extension candidates
+        # (same entity, same room/process, adjacent slots) are evaluated first.
         plans = sorted(all_plans,
                        key=lambda p: (p["plan_date"], p["shift_no"]),
                        reverse=True)
         for plan in plans:
             if plan["is_locked"]:
                 continue
+
+            plan_dt = _date(plan["plan_date"])
+
             if plan["entity_type"] == "SKU":
-                so = SORepo.get(plan["so_number"], plan["sku_code"],
-                                plan["line_item"])
+                so_key = (plan["so_number"], plan["sku_code"], plan["line_item"])
+                if so_key not in so_cache:
+                    so_cache[so_key] = SORepo.get(*so_key)
+                so = so_cache[so_key]
                 if not so:
                     continue
                 earliest = self._earliest_start(so)
+
+                # max_early_days: for final-seq plans, don't pull so far that
+                # finished goods sit in warehouse more than max_early_days
+                # before due date.
+                if plan.get("is_final_seq"):
+                    sku = sku_repo_all.get(plan["sku_code"], {})
+                    post_lead = int(sku.get("post_lead_days") or 0)
+                    due = _date(so["due_date"])
+                    min_date = due - timedelta(days=post_lead + max_early_days)
+                    earliest = max(earliest, min_date)
             else:
-                # Material: don't pull before today
                 earliest = date.today()
 
-            new_slot = self._find_earlier_slot(plan, slot_map, earliest,
-                                               date_from)
+            new_slot = self._find_earlier_slot_pf(
+                plan, slot_map, cap_for_util,
+                util_thresh, lookahead_days, earliest, date_from)
             if new_slot:
-                uom = (self.sku_map.get(plan["sku_code"], {}).get("uom", 1)
-                       if plan["entity_type"] == "SKU"
-                       else self.mat_map.get(plan["entity_code"], {}).get("uom", 1))
-                uom = uom or 1
+                uom = self._entity_uom(plan)
                 old_key = (plan["plan_date"], plan["room_code"],
                            plan["process_name"], plan["shift_no"])
                 slot_map[old_key] = (slot_map.get(old_key, 0)
@@ -2070,6 +2096,41 @@ class Scheduler:
         for ds, room, proc, sno in candidates:
             if slot_map.get((ds, room, proc, sno), 0) >= needed_inner:
                 return ds, sno, room
+        return None
+
+    def _find_earlier_slot_pf(
+        self, plan, slot_map: Dict, cap_for_util: Dict,
+        util_thresh: float, lookahead_days: int,
+        earliest: date, date_from: str,
+    ):
+        """Pull-forward variant: adds utilization threshold + lookahead window."""
+        plan_date    = _date(plan["plan_date"])
+        uom          = self._entity_uom(plan)
+        needed_inner = sku_to_inner(plan["qty_planned"], uom)
+        d_from       = _date(date_from)
+        candidates   = sorted(
+            [(ds, room, proc, sno)
+             for (ds, room, proc, sno) in slot_map.keys()
+             if (room == plan["room_code"]
+                 and proc == plan["process_name"]
+                 and _date(ds) < plan_date
+                 and _date(ds) >= earliest
+                 and _date(ds) >= d_from
+                 # Lookahead: max movement distance is lookahead_days
+                 and (plan_date - _date(ds)).days <= lookahead_days)],
+            key=lambda x: (x[0], x[3]))
+        for ds, room, proc, sno in candidates:
+            key      = (ds, room, proc, sno)
+            remaining = slot_map.get(key, 0)
+            if remaining < needed_inner:
+                continue
+            # Utilization check: only pull into under-utilized slots
+            total_cap = cap_for_util.get(key, 0)
+            if total_cap > 0:
+                current_util = (total_cap - remaining) / total_cap * 100
+                if current_util >= util_thresh:
+                    continue
+            return ds, sno, room
         return None
 
     def _entity_uom(self, plan: Dict) -> int:
