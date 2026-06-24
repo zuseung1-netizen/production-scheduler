@@ -36,6 +36,9 @@ class MB51Processor:
         for r in rows:
             mv  = str(r.get("movement_type") or "").strip().lstrip("0")
             doc = str(r.get("material_document") or "").strip()
+            # Skip rows with no document number — cannot dedup safely
+            if not doc:
+                continue
             if (doc, mv) not in already:
                 new_rows.append(r)
 
@@ -63,24 +66,30 @@ class MB51Processor:
             sign = _MOVEMENT_SIGN.get(mv, 0)
             if not sign or not sku or not lot:
                 continue
-            lot_deltas[(sku, lot)] += sign * qty
+            # SAP sometimes exports reversal rows with negative qty already.
+            # Normalise to absolute value so sign always comes from movement type.
+            lot_deltas[(sku, lot)] += sign * abs(qty)
             if (sku, lot) not in lot_posting:
                 pd = r.get("posting_date")
                 lot_posting[(sku, lot)] = (
                     str(pd)[:10] if pd is not None else None)
 
-        # Apply inventory adjustments
+        # Apply inventory adjustments — mark docs only after ALL succeed
         affected_skus: set = set()
         lot_changes: Dict[str, float] = {}
-        for (sku, lot), delta in lot_deltas.items():
-            if delta == 0:
-                continue
-            InventoryRepo.adjust_qty_from_mb51(
-                sku, lot, delta, lot_posting.get((sku, lot)))
-            affected_skus.add(sku)
-            lot_changes[f"{sku}/{lot}"] = delta
+        try:
+            for (sku, lot), delta in lot_deltas.items():
+                if delta == 0:
+                    continue
+                InventoryRepo.adjust_qty_from_mb51(
+                    sku, lot, delta, lot_posting.get((sku, lot)))
+                affected_skus.add(sku)
+                lot_changes[f"{sku}/{lot}"] = delta
+        except Exception:
+            # Do NOT mark docs as processed — let the caller see the exception
+            raise
 
-        # Mark documents as processed
+        # Mark documents as processed (only reached if all adjustments succeeded)
         for r in new_rows:
             MB51Repo.insert_doc(r)
 

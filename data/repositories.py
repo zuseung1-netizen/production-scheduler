@@ -1791,13 +1791,14 @@ class AllocationRepo:
                 ORDER BY COALESCE(expiry_date,'9999-12-31') ASC, lot_number ASC
             """, (sku_code,)).fetchall())
 
-            # OPEN SOs ordered by urgency
+            # OPEN customer SOs ordered by urgency (IO orders excluded)
             sos = _rows_to_dicts(conn.execute("""
                 SELECT so_number, sku_code, line_item, qty,
                        COALESCE(committed_due_date, due_date) AS eff_due,
                        priority, received_at
                 FROM sales_order
                 WHERE sku_code=? AND status='OPEN'
+                  AND COALESCE(order_type,'CUSTOMER') = 'CUSTOMER'
                 ORDER BY COALESCE(committed_due_date, due_date) ASC,
                          COALESCE(priority, 9999) ASC,
                          received_at ASC

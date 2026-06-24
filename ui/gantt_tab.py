@@ -815,6 +815,9 @@ class GanttCanvas(QWidget):
         self._room_proc_set   : set = set()
         self._company_holidays: set = set()   # date ISO strings from DB
 
+        # Material first-use date: plan_id → earliest SKU plan_date that consumes it
+        self._mat_first_use     : Dict[int, str]   = {}
+
         # Summarize mode — collapse same (date,shift,room,process,sku) into one card
         self._summarize          : bool            = False
         self._summarized_plans   : List[Dict]      = []   # merged plan dicts
