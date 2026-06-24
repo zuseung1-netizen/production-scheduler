@@ -132,6 +132,7 @@ CLOSE_TAG_BG    = QColor(217, 119,   6)  # amber — campaign closing shift badg
 CHECK_FILL      = QColor(63,  124, 196, 30)
 
 CARD_H     = 72   # row slot height — matches mockup 72px body row
+CELL_UTIL_H = 12  # per-cell utilization bar strip at bottom of each row (Room mode)
 DAY_W      = 88   # day column width
 SHIFT_W    = DAY_W
 HEADER_H   = 40   # date-header height (mockup: 40px)
@@ -871,6 +872,8 @@ class GanttCanvas(QWidget):
         self._check_rects   : Dict[int, QRect] = {}
         self._check_hit_rects: Dict[int, QRect] = {}
         self._cap_map     : Dict[Tuple, Tuple] = {}
+        # Per-cell utilization (Room mode): (room_code, date_str) -> (used, cap)
+        self._cell_util   : Dict[Tuple, Tuple] = {}
         # headcount util: (date_str, shift_no) -> (alloc, crp_total)
         self._hc_map      : Dict[Tuple, Tuple] = {}
         # HC utilisation by date: date_str -> pct (0-100)
@@ -1064,6 +1067,12 @@ class GanttCanvas(QWidget):
                 cap = 1.0
             self._cap_map[key] = (used, max(cap, 1))
 
+        # Aggregate to (room, date) for per-cell utilization bars
+        self._cell_util = {}
+        for (ds, room, proc, sno), (used, cap) in self._cap_map.items():
+            cu, cc = self._cell_util.get((room, ds), (0.0, 0.0))
+            self._cell_util[(room, ds)] = (cu + used, cc + cap)
+
     def _build_layout_and_heights(self):
         """Assign vertical slot index to each plan (for stacking) and compute
         per-row heights based on the max number of plans in any slot of that row.
@@ -1098,8 +1107,11 @@ class GanttCanvas(QWidget):
         self._row_y_list  = []
         self._row_heights = []
         y = self._body_top()
+        _room_mode = (self.y_dims == ["Room"])
         for rk in self._rows:
             h = max(1, row_max.get(rk, 1)) * CARD_H
+            if _room_mode:
+                h += CELL_UTIL_H  # reserve bottom strip for per-cell util bar
             self._row_y_list.append(y)
             self._row_heights.append(h)
             y += h
@@ -1240,6 +1252,7 @@ class GanttCanvas(QWidget):
         self._draw_grid(p)
         self._draw_today_line(p)
         self._draw_plans(p)
+        self._draw_cell_util_bars(p)
         if self._stack_drag:
             self._draw_stack_guide(p)
         elif self._drag_rect:
@@ -1729,6 +1742,47 @@ class GanttCanvas(QWidget):
             p.setBrush(Qt.BrushStyle.NoBrush)
             for r in rects:
                 p.drawRoundedRect(r.adjusted(-1, -1, 1, 1), 5, 5)
+
+    def _draw_cell_util_bars(self, p: QPainter):
+        """Draw per-cell capacity utilization bar at the bottom of each row (Room mode, day view only)."""
+        if self.y_dims != ["Room"] or self.shift_view:
+            return
+        from PyQt6.QtGui import QFontMetrics
+        f_util = QFont("Segoe UI", 6, QFont.Weight.Bold)
+        fm = QFontMetrics(f_util)
+        BAR_H = 8
+        p.setFont(f_util)
+        for ri, room in enumerate(self._rows):
+            row_y = self._row_y_list[ri]
+            row_h = self._row_heights[ri]
+            # Bar sits in the CELL_UTIL_H strip at the bottom of the row
+            bar_y = row_y + row_h - CELL_UTIL_H + (CELL_UTIL_H - BAR_H) // 2
+            for col in range(self.horizon_days):
+                ds = (self.start_date + timedelta(days=col)).strftime("%Y-%m-%d")
+                used, cap = self._cell_util.get((room, ds), (0.0, 0.0))
+                if cap <= 0:
+                    continue
+                ratio = used / cap
+                x   = col * DAY_W
+                cw  = DAY_W - 2
+                fill_w = int(cw * min(ratio, 1.0))
+                # Trough
+                p.setBrush(QBrush(QColor(50, 82, 138, 100)))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.drawRoundedRect(QRect(x + 1, bar_y, cw, BAR_H), 2, 2)
+                # Fill
+                color = (UTIL_HIGH if ratio > 0.9 else
+                         UTIL_MED  if ratio > 0.6 else
+                         UTIL_LOW)
+                if fill_w > 0:
+                    p.setBrush(QBrush(color))
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.drawRoundedRect(QRect(x + 1, bar_y, fill_w, BAR_H), 2, 2)
+                # % label right-aligned inside bar
+                pct_txt = f"{int(ratio * 100)}%"
+                txt_w   = fm.horizontalAdvance(pct_txt)
+                p.setPen(QPen(QColor(255, 255, 255, 220)))
+                p.drawText(x + cw - txt_w - 1, bar_y + BAR_H - 1, pct_txt)
 
     def _draw_drag_ghost(self, p: QPainter):
         if self._drag_invalid:
