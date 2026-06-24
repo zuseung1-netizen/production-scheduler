@@ -87,8 +87,21 @@ class Scheduler:
     def _reload_masters(self):
         self._hc_dist_cache = {}   # CRP data may have changed
         self.shifts     = ShiftRepo.all()
-        self.rooms      = RoomRepo.rooms()
-        self.room_procs = {r: RoomRepo.processes_for_room(r) for r in self.rooms}
+
+        # Load all room rows in one query (was N+1: rooms() then processes_for_room() per room)
+        _all_room_rows  = RoomRepo.all()
+        _seen: set      = set()
+        self.rooms      = [r["room_code"] for r in _all_room_rows
+                           if r["room_code"] not in _seen and not _seen.add(r["room_code"])]
+        self.room_procs = {}
+        for r in _all_room_rows:
+            self.room_procs.setdefault(r["room_code"], []).append(dict(r))
+
+        # Pre-build process→rooms lookup used inside the planning loop (avoids per-step DB queries)
+        self._proc_room_map: Dict[str, List[Dict]] = {}
+        for r in _all_room_rows:
+            self._proc_room_map.setdefault(r["process_name"], []).append(dict(r))
+
         self.sku_map    = {s["sku_code"]: s for s in SKURepo.all()}
         self.mat_map    = {m["material_code"]: m for m in MaterialRepo.all()}
         try:
@@ -115,6 +128,12 @@ class Scheduler:
                 if rt:
                     excl[rt] = excl.get(rt, 0) + 1
         self._room_type_exclusivity: Dict[str, int] = excl
+
+    def _rooms_for_process(self, process_name: str,
+                           allowed_types: List[str]) -> List[Dict]:
+        """In-memory lookup replacing per-step RoomRepo.rooms_for_process() DB calls."""
+        rows = self._proc_room_map.get(process_name, [])
+        return [r for r in rows if r["room_type"] in allowed_types] if allowed_types else rows
 
     # ── Public API ───────────────────────────────────────────────────────────
 
@@ -302,7 +321,7 @@ class Scheduler:
             seq = step["process_seq"]
             is_final = bool(step["is_final_seq"])
             allowed = [t.strip() for t in step["allowed_room_types"].split(",") if t.strip()]
-            eligible = RoomRepo.rooms_for_process(step["process_name"], allowed)
+            eligible = self._rooms_for_process(step["process_name"], allowed)
             if not eligible:
                 return []
 
@@ -1350,7 +1369,7 @@ class Scheduler:
             is_final  = bool(step["is_final_seq"])
             allowed   = [t.strip() for t in
                          step["allowed_room_types"].split(",") if t.strip()]
-            eligible  = RoomRepo.rooms_for_process(step["process_name"], allowed)
+            eligible  = self._rooms_for_process(step["process_name"], allowed)
             if not eligible:
                 report["skipped"] += 1
                 return
@@ -1594,7 +1613,7 @@ class Scheduler:
             is_final = bool(step["is_final_seq"])
             allowed  = [t.strip() for t in
                         step["allowed_room_types"].split(",") if t.strip()]
-            eligible = RoomRepo.rooms_for_process(step["process_name"], allowed)
+            eligible = self._rooms_for_process(step["process_name"], allowed)
             if not eligible:
                 return
 

@@ -8,10 +8,10 @@ from PyQt6.QtWidgets import (
     QFrame, QScrollArea, QLineEdit, QComboBox, QDateEdit,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QAbstractScrollArea, QSizePolicy,
-    QMessageBox, QInputDialog,
+    QMessageBox, QInputDialog, QStyledItemDelegate, QStyle,
 )
-from PyQt6.QtCore import Qt, QDate
-from PyQt6.QtGui import QColor, QBrush, QFont
+from PyQt6.QtCore import Qt, QDate, QRectF, QRect
+from PyQt6.QtGui import QColor, QBrush, QFont, QPainter, QFontMetrics, QPen
 
 from data.repositories import PlanRepo, SORepo, ShiftRepo, RoomRepo
 
@@ -52,6 +52,109 @@ _COL_STRETCH = {1, 2, 4}   # these columns stretch
 
 _HDR_H = 26
 _ROW_H = 44
+
+
+class _TwoLineDelegate(QStyledItemDelegate):
+    """Renders a two-line cell (bold top + small grey bottom) via QPainter."""
+    _F_TOP = QFont("Segoe UI", 11, QFont.Weight.Bold)
+    _F_BOT = QFont("Segoe UI", 9)
+
+    def paint(self, painter: QPainter, option, index):
+        data = index.data(Qt.ItemDataRole.UserRole)
+        if not data:
+            super().paint(painter, option, index)
+            return
+        painter.save()
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(option.rect, QColor("#EEF4FF"))
+        r = option.rect.adjusted(8, 4, -4, -4)
+        painter.setFont(self._F_TOP)
+        painter.setPen(QColor(data.get("top_color", "#1E293B")))
+        painter.drawText(r, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
+                         data.get("top", ""))
+        painter.setFont(self._F_BOT)
+        painter.setPen(QColor("#64748B"))
+        painter.drawText(r.adjusted(0, 18, 0, 0),
+                         Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
+                         data.get("bottom", ""))
+        painter.restore()
+
+
+class _DueDelegate(QStyledItemDelegate):
+    """Renders due-date cell with status color and days-to-due line."""
+    _F_DATE = QFont("Segoe UI", 11, QFont.Weight.Bold)
+    _F_DAYS = QFont("Segoe UI", 9)
+    _C = {"LATE": QColor("#DC2626"), "RISK": QColor("#D97706"), "OK": QColor("#16A34A")}
+
+    def paint(self, painter: QPainter, option, index):
+        data = index.data(Qt.ItemDataRole.UserRole)
+        if not data:
+            super().paint(painter, option, index)
+            return
+        painter.save()
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(option.rect, QColor("#EEF4FF"))
+        r   = option.rect.adjusted(8, 4, -4, -4)
+        due = data.get("due", "")
+        dtd = data.get("dtd")
+        st  = data.get("status", "")
+        if due:
+            painter.setFont(self._F_DATE)
+            painter.setPen(self._C.get(st, QColor("#64748B")))
+            painter.drawText(r, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft, due)
+            if dtd is not None:
+                painter.setFont(self._F_DAYS)
+                painter.setPen(QColor("#94a3b8"))
+                sign = "+" if dtd >= 0 else ""
+                painter.drawText(r.adjusted(0, 18, 0, 0),
+                                 Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
+                                 f"{sign}{dtd}d")
+        else:
+            painter.setFont(self._F_DATE)
+            painter.setPen(QColor("#94a3b8"))
+            painter.drawText(r, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft, "—")
+        painter.restore()
+
+
+class _BadgeDelegate(QStyledItemDelegate):
+    """Renders coloured pill badges in a cell row — zero widget objects."""
+    _F    = QFont("Segoe UI", 8, QFont.Weight.Bold)
+    _PH   = 5   # horizontal padding inside pill
+    _PV   = 2   # vertical padding
+    _GAP  = 4   # gap between pills
+
+    def paint(self, painter: QPainter, option, index):
+        badges = index.data(Qt.ItemDataRole.UserRole) or []
+        painter.save()
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(option.rect, QColor("#EEF4FF"))
+        painter.setFont(self._F)
+        fm  = QFontMetrics(self._F)
+        x   = option.rect.x() + 6
+        cy  = option.rect.center().y()
+        bh  = fm.height() + 2 * self._PV
+        for b in badges:
+            text = b["text"]
+            tw   = fm.horizontalAdvance(text)
+            bw   = tw + 2 * self._PH
+            rx   = QRectF(x, cy - bh / 2, bw, bh)
+            bg   = QColor(b["bg"])
+            fg   = QColor(b.get("fg", "white"))
+            if b.get("outlined"):
+                painter.setPen(QPen(bg, 1))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRoundedRect(rx, 3, 3)
+                painter.setPen(bg)
+            else:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QBrush(bg))
+                painter.drawRoundedRect(rx, 3, 3)
+                painter.setPen(fg)
+            painter.drawText(
+                QRect(int(x + self._PH), int(cy - bh / 2), tw, bh),
+                Qt.AlignmentFlag.AlignCenter, text)
+            x += bw + self._GAP
+        painter.restore()
 
 
 class PlanListTab(QWidget):
@@ -478,38 +581,50 @@ class PlanListTab(QWidget):
 
         tbl.verticalHeader().setDefaultSectionSize(_ROW_H)
 
+        # Delegate-based rendering: zero widget objects for data columns
+        _tl = _TwoLineDelegate(tbl)
+        _du = _DueDelegate(tbl)
+        _bd = _BadgeDelegate(tbl)
+        for col in (1, 2, 4):
+            tbl.setItemDelegateForColumn(col, _tl)
+        tbl.setItemDelegateForColumn(5, _du)
+        tbl.setItemDelegateForColumn(6, _bd)
+
         for ri, r in enumerate(rows):
             self._fill_row(tbl, ri, r)
 
         return tbl
 
     def _fill_row(self, tbl: QTableWidget, ri: int, r: dict):
-        p       = r["plan"]
-        is_io   = r["is_io"]
-        is_mat  = r["is_mat"]
-        is_lk   = r["is_lk"]
-        status  = r["status"]
-        color   = _sku_color(p["entity_code"], is_io=is_io)
-        today   = date.today()
+        p      = r["plan"]
+        is_io  = r["is_io"]
+        is_mat = r["is_mat"]
+        is_lk  = r["is_lk"]
+        color  = _sku_color(p["entity_code"], is_io=is_io)
 
-        # Col 0: color stripe
+        # Col 0: color stripe (plain item with background)
         stripe = QTableWidgetItem()
         stripe.setBackground(QBrush(color))
         stripe.setFlags(Qt.ItemFlag.NoItemFlags)
         tbl.setItem(ri, 0, stripe)
 
-        # Col 1: Room / Process
-        tbl.setCellWidget(ri, 1, self._two_line_widget(
-            p["room_code"], p["process_name"],
-            top_color="#94a3b8" if is_lk else "#1E293B"))
+        # Col 1: Room / Process  (rendered by _TwoLineDelegate)
+        top_c = "#94a3b8" if is_lk else "#1E293B"
+        it1 = QTableWidgetItem()
+        it1.setData(Qt.ItemDataRole.UserRole,
+                    {"top": p["room_code"], "bottom": p["process_name"],
+                     "top_color": top_c})
+        tbl.setItem(ri, 1, it1)
 
-        # Col 2: SKU / Entity
-        type_str = ("반제품" if is_mat else ("내부오더" if is_io else "완제품"))
-        tbl.setCellWidget(ri, 2, self._two_line_widget(
-            p["entity_code"], type_str,
-            top_color="#94a3b8" if is_lk else "#1E293B"))
+        # Col 2: SKU / Entity  (rendered by _TwoLineDelegate)
+        type_str = "Material" if is_mat else ("Int. Order" if is_io else "SKU")
+        it2 = QTableWidgetItem()
+        it2.setData(Qt.ItemDataRole.UserRole,
+                    {"top": p["entity_code"], "bottom": type_str,
+                     "top_color": top_c})
+        tbl.setItem(ri, 2, it2)
 
-        # Col 3: Qty
+        # Col 3: Qty  (plain item — fast path, no widget needed)
         qty_item = QTableWidgetItem(f"{p['qty_planned']:,}")
         qty_item.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
         qty_item.setTextAlignment(
@@ -518,95 +633,38 @@ class PlanListTab(QWidget):
             qty_item.setForeground(QBrush(QColor("#94a3b8")))
         tbl.setItem(ri, 3, qty_item)
 
-        # Col 4: SO / Customer
+        # Col 4: SO / Customer  (rendered by _TwoLineDelegate)
         so_str = (p["so_number"] or "—")
         if p.get("line_item"):
             so_str += f"  /  {p['line_item']}"
         cust_str = r["customer"] or ("Material demand" if is_mat else "")
-        tbl.setCellWidget(ri, 4, self._two_line_widget(
-            so_str, cust_str,
-            top_color="#94a3b8" if (is_mat and not p["so_number"]) else "#334155"))
+        so_top_c = "#94a3b8" if (is_mat and not p["so_number"]) else "#334155"
+        it4 = QTableWidgetItem()
+        it4.setData(Qt.ItemDataRole.UserRole,
+                    {"top": so_str, "bottom": cust_str, "top_color": so_top_c})
+        tbl.setItem(ri, 4, it4)
 
-        # Col 5: Due date
-        tbl.setCellWidget(ri, 5, self._due_widget(r))
+        # Col 5: Due date  (rendered by _DueDelegate)
+        it5 = QTableWidgetItem()
+        due_display = r["due_date"].strftime("%b %d") if r["due_date"] else ""
+        it5.setData(Qt.ItemDataRole.UserRole,
+                    {"due": due_display, "dtd": r["days_to"], "status": r["status"]})
+        tbl.setItem(ri, 5, it5)
 
-        # Col 6: Badges
-        tbl.setCellWidget(ri, 6, self._badge_widget(p, is_io, is_mat, is_lk))
+        # Col 6: Status badges  (rendered by _BadgeDelegate)
+        badges = []
+        if is_lk:                       badges.append({"text": "LOCK",  "bg": "#64748B"})
+        if is_io:                       badges.append({"text": "[IO]",  "bg": "#4f46e5"})
+        if is_mat:                      badges.append({"text": "MAT",   "bg": "#0891b2"})
+        if p.get("is_closing_shift"):   badges.append({"text": "CLOSE", "bg": "#D97706"})
+        if p.get("is_consolidated"):    badges.append({"text": "GROUP", "bg": "#D97706",
+                                                        "outlined": True})
+        it6 = QTableWidgetItem()
+        it6.setData(Qt.ItemDataRole.UserRole, badges)
+        tbl.setItem(ri, 6, it6)
 
-        # Col 7: Actions
+        # Col 7: Actions — keep as setCellWidget (needs real button click handlers)
         tbl.setCellWidget(ri, 7, self._action_widget(p["plan_id"], is_lk))
-
-    # ── Cell helper widgets ──────────────────────────────────────────────────
-
-    def _two_line_widget(self, top: str, bottom: str,
-                         top_color: str = "#1E293B") -> QWidget:
-        w   = QWidget()
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(8, 4, 4, 4)
-        lay.setSpacing(1)
-        lbl_top = QLabel(top)
-        lbl_top.setStyleSheet(
-            f"font-size:12px;font-weight:700;color:{top_color};")
-        lbl_bot = QLabel(bottom)
-        lbl_bot.setStyleSheet("font-size:10px;color:#64748B;")
-        lay.addWidget(lbl_top)
-        lay.addWidget(lbl_bot)
-        return w
-
-    def _due_widget(self, r: dict) -> QWidget:
-        w   = QWidget()
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(8, 4, 4, 4)
-        lay.setSpacing(1)
-        if r["due_date"]:
-            color_map = {"LATE": "#DC2626", "RISK": "#D97706", "OK": "#16A34A"}
-            c  = color_map.get(r["status"], "#64748B")
-            dtd = r["days_to"]
-            lbl_d = QLabel(r["due_date"].strftime("%b %d"))
-            lbl_d.setStyleSheet(f"font-size:12px;font-weight:700;color:{c};")
-            sign = "+" if dtd is not None and dtd >= 0 else ""
-            lbl_t = QLabel(f"{sign}{dtd}d" if dtd is not None else "")
-            lbl_t.setStyleSheet("font-size:10px;color:#94a3b8;")
-            lay.addWidget(lbl_d)
-            lay.addWidget(lbl_t)
-        else:
-            lbl = QLabel("—")
-            lbl.setStyleSheet("font-size:12px;color:#94a3b8;")
-            lay.addWidget(lbl)
-        return w
-
-    def _badge_widget(self, p: dict, is_io: bool,
-                      is_mat: bool, is_lk: bool) -> QWidget:
-        w   = QWidget()
-        lay = QHBoxLayout(w)
-        lay.setContentsMargins(6, 0, 4, 0)
-        lay.setSpacing(4)
-        lay.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-
-        def _b(text, bg, fg="white", outlined=False):
-            lbl = QLabel(text)
-            if outlined:
-                lbl.setStyleSheet(
-                    f"color:{bg};border:1px solid {bg};font-size:9px;"
-                    f"font-weight:800;border-radius:3px;padding:2px 5px;")
-            else:
-                lbl.setStyleSheet(
-                    f"background:{bg};color:{fg};font-size:9px;"
-                    f"font-weight:800;border-radius:3px;padding:2px 5px;")
-            return lbl
-
-        if is_lk:
-            lay.addWidget(_b("LOCK",  "#64748B"))
-        if is_io:
-            lay.addWidget(_b("[IO]",  "#4f46e5"))
-        if is_mat:
-            lay.addWidget(_b("MAT",   "#0891b2"))
-        if p.get("is_closing_shift"):
-            lay.addWidget(_b("CLOSE", "#D97706"))
-        if p.get("is_consolidated"):
-            lay.addWidget(_b("GROUP", "#D97706", outlined=True))
-        lay.addStretch()
-        return w
 
     def _action_widget(self, plan_id: int, is_lk: bool) -> QWidget:
         w   = QWidget()

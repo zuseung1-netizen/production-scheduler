@@ -11,12 +11,22 @@ _HERE   = os.path.dirname(os.path.abspath(__file__))  # .../data/
 _ROOT   = os.path.dirname(_HERE)                       # project root
 DB_PATH = os.path.join(_ROOT, "planner.db")
 
+# Module-level persistent connection — opened once, reused for every query.
+# check_same_thread=False is safe here: the GUI runs on the main thread and
+# all repo calls happen on the same thread (or protected by the GIL in QThread).
+_conn: sqlite3.Connection | None = None
+
 
 def get_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    global _conn
+    if _conn is None:
+        _conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        _conn.row_factory = sqlite3.Row
+        _conn.execute("PRAGMA journal_mode = WAL")    # persistent; readers never block writers
+        _conn.execute("PRAGMA synchronous = NORMAL")  # fsync only at WAL checkpoint, not every commit
+        _conn.execute("PRAGMA cache_size = -32000")   # 32 MB page cache
+        _conn.execute("PRAGMA foreign_keys = ON")
+    return _conn
 
 
 def init_db():
@@ -423,8 +433,16 @@ def init_db():
         created_at      TEXT NOT NULL
     )""")
 
+    # ── Performance indices ───────────────────────────────────────────────────
+    c.execute("CREATE INDEX IF NOT EXISTS idx_plan_date "
+              "ON production_plan(plan_date)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_plan_room "
+              "ON production_plan(room_code)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_so_status "
+              "ON sales_order(status)")
+
     conn.commit()
-    conn.close()
+    # No conn.close() — persistent singleton stays open for the process lifetime.
 
 
 if __name__ == "__main__":
