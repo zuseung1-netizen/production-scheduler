@@ -2498,42 +2498,6 @@ class GanttTab(QWidget):
         btn_win.clicked.connect(self._on_new_window)
         lay.addWidget(btn_win)
 
-        # Summarize toggle
-        self._btn_sum = QPushButton("⊞  Summary")
-        self._btn_sum.setCheckable(True)
-        self._btn_sum.setFixedHeight(32)
-        self._btn_sum.setToolTip(
-            "Collapse cards: same SKU + Room + Process + Date into one summarized card.\n"
-            "Qty is summed. Drag moves all constituent plans together.")
-        _sum_css_off = (
-            "QPushButton { background:#fff; color:#3a4255; border:1px solid #d4d7e0;"
-            " border-radius:5px; padding:0 10px; font-size:11px; font-weight:600; }"
-            "QPushButton:hover { background:#f5f6fa; }"
-        )
-        _sum_css_on = (
-            "QPushButton { background:#1d4ed8; color:#fff; border:none;"
-            " border-radius:5px; padding:0 10px; font-size:11px; font-weight:600; }"
-            "QPushButton:hover { background:#1e40af; }"
-        )
-        self._btn_sum.setStyleSheet(_sum_css_off)
-        def _on_sum_toggle(checked):
-            self._btn_sum.setStyleSheet(_sum_css_on if checked else _sum_css_off)
-            self._canvas.toggle_summarize(checked)
-        self._btn_sum.toggled.connect(_on_sum_toggle)
-        lay.addWidget(self._btn_sum)
-
-        # Weekly reorganize button
-        btn_reorg = QPushButton("🔀 Reorganize")
-        btn_reorg.setToolTip(
-            "Within each ISO week, group same-SKU plans consecutively per room+process.\n"
-            "Reduces changeovers without moving plans across week boundaries.")
-        btn_reorg.setStyleSheet(
-            "QPushButton { background:#fff; color:#1d4ed8; border:1px solid #93c5fd;"
-            " border-radius:5px; padding:5px 10px; font-size:11px; font-weight:600; }"
-            "QPushButton:hover { background:#eff6ff; }")
-        btn_reorg.clicked.connect(self._on_weekly_reorganize)
-        lay.addWidget(btn_reorg)
-
         # Bottom border drawn via a separator widget
         outer = QWidget()
         vl = QVBoxLayout(outer)
@@ -2714,6 +2678,45 @@ class GanttTab(QWidget):
             r1.addWidget(cb)
 
         r1.addStretch()
+
+        # Summary toggle
+        r1.addWidget(self._vb_sep())
+        self._btn_sum = QPushButton("⊞  Summary")
+        self._btn_sum.setCheckable(True)
+        self._btn_sum.setFixedHeight(26)
+        self._btn_sum.setToolTip(
+            "Collapse cards: same SKU + Room + Process + Date into one summarized card.\n"
+            "Qty is summed. Drag moves all constituent plans together.")
+        _sum_css_off = (
+            "QPushButton { background:#fff; color:#3a4255; border:1px solid #d4d7e0;"
+            " border-radius:4px; padding:3px 9px; font-size:10px; font-weight:600; }"
+            "QPushButton:hover { background:#f5f6fa; }"
+        )
+        _sum_css_on = (
+            "QPushButton { background:#1d4ed8; color:#fff; border:none;"
+            " border-radius:4px; padding:3px 9px; font-size:10px; font-weight:600; }"
+            "QPushButton:hover { background:#1e40af; }"
+        )
+        self._btn_sum.setStyleSheet(_sum_css_off)
+        def _on_sum_toggle(checked):
+            self._btn_sum.setStyleSheet(_sum_css_on if checked else _sum_css_off)
+            self.canvas.toggle_summarize(checked)
+        self._btn_sum.toggled.connect(_on_sum_toggle)
+        r1.addWidget(self._btn_sum)
+
+        # Weekly reorganize button
+        btn_reorg = QPushButton("🔀 Reorganize")
+        btn_reorg.setFixedHeight(26)
+        btn_reorg.setToolTip(
+            "Within each ISO week, group same-SKU plans consecutively per room+process.\n"
+            "Reduces changeovers without moving plans across week boundaries.")
+        btn_reorg.setStyleSheet(
+            "QPushButton { background:#fff; color:#1d4ed8; border:1px solid #93c5fd;"
+            " border-radius:4px; padding:3px 9px; font-size:10px; font-weight:600; }"
+            "QPushButton:hover { background:#eff6ff; }")
+        btn_reorg.clicked.connect(self._on_weekly_reorganize)
+        r1.addWidget(btn_reorg)
+
         vl.addWidget(row1)
 
         # row separator
