@@ -479,12 +479,33 @@ class GanttHeaderWidget(QWidget):
                 hc_ratio = hc_pct / 100.0
                 hc_bar_y = HEADER_H + UTIL_ROW_H + (UTIL_ROW_H - bar_h) // 2
                 hc_fill_w = int(cw_ * min(hc_ratio, 1.0))
+                # Track: always draw a faint trough so 0% is still visible
+                p.setBrush(QBrush(QColor(50, 82, 138)))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.drawRoundedRect(QRect(x + 2, hc_bar_y, cw_, bar_h), 2, 2)
+                # Filled portion
                 hc_color = (UTIL_HIGH if hc_ratio > 0.9 else
                             UTIL_MED  if hc_ratio > 0.6 else
                             (UTIL_LOW if hc_ratio > 0 else QColor(214, 218, 227)))
-                p.setBrush(QBrush(hc_color))
-                p.setPen(Qt.PenStyle.NoPen)
-                p.drawRoundedRect(QRect(x + 2, hc_bar_y, max(hc_fill_w, 0), bar_h), 2, 2)
+                if hc_fill_w > 0:
+                    p.setBrush(QBrush(hc_color))
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.drawRoundedRect(QRect(x + 2, hc_bar_y, hc_fill_w, bar_h), 2, 2)
+                # Percentage badge when util is high (mirrors Cap bar badge)
+                if hc_ratio > 0.9:
+                    hc_tag_txt = f"{int(hc_pct)}%"
+                    p.setFont(f_cap)
+                    from PyQt6.QtGui import QFontMetrics as _FM
+                    hc_tag_w = _FM(f_cap).horizontalAdvance(hc_tag_txt) + 6
+                    hc_tag_h = 10
+                    hc_tag_x = x + DAY_W - hc_tag_w - 2
+                    hc_tag_y = HEADER_H + UTIL_ROW_H + (UTIL_ROW_H - hc_tag_h) // 2
+                    p.setBrush(QBrush(QColor(194, 52, 47)))
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.drawRoundedRect(QRect(hc_tag_x, hc_tag_y, hc_tag_w, hc_tag_h), 2, 2)
+                    p.setPen(QPen(Qt.GlobalColor.white))
+                    p.drawText(QRect(hc_tag_x, hc_tag_y, hc_tag_w, hc_tag_h),
+                               Qt.AlignmentFlag.AlignCenter, hc_tag_txt)
 
                 # Row separator between CAPACITY and LABOR rows
                 p.setPen(QPen(QColor(255, 255, 255, 35)))

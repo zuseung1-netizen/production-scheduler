@@ -2089,7 +2089,7 @@ class Scheduler:
             ds = _ds(cur)
             r = sum(req.get(ds, {}).values())
             a = sum(avl.get(ds, {}).values())
-            result[ds] = min((r / a * 100) if a > 0 else 0.0, 100.0)
+            result[ds] = (r / a * 100) if a > 0 else 0.0  # uncapped: can exceed 100
             cur += timedelta(days=1)
         return result
 
