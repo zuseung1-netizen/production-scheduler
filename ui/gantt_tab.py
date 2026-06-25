@@ -986,7 +986,10 @@ class GanttCanvas(QWidget):
         from collections import defaultdict
         groups: Dict[Tuple, List[Dict]] = defaultdict(list)
         for p in self._plans:
-            key = (p["plan_date"], p["shift_no"], p["room_code"],
+            # In shift view each shift has its own column → keep shift_no in key.
+            # In day view a single column spans all shifts → merge across shifts.
+            shift_key = p["shift_no"] if self.shift_view else None
+            key = (p["plan_date"], shift_key, p["room_code"],
                    p["process_name"], p["entity_code"], p["entity_type"])
             groups[key].append(p)
 
@@ -1256,16 +1259,22 @@ class GanttCanvas(QWidget):
 
     def paintEvent(self, event):
         p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self._draw_grid(p)
-        self._draw_today_line(p)
-        self._draw_plans(p)
-        self._draw_cell_util_bars(p)
-        if self._stack_drag:
-            self._draw_stack_guide(p)
-        elif self._drag_rect:
-            self._draw_drag_ghost(p)
-        p.end()
+        try:
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            self._draw_grid(p)
+            self._draw_today_line(p)
+            self._draw_plans(p)
+            self._draw_cell_util_bars(p)
+            if self._stack_drag:
+                self._draw_stack_guide(p)
+            elif self._drag_rect:
+                self._draw_drag_ghost(p)
+        except Exception:
+            import traceback
+            with open("drag_crash.txt", "w", encoding="utf-8") as f:
+                f.write("paintEvent:\n" + traceback.format_exc())
+        finally:
+            p.end()
 
     def _draw_grid(self, p: QPainter):
         w, h = self._total_w(), self._total_h()
@@ -1834,7 +1843,16 @@ class GanttCanvas(QWidget):
     # ── Mouse events ──────────────────────────────────────────────────────────
 
     def mousePressEvent(self, event):
-        pos = event.pos().toPoint()   # PyQt6 returns QPointF; QRect needs QPoint
+        try:
+            self._mousePressEvent_impl(event)
+        except Exception as e:
+            import traceback
+            with open("drag_crash.txt", "w", encoding="utf-8") as f:
+                f.write("mousePressEvent:\n" + traceback.format_exc())
+            raise
+
+    def _mousePressEvent_impl(self, event):
+        pos = event.pos()
         if event.button() == Qt.MouseButton.LeftButton:
             for pid, hit_rect in self._check_hit_rects.items():
                 if hit_rect.contains(pos):
@@ -1871,7 +1889,16 @@ class GanttCanvas(QWidget):
                 self.planSelected.emit(plan)
 
     def mouseMoveEvent(self, event):
-        pos = event.pos().toPoint()   # PyQt6 returns QPointF; QRect needs QPoint
+        try:
+            self._mouseMoveEvent_impl(event)
+        except Exception as e:
+            import traceback
+            with open("drag_crash.txt", "w", encoding="utf-8") as f:
+                f.write("mouseMoveEvent:\n" + traceback.format_exc())
+            raise
+
+    def _mouseMoveEvent_impl(self, event):
+        pos = event.pos()
         if self._drag_plan_id and self._drag_origin:
             if (pos - self._drag_origin).manhattanLength() > 6:
                 plan = next((p for p in self._plans
@@ -1993,7 +2020,16 @@ class GanttCanvas(QWidget):
         self._stack_orig_row  = -1
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self._drag_plan_id:
+        try:
+            self._mouseReleaseEvent_impl(event)
+        except Exception as e:
+            import traceback
+            with open("drag_crash.txt", "w", encoding="utf-8") as f:
+                f.write("mouseReleaseEvent:\n" + traceback.format_exc())
+            raise
+
+    def _mouseReleaseEvent_impl(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._drag_plan_id:  # noqa
             # ── STACK REORDER DROP ───────────────────────────────────────────
             if self._stack_drag:
                 drag_plan = next(
@@ -2879,6 +2915,8 @@ class GanttTab(QWidget):
         def _on_sum_toggle(checked):
             self._btn_sum.setStyleSheet(_sum_css_on if checked else _sum_css_off)
             self.canvas.toggle_summarize(checked)
+            self.gantt_header.sync_from(self.canvas)
+            self.gantt_y_label.sync_from(self.canvas)
         self._btn_sum.toggled.connect(_on_sum_toggle)
         r1.addWidget(self._btn_sum)
 

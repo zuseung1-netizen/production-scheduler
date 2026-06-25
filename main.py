@@ -72,7 +72,17 @@ from ui.main_window import MainWindow
 from ui.app_style import APP_QSS
 
 
+def _install_crash_logger():
+    import traceback as _tb
+    def _hook(exc_type, exc_val, exc_tb):
+        with open("drag_crash.txt", "w", encoding="utf-8") as f:
+            f.write("UNHANDLED EXCEPTION:\n")
+            _tb.print_exception(exc_type, exc_val, exc_tb, file=f)
+        _tb.print_exception(exc_type, exc_val, exc_tb)
+    sys.excepthook = _hook
+
 def main():
+    _install_crash_logger()
     lock_sock = _acquire_instance_lock()
 
     if lock_sock is None:
