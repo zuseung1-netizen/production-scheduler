@@ -842,11 +842,8 @@ class Scheduler:
             if all(skus_now[i] == skus_now[i - 1] for i in range(1, len(skus_now))):
                 continue
 
-            # Chronological slot pool from unlocked plans
-            slot_pool = sorted(
-                [(p["plan_date"], p["shift_no"]) for p in unlocked],
-                key=lambda ds: _sidx(*ds)
-            )
+            # Changeover budget for this room+process
+            co_shifts = self._changeover_shifts.get((room, proc), 0)
 
             # Earliest allowable start per plan (predecessor gap)
             def _earliest(p: Dict) -> int:
@@ -860,45 +857,82 @@ class Scheduler:
                     return 0
                 return _sidx(*pre_slot) + 1 + int(step.get("min_gap_shifts") or 0)
 
-            # Sort desired order: (sku, earliest_start, deadline, original_slot)
-            desired = sorted(unlocked, key=lambda p: (
+            # Deadline slot index: latest slot whose date <= deadline
+            def _dl_sidx(p: Dict) -> int:
+                dl = _deadline(p)
+                best = _sidx(p["plan_date"], p["shift_no"])  # fallback: orig
+                for d, s in all_date_shifts:
+                    if d <= dl:
+                        best = _sidx(d, s)
+                return best
+
+            # Phase 1: freeze tight plans (slack < 1 + co_shifts) at original slot
+            # tight = plan can't afford to be pushed back even one changeover window
+            tight_ids: set = set()
+            for p in unlocked:
+                orig_idx = _sidx(p["plan_date"], p["shift_no"])
+                slack = _dl_sidx(p) - orig_idx
+                if slack < 1 + co_shifts:
+                    tight_ids.add(p["plan_id"])
+
+            tight_plans = [p for p in unlocked if p["plan_id"] in tight_ids]
+            loose_plans = [p for p in unlocked if p["plan_id"] not in tight_ids]
+
+            # Update plan_slot_map for frozen plans first (gap checks for loose plans need them)
+            for p in tight_plans:
+                step = routing_by_proc.get((p["entity_code"], p["process_name"]))
+                if step:
+                    plan_slot_map[(p["so_number"], p["line_item"],
+                                   p["entity_code"], step["process_seq"])] = \
+                        (p["plan_date"], p["shift_no"])
+            frozen += len(tight_ids)
+
+            if not loose_plans:
+                skipped += 1
+                continue
+
+            # Phase 2: greedy consolidation for loose plans
+            # Pool = slots that belong to loose plans (tight plans keep their slots)
+            remaining_pool = sorted(
+                [(p["plan_date"], p["shift_no"]) for p in loose_plans],
+                key=lambda ds: _sidx(*ds)
+            )
+
+            # Sort loose plans for SKU consolidation: (sku, earliest_start, deadline, orig)
+            desired_loose = sorted(loose_plans, key=lambda p: (
                 p["sku_code"],
                 _earliest(p),
                 _deadline(p),
                 _sidx(p["plan_date"], p["shift_no"]),
             ))
 
-            # Greedy assignment: directional (no backward) + gap_ok
-            remaining_pool = list(slot_pool)
-            assignments: List[Tuple[Dict, str, int]] = []
-
-            for plan in desired:
+            loose_assignments: List[Tuple[Dict, str, int]] = []
+            for plan in desired_loose:
                 orig_idx = _sidx(plan["plan_date"], plan["shift_no"])
+                dl = _deadline(plan)
                 placed = False
                 for i, (nd, ns) in enumerate(remaining_pool):
                     if _sidx(nd, ns) < orig_idx:   # directional constraint
                         continue
+                    if nd > dl:                     # would miss deadline
+                        continue
                     if _gap_ok(plan, nd, ns):
-                        assignments.append((plan, nd, ns))
+                        loose_assignments.append((plan, nd, ns))
                         remaining_pool.pop(i)
                         placed = True
                         break
                 if not placed:
+                    # Fallback: anchor at original slot
                     orig = (plan["plan_date"], plan["shift_no"])
-                    assignments.append((plan, orig[0], orig[1]))
+                    loose_assignments.append((plan, orig[0], orig[1]))
                     try:
                         remaining_pool.remove(orig)
                     except ValueError:
                         pass
                     frozen += 1
 
-            # Skip group if any assignment exceeds deadline
-            if any(new_date > _deadline(plan) for plan, new_date, _ in assignments):
-                skipped += 1
-                continue
-
-            # Apply and update plan_slot_map
-            for plan, new_date, new_shift in assignments:
+            # Apply loose assignments and update plan_slot_map
+            for plan, new_date, new_shift in loose_assignments:
                 step = routing_by_proc.get((plan["entity_code"], plan["process_name"]))
                 if step:
                     plan_slot_map[(plan["so_number"], plan["line_item"],

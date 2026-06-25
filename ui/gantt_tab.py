@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QLineEdit, QButtonGroup, QSizePolicy, QSplitter, QGroupBox,
     QListWidget, QListWidgetItem, QStyle
 )
-from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, pyqtSignal, QTimer, QThread, QByteArray, QSize
+from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, QPointF, pyqtSignal, QTimer, QThread, QByteArray, QSize
 from PyQt6.QtGui import (
     QPainter, QPainterPath, QColor, QFont, QFontMetrics, QPen, QBrush, QCursor,
     QPixmap, QIcon, QShortcut, QKeySequence
