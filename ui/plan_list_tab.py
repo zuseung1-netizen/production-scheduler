@@ -422,17 +422,27 @@ class PlanListTab(QWidget):
         for r in filtered:
             by_date[r["plan"]["plan_date"]][r["plan"]["shift_no"]].append(r)
 
-        # Rebuild list — disable updates to suppress per-insertWidget layout recalc
-        self._list_widget.setUpdatesEnabled(False)
+        # Rebuild list.
+        # Step 1: hide + schedule deletion of old groups.  hide() prevents cell
+        # widgets from briefly appearing as floating windows during async deletion.
         while self._list_layout.count() > 1:
             item = self._list_layout.takeAt(0)
             if item.widget():
-                item.widget().deleteLater()
+                w = item.widget()
+                w.hide()
+                w.deleteLater()
 
+        # Step 2: insert new groups while the scroll widget has updates disabled
+        # so we get one coherent repaint at the end.
+        self._scroll.setUpdatesEnabled(False)
         for ds in sorted(by_date.keys()):
             grp = self._make_date_group(ds, by_date[ds], shifts)
             self._list_layout.insertWidget(self._list_layout.count() - 1, grp)
-        self._list_widget.setUpdatesEnabled(True)
+        # Calling setUpdatesEnabled(False) again propagates the suppression to
+        # newly added children (they don't inherit the parent state automatically),
+        # then True triggers a single coherent repaint.
+        self._scroll.setUpdatesEnabled(False)
+        self._scroll.setUpdatesEnabled(True)
 
     # ── Date group ───────────────────────────────────────────────────────────
 

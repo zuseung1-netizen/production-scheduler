@@ -1834,7 +1834,7 @@ class GanttCanvas(QWidget):
     # ── Mouse events ──────────────────────────────────────────────────────────
 
     def mousePressEvent(self, event):
-        pos = event.pos()
+        pos = event.pos().toPoint()   # PyQt6 returns QPointF; QRect needs QPoint
         if event.button() == Qt.MouseButton.LeftButton:
             for pid, hit_rect in self._check_hit_rects.items():
                 if hit_rect.contains(pos):
@@ -1871,7 +1871,7 @@ class GanttCanvas(QWidget):
                 self.planSelected.emit(plan)
 
     def mouseMoveEvent(self, event):
-        pos = event.pos()
+        pos = event.pos().toPoint()   # PyQt6 returns QPointF; QRect needs QPoint
         if self._drag_plan_id and self._drag_origin:
             if (pos - self._drag_origin).manhattanLength() > 6:
                 plan = next((p for p in self._plans
