@@ -76,21 +76,7 @@ def main():
     lock_sock = _acquire_instance_lock()
 
     if lock_sock is None:
-        # Another instance is running — ask whether to close it
-        app = QApplication(sys.argv)
-        app.setStyle("Fusion")
-
-        ret = QMessageBox.warning(
-            None,
-            "이미 실행 중",
-            "Production Planner가 이미 실행 중입니다.\n\n"
-            "기존 창을 닫고 새 창을 열겠습니까?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if ret != QMessageBox.StandardButton.Yes:
-            sys.exit(0)
-
+        # Another instance is running — kill it automatically and take over
         pid = _read_existing_pid()
         if pid:
             _kill_pid(pid)
@@ -104,10 +90,13 @@ def main():
                 break
 
         if lock_sock is None:
+            # Last resort: show error only if auto-kill failed
+            app = QApplication(sys.argv)
+            app.setStyle("Fusion")
             QMessageBox.critical(
                 None,
-                "오류",
-                "기존 창을 종료하지 못했습니다.\n직접 닫은 후 다시 시작해 주세요.",
+                "Error",
+                "Failed to terminate existing instance.\nPlease close it manually and restart.",
             )
             sys.exit(1)
 

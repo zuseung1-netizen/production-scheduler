@@ -137,7 +137,11 @@ class SOTab(QWidget):
                 "Prod. Completion", "Release Date", "Received At", "Note", "Start No Earlier"]
         self.table.setColumnCount(len(cols))
         self.table.setHorizontalHeaderLabels(cols)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        hdr.setStretchLastSection(False)
+        for i, w in enumerate([120, 90, 50, 120, 60, 80, 80, 100, 100, 110, 55, 70, 130, 110, 100, 150, 110]):
+            hdr.resizeSection(i, w)
         splitter.addWidget(self.table)
 
         # History table
@@ -148,7 +152,7 @@ class SOTab(QWidget):
         self.hist_table.setHorizontalHeaderLabels(
             ["Batch", "SO", "SKU", "Line", "Change", "Old", "New"])
         self.hist_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.ResizeToContents)
+            QHeaderView.ResizeMode.Interactive)
         self.hist_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         hist_layout.addWidget(self.hist_table)
         splitter.addWidget(hist_grp)
@@ -172,6 +176,9 @@ class SOTab(QWidget):
 
         self.table.setSortingEnabled(False)
         self.table.setUpdatesEnabled(False)   # suspend repaints during bulk fill
+        # Switch header to Fixed so setItem() doesn't trigger per-cell column-width
+        # recalculation (ResizeToContents mode = O(N²) for N rows)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         self.table.setRowCount(len(sos))
         today = date.today()
 
@@ -251,11 +258,16 @@ class SOTab(QWidget):
                 self.table.item(ri, 7).setBackground(QBrush(inv_bg))
 
         self.table.setUpdatesEnabled(True)    # resume repaints — single repaint here
+        # Re-enable sorting without triggering an automatic re-sort of all rows.
+        hdr = self.table.horizontalHeader()
+        hdr.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
         self.table.setSortingEnabled(True)
         self._loading = False
 
     def _load_history(self):
         rows = SORepo.history()
+        hdr = self.hist_table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         self.hist_table.setUpdatesEnabled(False)
         self.hist_table.setRowCount(len(rows))
         for ri, r in enumerate(rows):
@@ -265,6 +277,8 @@ class SOTab(QWidget):
             ]):
                 self.hist_table.setItem(ri, ci, QTableWidgetItem(str(val or "")))
         self.hist_table.setUpdatesEnabled(True)
+        self.hist_table.resizeColumnsToContents()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
 
     def _context_menu(self, pos):
         row = self.table.rowAt(pos.y())

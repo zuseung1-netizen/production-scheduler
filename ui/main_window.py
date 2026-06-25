@@ -596,6 +596,17 @@ class MainWindow(QMainWindow):
 
         self._stack.currentChanged.connect(self._on_tab_changed)
 
+        # Loading overlay — parented to _stack so it covers the content area
+        self._loading_overlay = QLabel("⏳  Loading...", self._stack)
+        self._loading_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loading_overlay.setStyleSheet(
+            "background: rgba(236,238,243,230);"
+            "color: #2563EB;"
+            "font-size: 28px;"
+            "font-weight: bold;"
+        )
+        self._loading_overlay.hide()
+
     def _build_toolbar(self):
         tb = QToolBar("Main Toolbar")
         tb.setMovable(False)
@@ -687,6 +698,11 @@ class MainWindow(QMainWindow):
 
     def _on_tab_changed(self, idx: int):
         self._sidebar.set_current(idx)
+        # Show overlay covering the content area
+        ov = self._loading_overlay
+        ov.setGeometry(0, 0, self._stack.width(), self._stack.height())
+        ov.show()
+        ov.raise_()
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         self.status.showMessage("Loading…")
         QApplication.processEvents()
@@ -696,6 +712,7 @@ class MainWindow(QMainWindow):
                 tab.refresh()
         finally:
             QApplication.restoreOverrideCursor()
+            ov.hide()
             self.status.clearMessage()
 
     def _setup_crp_watcher(self):

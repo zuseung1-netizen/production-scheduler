@@ -26,11 +26,15 @@
 
 앱 실행 후 GUI 동작을 직접 확인하거나 자동화할 때:
 
-1. **모니터 배치**: 터미널(쉘)은 보조 모니터, 앱은 주 모니터. 앱 실행 후 `SetWindowPos`로 주 모니터 좌표(x≈50, y≈50)로 이동
+1. **모니터 배치**: **앱은 터미널(쉘)과 다른 모니터에서 전체화면으로 실행.** 앱 실행 후 `SetWindowPos`로 보조 모니터 좌표로 이동 후 `ShowWindow(hwnd, SW_MAXIMIZE)`로 전체화면
+   - 모니터 목록 확인: `EnumDisplayMonitors`로 `rcMonitor` 조회
+   - 현재 환경: 주 모니터 `[0, 0, 1920, 1080]`, 보조 모니터 `[1920, -1114, 4320, 236]`
+   - 앱을 보조 모니터로 이동: `SetWindowPos(hwnd, 0, 2000, -1000, 100, 100, 0x0040)` 후 `ShowWindow(hwnd, 3)` (3=SW_MAXIMIZE)
 2. **권한 팝업 방지**: 앱 테스팅용 Bash 명령에는 항상 `dangerouslyDisableSandbox: true` 사용 — 권한 팝업 자체가 뜨지 않음
 3. **포커스 관리**: 자동화 스크립트(클릭, 드래그 등) 전후 반드시 `SetForegroundWindow(hwnd_app)`로 앱 포커스 명시적 복귀
-4. **DPI 주의**: 보조 모니터는 150% DPI → 물리 픽셀 좌표 ÷ 1.5 = 논리 좌표. 앱을 주 모니터로 이동하면 이 문제 회피 가능
-5. **스크린샷**: `ImageGrab.grab(all_screens=True)` + 윈도우 rect 기준 크롭
+4. **DPI + 좌표 일관성**: 자동화 스크립트 최상단에 반드시 `ctypes.windll.user32.SetProcessDPIAware()` 호출 → 이후 모든 win32 좌표(GetWindowRect, SetCursorPos, ImageGrab.grab bbox)가 물리 픽셀로 통일됨. **이 호출 없이는 좌표계 불일치로 클릭 위치가 틀림**
+5. **스크린샷**: `ImageGrab.grab(all_screens=True)` + `SetProcessDPIAware()` 후 `GetWindowRect`로 물리 픽셀 rect 크롭
+6. **클릭 좌표**: `GetWindowRect`로 얻은 window 물리 rect + 내부 요소의 물리 오프셋 = 최종 물리 스크린 좌표 → `SetCursorPos`/`mouse_event`에 그대로 사용
 
 ---
 
