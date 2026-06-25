@@ -171,6 +171,7 @@ class SOTab(QWidget):
             sos = [s for s in sos if search in (s["so_number"] + s["sku_code"] + s["line_item"]).lower()]
 
         self.table.setSortingEnabled(False)
+        self.table.setUpdatesEnabled(False)   # suspend repaints during bulk fill
         self.table.setRowCount(len(sos))
         today = date.today()
 
@@ -215,6 +216,13 @@ class SOTab(QWidget):
                 inv_text = f"{allocated}/{so_qty}"
                 inv_bg   = QColor("#fff3e0")
 
+            # Row background — computed once, applied at item-creation time
+            check_due = so.get("committed_due_date") or so["due_date"]
+            is_late = (so["status"] == "OPEN" and
+                       datetime.strptime(check_due, "%Y-%m-%d").date() < today and
+                       actual < so["qty"])
+            row_brush = QBrush(LATE_COLOR if is_late else STATUS_COLORS.get(so["status"], QColor("white")))
+
             values = [
                 so["so_number"], so["sku_code"], so["line_item"],
                 so.get("customer_name") or "",
@@ -231,29 +239,24 @@ class SOTab(QWidget):
             ]
             for ci, val in enumerate(values):
                 item = QTableWidgetItem(str(val))
+                item.setBackground(row_brush)              # set once at creation
                 if ci in self._READONLY_COLS:
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 if ci == 0:
                     item.setData(Qt.ItemDataRole.UserRole, so)
                 self.table.setItem(ri, ci, item)
 
-            # Row colouring — use committed_due_date if set, else requested
-            check_due = so.get("committed_due_date") or so["due_date"]
-            is_late = (so["status"] == "OPEN" and
-                       datetime.strptime(check_due, "%Y-%m-%d").date() < today and
-                       actual < so["qty"])
-            bg = LATE_COLOR if is_late else STATUS_COLORS.get(so["status"], QColor("white"))
-            for ci in range(self.table.columnCount()):
-                self.table.item(ri, ci).setBackground(QBrush(bg))
-            # Inventory cell gets its own colour on top of row colour
+            # Inventory cell colour override (only when different from row bg)
             if inv_bg and not is_late:
                 self.table.item(ri, 7).setBackground(QBrush(inv_bg))
 
+        self.table.setUpdatesEnabled(True)    # resume repaints — single repaint here
         self.table.setSortingEnabled(True)
         self._loading = False
 
     def _load_history(self):
         rows = SORepo.history()
+        self.hist_table.setUpdatesEnabled(False)
         self.hist_table.setRowCount(len(rows))
         for ri, r in enumerate(rows):
             for ci, val in enumerate([
@@ -261,6 +264,7 @@ class SOTab(QWidget):
                 r["line_item"], r["change_type"], r["old_value"], r["new_value"]
             ]):
                 self.hist_table.setItem(ri, ci, QTableWidgetItem(str(val or "")))
+        self.hist_table.setUpdatesEnabled(True)
 
     def _context_menu(self, pos):
         row = self.table.rowAt(pos.y())
