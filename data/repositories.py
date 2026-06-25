@@ -993,6 +993,33 @@ class PlanRepo:
         return int(row["t"])
 
     @staticmethod
+    def planned_qty_bulk() -> dict:
+        """Single query → {(so_number, sku_code, line_item): planned_qty}."""
+        with get_connection() as conn:
+            rows = conn.execute(
+                "SELECT so_number, sku_code, line_item, "
+                "COALESCE(SUM(qty_planned),0) AS t "
+                "FROM production_plan "
+                "GROUP BY so_number, sku_code, line_item"
+            ).fetchall()
+        return {(r["so_number"], r["sku_code"], r["line_item"]): int(r["t"]) for r in rows}
+
+    @staticmethod
+    def last_plan_info_bulk() -> dict:
+        """Single query → {(so_number, sku_code, line_item): (plan_date, shift_no)}
+        for the latest slot per SO (max date, then max shift on that date)."""
+        with get_connection() as conn:
+            rows = conn.execute(
+                "SELECT so_number, sku_code, line_item, "
+                "SUBSTR(MAX(plan_date || CAST(shift_no AS TEXT)), 1, 10) AS last_date, "
+                "CAST(SUBSTR(MAX(plan_date || CAST(shift_no AS TEXT)), 11) AS INTEGER) AS last_shift "
+                "FROM production_plan "
+                "GROUP BY so_number, sku_code, line_item"
+            ).fetchall()
+        return {(r["so_number"], r["sku_code"], r["line_item"]):
+                (r["last_date"], r["last_shift"]) for r in rows}
+
+    @staticmethod
     def final_planned_qty(so_number: str, sku_code: str,
                           line_item: str) -> int:
         """Sum of qty_planned at the FINAL process step only. A multi-step
@@ -1283,6 +1310,18 @@ class ActualRepo:
         return int(row["t"])
 
     @staticmethod
+    def actual_qty_bulk() -> dict:
+        """Single query → {(so_number, sku_code, line_item): actual_qty}."""
+        with get_connection() as conn:
+            rows = conn.execute(
+                "SELECT so_number, sku_code, line_item, "
+                "COALESCE(SUM(qty_actual),0) AS t "
+                "FROM production_actual "
+                "GROUP BY so_number, sku_code, line_item"
+            ).fetchall()
+        return {(r["so_number"], r["sku_code"], r["line_item"]): int(r["t"]) for r in rows}
+
+    @staticmethod
     def for_entity(entity_type: str, entity_code: str) -> List[Dict]:
         with get_connection() as conn:
             return _rows_to_dicts(conn.execute(
@@ -1371,6 +1410,20 @@ class LotSampleRepo:
                 "WHERE so_number=? AND sku_code=? AND line_item=?",
                 (so_number, sku_code, line_item)).fetchone()
         return int(row["t"])
+
+    @staticmethod
+    def sample_reject_bulk() -> dict:
+        """Single query → {(so_number, sku_code, line_item): (sample_qty, reject_qty)}."""
+        with get_connection() as conn:
+            rows = conn.execute(
+                "SELECT so_number, sku_code, line_item, "
+                "COALESCE(SUM(sample_qty),0) AS s, "
+                "COALESCE(SUM(reject_qty),0) AS r "
+                "FROM lot_sample "
+                "GROUP BY so_number, sku_code, line_item"
+            ).fetchall()
+        return {(row["so_number"], row["sku_code"], row["line_item"]):
+                (int(row["s"]), int(row["r"])) for row in rows}
 
     @staticmethod
     def net_qty(so_number: str, sku_code: str, line_item: str) -> int:

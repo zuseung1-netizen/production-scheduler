@@ -174,32 +174,35 @@ class SOTab(QWidget):
         self.table.setRowCount(len(sos))
         today = date.today()
 
-        # Batch allocation query — avoids N+1
-        alloc_map = AllocationRepo.allocation_summary_for_open_sos()
+        # Batch all DB queries — 5 queries total regardless of SO count
+        alloc_map     = AllocationRepo.allocation_summary_for_open_sos()
+        planned_map   = PlanRepo.planned_qty_bulk()
+        actual_map    = ActualRepo.actual_qty_bulk()
+        last_plan_map = PlanRepo.last_plan_info_bulk()
+        sku_cache     = {s["sku_code"]: s for s in SKURepo.all()}
 
         for ri, so in enumerate(sos):
-            planned = PlanRepo.planned_qty(so["so_number"], so["sku_code"], so["line_item"])
-            actual  = ActualRepo.actual_qty(so["so_number"], so["sku_code"], so["line_item"])
+            key     = (so["so_number"], so["sku_code"], so["line_item"])
+            planned = planned_map.get(key, 0)
+            actual  = actual_map.get(key, 0)
 
-            # Compute planned completion (last plan date)
-            plans = PlanRepo.for_so(so["so_number"], so["sku_code"], so["line_item"])
-            if plans:
-                last_plan = max(plans, key=lambda p: (p["plan_date"], p["shift_no"]))
-                prod_complete = f"{last_plan['plan_date']} S{last_plan['shift_no']}"
+            # Planned completion (last plan date+shift)
+            last_info = last_plan_map.get(key)
+            if last_info:
+                prod_complete = f"{last_info[0]} S{last_info[1]}"
             else:
                 prod_complete = "-"
 
-            # Release date = prod_complete + post_lead_days
-            sku_data = SKURepo.get(so["sku_code"])
-            post_lead = int(sku_data["post_lead_days"]) if sku_data else 0
-            if plans and post_lead:
-                rel_date = (datetime.strptime(last_plan["plan_date"], "%Y-%m-%d").date()
+            # Release date = last plan date + post_lead_days
+            sku_data  = sku_cache.get(so["sku_code"])
+            post_lead = int(sku_data["post_lead_days"]) if (sku_data and sku_data.get("post_lead_days")) else 0
+            if last_info and post_lead:
+                rel_date = (datetime.strptime(last_info[0], "%Y-%m-%d").date()
                             + timedelta(days=post_lead)).strftime("%Y-%m-%d")
             else:
                 rel_date = "-"
 
             # Inventory allocation summary (col 7)
-            key = (so["so_number"], so["sku_code"], so["line_item"])
             allocated = alloc_map.get(key, 0)
             so_qty    = so["qty"]
             if allocated == 0:

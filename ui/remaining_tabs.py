@@ -1585,21 +1585,21 @@ class AlertsTab(QWidget):
     def _load_late(self):
         today = date.today()
         sos = SORepo.all("OPEN")
+        # Batch queries — avoids N+1 (2 queries total regardless of SO count)
+        actual_map    = ActualRepo.actual_qty_bulk()
+        last_plan_map = PlanRepo.last_plan_info_bulk()
         late_rows = []
         for so in sos:
+            key = (so["so_number"], so["sku_code"], so["line_item"])
             due = datetime.strptime(so["due_date"], "%Y-%m-%d").date()
-            actual = ActualRepo.actual_qty(
-                so["so_number"], so["sku_code"], so["line_item"])
+            actual = actual_map.get(key, 0)
             remaining = so["qty"] - actual
             if remaining <= 0:
                 continue
-            plans = PlanRepo.for_so(
-                so["so_number"], so["sku_code"], so["line_item"])
-            if plans:
-                last = max(plans, key=lambda p: (p["plan_date"], p["shift_no"]))
-                plan_complete = f"{last['plan_date']} S{last['shift_no']}"
-                plan_complete_date = datetime.strptime(
-                    last["plan_date"], "%Y-%m-%d").date()
+            last_info = last_plan_map.get(key)
+            if last_info:
+                plan_complete = f"{last_info[0]} S{last_info[1]}"
+                plan_complete_date = datetime.strptime(last_info[0], "%Y-%m-%d").date()
                 is_late = plan_complete_date > due
             else:
                 plan_complete = "Not planned"
@@ -1634,23 +1634,25 @@ class AlertsTab(QWidget):
                     item.setBackground(QBrush(QColor("#ffcccc")))
                     self.late_table.setItem(ri, ci, item)
 
-        # QC shortfall section — SOs where net qty < SO qty after sample+reject
-        self._load_qc_shortfall()
+        # QC shortfall section — pass pre-fetched maps to avoid re-querying
+        self._load_qc_shortfall(sos, actual_map)
 
-    def _load_qc_shortfall(self):
+    def _load_qc_shortfall(self, sos=None, actual_map=None):
         """Show SOs where actual - sample - reject < SO qty."""
         from data.repositories import LotSampleRepo
-        sos = SORepo.all("OPEN")
+        if sos is None:
+            sos = SORepo.all("OPEN")
+        if actual_map is None:
+            actual_map = ActualRepo.actual_qty_bulk()
+        # Batch sample+reject query (1 query)
+        sr_map = LotSampleRepo.sample_reject_bulk()
         shortfall_rows = []
         for so in sos:
-            actual_total = ActualRepo.actual_qty(
-                so["so_number"], so["sku_code"], so["line_item"])
+            key = (so["so_number"], so["sku_code"], so["line_item"])
+            actual_total = actual_map.get(key, 0)
             if actual_total == 0:
                 continue   # nothing produced yet — skip
-            sample_total = LotSampleRepo.total_sample_qty(
-                so["so_number"], so["sku_code"], so["line_item"])
-            reject_total = LotSampleRepo.total_reject_qty(
-                so["so_number"], so["sku_code"], so["line_item"])
+            sample_total, reject_total = sr_map.get(key, (0, 0))
             net = actual_total - sample_total - reject_total
             if net < so["qty"]:
                 shortfall_rows.append({
@@ -1760,11 +1762,20 @@ class DashboardTab(QWidget):
     def _compute_summary(self):
         sos = SORepo.all("OPEN")
         total = len(sos)
+        # Batch queries — 2 queries regardless of SO count
+        planned_map = PlanRepo.planned_qty_bulk()
+        actual_map  = ActualRepo.actual_qty_bulk()
+
         fully, partial, none_ = 0, 0, 0
+        from collections import defaultdict
+        weeks: Dict[str, Dict] = defaultdict(lambda: {"total": 0, "full": 0, "part": 0, "none": 0, "started": 0})
+
         for so in sos:
-            planned = PlanRepo.planned_qty(so["so_number"], so["sku_code"], so["line_item"])
-            actual  = ActualRepo.actual_qty(so["so_number"], so["sku_code"], so["line_item"])
+            key      = (so["so_number"], so["sku_code"], so["line_item"])
+            planned  = planned_map.get(key, 0)
+            actual   = actual_map.get(key, 0)
             remaining = so["qty"] - actual
+
             if planned >= remaining:
                 fully += 1
             elif planned > 0:
@@ -1772,27 +1783,12 @@ class DashboardTab(QWidget):
             else:
                 none_ += 1
 
-        self.summary_label.setText(
-            f"Total Open SOs: <b>{total}</b>  |  "
-            f"Fully Planned: <b style='color:green'>{fully}</b>  |  "
-            f"Partially Planned: <b style='color:orange'>{partial}</b>  |  "
-            f"Not Planned: <b style='color:red'>{none_}</b>"
-        )
-
-        # Weekly breakdown
-        from collections import defaultdict
-        weeks: Dict[str, Dict] = defaultdict(lambda: {"total": 0, "full": 0, "part": 0, "none": 0, "started": 0})
-        for so in sos:
             try:
                 due = datetime.strptime(so["due_date"], "%Y-%m-%d").date()
-                # ISO week
                 week_key = due.strftime("%Y-W%V")
             except Exception:
                 week_key = "Unknown"
             weeks[week_key]["total"] += 1
-            planned = PlanRepo.planned_qty(so["so_number"], so["sku_code"], so["line_item"])
-            actual  = ActualRepo.actual_qty(so["so_number"], so["sku_code"], so["line_item"])
-            remaining = so["qty"] - actual
             if actual > 0:
                 weeks[week_key]["started"] += 1
             if planned >= remaining:
@@ -1801,6 +1797,13 @@ class DashboardTab(QWidget):
                 weeks[week_key]["part"] += 1
             else:
                 weeks[week_key]["none"] += 1
+
+        self.summary_label.setText(
+            f"Total Open SOs: <b>{total}</b>  |  "
+            f"Fully Planned: <b style='color:green'>{fully}</b>  |  "
+            f"Partially Planned: <b style='color:orange'>{partial}</b>  |  "
+            f"Not Planned: <b style='color:red'>{none_}</b>"
+        )
 
         week_keys = sorted(weeks.keys())
         self.week_table.setRowCount(len(week_keys))
@@ -2793,36 +2796,36 @@ class ReleaseReportTab(QWidget):
         today = dt.today()
         sos   = SORepo.all()
         skus  = {s["sku_code"]: s for s in SKURepo.all()}
+        # Batch queries — avoids N+1 (4 queries regardless of SO count)
+        alloc_map     = AllocationRepo.allocation_summary_for_open_sos()
+        actual_map    = ActualRepo.actual_qty_bulk()
+        planned_map   = PlanRepo.planned_qty_bulk()
+        last_plan_map = PlanRepo.last_plan_info_bulk()
         rows  = []
 
         for so in sos:
             so_no = so["so_number"]
             sku_c = so["sku_code"]
             li    = so["line_item"]
+            key   = (so_no, sku_c, li)
             sku   = skus.get(sku_c, {})
             post_lead = int(sku.get("post_lead_days") or 0)
 
-            # Quantities
-            prod_needed = AllocationRepo.production_needed(so_no, sku_c, li)
-            planned_qty = PlanRepo.planned_qty(so_no, sku_c, li)
+            # Quantities (computed inline — no per-SO DB calls)
+            allocated   = alloc_map.get(key, 0)
+            actual_qty  = actual_map.get(key, 0)
+            prod_needed = max(0, so["qty"] - allocated - actual_qty)
+            planned_qty = planned_map.get(key, 0)
 
-            # Find last FINAL plan for this SO-LineItem
-            plans = PlanRepo.for_so(so_no, sku_c, li)
-            final_plans = [p for p in plans if p.get("is_final_seq")]
-            if not final_plans:
-                # Fall back to any plan if no final flagged
-                final_plans = plans
-
-            if final_plans:
-                last_plan = max(
-                    final_plans,
-                    key=lambda p: (p["plan_date"], p["shift_no"]))
-                last_date  = last_plan["plan_date"]
-                last_shift = last_plan["shift_no"]
-                last_dt    = dtt.strptime(last_date, "%Y-%m-%d").date()
-                release_dt = last_dt + timedelta(days=post_lead)
-                release_str = release_dt.strftime("%Y-%m-%d")
-                last_date_str = last_date
+            # Last plan slot (last_plan_info_bulk returns max date+shift across all plans;
+            # backward scheduling places the final step latest, so this matches FINAL intent)
+            last_info = last_plan_map.get(key)
+            if last_info:
+                last_date_str = last_info[0]
+                last_shift    = last_info[1]
+                last_dt       = dtt.strptime(last_date_str, "%Y-%m-%d").date()
+                release_dt    = last_dt + timedelta(days=post_lead)
+                release_str   = release_dt.strftime("%Y-%m-%d")
             else:
                 last_date_str = "—"
                 last_shift    = "—"

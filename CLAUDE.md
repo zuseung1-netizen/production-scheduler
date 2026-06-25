@@ -109,6 +109,42 @@ production_planner/
 
 ---
 
+## N+1 쿼리 방지 설계 규칙
+
+**탭 refresh() 또는 루프에서 DB를 호출할 때 반드시 아래 패턴을 따른다.**
+
+### 허용 패턴 (배치 쿼리)
+```python
+# ❌ N+1 — 절대 금지
+for so in sos:
+    planned = PlanRepo.planned_qty(so["so_number"], ...)   # SO 수만큼 쿼리
+
+# ✅ 배치 — 루프 전에 전체를 한 번에 가져옴
+planned_map = PlanRepo.planned_qty_bulk()   # 1 query
+actual_map  = ActualRepo.actual_qty_bulk()  # 1 query
+for so in sos:
+    key = (so["so_number"], so["sku_code"], so["line_item"])
+    planned = planned_map.get(key, 0)
+    actual  = actual_map.get(key, 0)
+```
+
+### 기존 벌크 메서드 목록
+| 메서드 | 반환 타입 | 비고 |
+|---|---|---|
+| `PlanRepo.planned_qty_bulk()` | `{(so, sku, li): qty}` | 모든 공정 합산 |
+| `PlanRepo.last_plan_info_bulk()` | `{(so, sku, li): (date, shift_no)}` | 최후 슬롯 (날짜+shift 최댓값) |
+| `ActualRepo.actual_qty_bulk()` | `{(so, sku, li): qty}` | |
+| `LotSampleRepo.sample_reject_bulk()` | `{(so, sku, li): (sample, reject)}` | |
+| `AllocationRepo.allocation_summary_for_open_sos()` | `{(so, sku, li): allocated}` | 전체 SO 대상 |
+
+### 새 탭/다이얼로그 구현 시 체크리스트
+- [ ] SO 목록 루프 안에 `PlanRepo.planned_qty()`, `ActualRepo.actual_qty()` 등 단건 조회 없는지 확인
+- [ ] `PlanRepo.for_so()` 를 루프 안에서 쓰면 반드시 `last_plan_info_bulk()`로 대체
+- [ ] `SKURepo.get()` 루프 내 호출 → `{code: sku for sku in SKURepo.all()}` 캐시로 대체
+- [ ] 벌크 메서드 없는 경우 `repositories.py`에 추가 후 사용
+
+---
+
 ## Repository 클래스 목록 (data/repositories.py)
 
 | 클래스 | 주요 메서드 |
