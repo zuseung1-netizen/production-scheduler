@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QScrollArea, QLineEdit, QComboBox, QDateEdit,
     QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView, QAbstractScrollArea, QSizePolicy,
+    QAbstractItemView, QSizePolicy,
     QMessageBox, QInputDialog, QStyledItemDelegate, QStyle,
 )
 from PyQt6.QtCore import Qt, QDate, QRectF, QRect
@@ -422,7 +422,8 @@ class PlanListTab(QWidget):
         for r in filtered:
             by_date[r["plan"]["plan_date"]][r["plan"]["shift_no"]].append(r)
 
-        # Rebuild list
+        # Rebuild list — disable updates to suppress per-insertWidget layout recalc
+        self._list_widget.setUpdatesEnabled(False)
         while self._list_layout.count() > 1:
             item = self._list_layout.takeAt(0)
             if item.widget():
@@ -431,6 +432,7 @@ class PlanListTab(QWidget):
         for ds in sorted(by_date.keys()):
             grp = self._make_date_group(ds, by_date[ds], shifts)
             self._list_layout.insertWidget(self._list_layout.count() - 1, grp)
+        self._list_widget.setUpdatesEnabled(True)
 
     # ── Date group ───────────────────────────────────────────────────────────
 
@@ -559,10 +561,9 @@ class PlanListTab(QWidget):
         tbl.horizontalHeader().setHighlightSections(False)
         tbl.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         tbl.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        tbl.setSizeAdjustPolicy(
-            QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
         tbl.setSizePolicy(QSizePolicy.Policy.Expanding,
                           QSizePolicy.Policy.Fixed)
+        tbl.setFixedHeight(len(rows) * _ROW_H + _HDR_H)
         tbl.setStyleSheet(
             "QTableWidget{border:none;background:white;gridline-color:transparent;outline:0;}"
             "QTableWidget::item{border-bottom:1px solid #f0f2f7;padding:0;}"
@@ -590,8 +591,10 @@ class PlanListTab(QWidget):
         tbl.setItemDelegateForColumn(5, _du)
         tbl.setItemDelegateForColumn(6, _bd)
 
+        tbl.setUpdatesEnabled(False)
         for ri, r in enumerate(rows):
             self._fill_row(tbl, ri, r)
+        tbl.setUpdatesEnabled(True)
 
         return tbl
 
