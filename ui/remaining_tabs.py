@@ -2768,9 +2768,11 @@ class ReleaseReportTab(QWidget):
             "Release Date", "Due Date",
             "Days to Due", "Status", "Note"
         ])
-        self.table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setStretchLastSection(True)
+        _hdr = self.table.horizontalHeader()
+        _hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        _hdr.setStretchLastSection(True)
+        for i, w in enumerate([120, 90, 55, 60, 80, 80, 110, 45, 100, 100, 75, 80, 120]):
+            _hdr.resizeSection(i, w)
         self.table.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
@@ -2904,10 +2906,6 @@ class ReleaseReportTab(QWidget):
                 "  <span style='color:#9aa1b3;'>No records match the current filter.</span>")
 
     def _render(self, rows: list):
-        # Disable sorting while filling to avoid index issues
-        self.table.setSortingEnabled(False)
-        self.table.setRowCount(len(rows))
-
         STATUS_BG = {
             self.STATUS_LATE:     QColor("#ffcccc"),
             self.STATUS_AT_RISK:  QColor("#fff0cc"),
@@ -2920,10 +2918,21 @@ class ReleaseReportTab(QWidget):
             self.STATUS_ON_TIME:  QColor("#2d7a2d"),
             self.STATUS_NO_PLAN:  QColor("#666666"),
         }
+        bold_font = QFont(); bold_font.setBold(True)
+        gray_fg   = QBrush(QColor("#999999"))
+        late_bg   = QBrush(QColor("#ffcccc"))
+        at_risk_bg = QBrush(QColor("#fff0cc"))
+
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.table.setSortingEnabled(False)
+        self.table.setUpdatesEnabled(False)
+        self.table.setRowCount(len(rows))
 
         for ri, r in enumerate(rows):
-            bg = STATUS_BG.get(r["status"], QColor("white"))
-            fg = STATUS_FG.get(r["status"], QColor("black"))
+            bg = QBrush(STATUS_BG.get(r["status"], QColor("white")))
+            fg = QBrush(STATUS_FG.get(r["status"], QColor("black")))
+            is_dim = r["so_status"] in ("CLOSED", "HOLD")
 
             vals = [
                 r["so_number"], r["sku_code"], r["line_item"],
@@ -2935,33 +2944,29 @@ class ReleaseReportTab(QWidget):
             ]
             for ci, val in enumerate(vals):
                 item = QTableWidgetItem(str(val))
-                # Status column — coloured text + bg
                 if ci == 11:
-                    item.setBackground(QBrush(bg))
-                    item.setForeground(QBrush(fg))
-                    font = QFont(); font.setBold(True)
-                    item.setFont(font)
-                # Days-to-due — colour by value
+                    item.setBackground(bg)
+                    item.setForeground(fg)
+                    item.setFont(bold_font)
                 elif ci == 10 and r["days_to_due"] != "":
                     try:
                         d = int(r["days_to_due"])
                         if d < 0:
-                            item.setBackground(QBrush(QColor("#ffcccc")))
+                            item.setBackground(late_bg)
                         elif d <= self.AT_RISK_DAYS:
-                            item.setBackground(QBrush(QColor("#fff0cc")))
+                            item.setBackground(at_risk_bg)
                     except ValueError:
                         pass
-                # Release date — bold if late
                 elif ci == 8 and r["status"] == self.STATUS_LATE:
-                    item.setBackground(QBrush(QColor("#ffcccc")))
-                    font = QFont(); font.setBold(True)
-                    item.setFont(font)
-                # Dim closed/hold rows
-                if r["so_status"] in ("CLOSED", "HOLD") and ci != 11:
-                    item.setForeground(QBrush(QColor("#999999")))
-
+                    item.setBackground(late_bg)
+                    item.setFont(bold_font)
+                if is_dim and ci != 11:
+                    item.setForeground(gray_fg)
                 self.table.setItem(ri, ci, item)
 
+        self.table.setUpdatesEnabled(True)
+        hdr.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table.setSortingEnabled(True)
 
     def _update_summary(self, rows: list):
