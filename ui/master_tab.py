@@ -49,11 +49,14 @@ class UploadPreviewDialog(QDialog):
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.ResizeToContents)
+            QHeaderView.ResizeMode.Interactive)
         table.setAlternatingRowColors(True)
+        table.setUpdatesEnabled(False)
         for ri, row in enumerate(rows):
             for ci, val in enumerate(row):
                 table.setItem(ri, ci, QTableWidgetItem(str(val)))
+        table.setUpdatesEnabled(True)
+        table.resizeColumnsToContents()
         layout.addWidget(table)
 
         bbar = QHBoxLayout()
@@ -192,6 +195,9 @@ class ItemMasterWidget(QWidget):
             rows = [r for r in rows
                     if f in r["code"].lower() or f in r["name"].lower()]
 
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.table.setUpdatesEnabled(False)
         self.table.setRowCount(len(rows))
         for ri, r in enumerate(rows):
             is_sku = r["type"] == "SKU"
@@ -208,7 +214,9 @@ class ItemMasterWidget(QWidget):
                 if ci in (0, 1, 5):  # Type / Code / Allow Grouping are read-only (toggle via dialog)
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.table.setItem(ri, ci, item)
-
+        self.table.setUpdatesEnabled(True)
+        self.table.resizeColumnsToContents()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._loading = False
         self._refresh_status(missing)
 
@@ -553,6 +561,9 @@ class RoomMasterWidget(QWidget):
         self._changed_cells.clear()
         self._btn_save.setEnabled(False)
         rows = RoomRepo.all()
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.table.setUpdatesEnabled(False)
         self.table.setRowCount(len(rows))
         for ri, r in enumerate(rows):
             for ci, val in enumerate([
@@ -569,6 +580,9 @@ class RoomMasterWidget(QWidget):
                 if ci == 0:
                     item.setData(Qt.ItemDataRole.UserRole, r)
                 self.table.setItem(ri, ci, item)
+        self.table.setUpdatesEnabled(True)
+        self.table.resizeColumnsToContents()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._loading = False
         self._status.setText("")
 
@@ -807,6 +821,9 @@ class ShiftConfigWidget(QWidget):
         self._changed_cells.clear()
         self._btn_save.setEnabled(False)
         rows = ShiftRepo.all()
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.table.setUpdatesEnabled(False)
         self.table.setRowCount(len(rows))
         for ri, r in enumerate(rows):
             for ci, v in enumerate([r["shift_no"], r["shift_name"], r["start_time"], r["end_time"]]):
@@ -814,6 +831,9 @@ class ShiftConfigWidget(QWidget):
                 if ci in self._READONLY_COLS:
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.table.setItem(ri, ci, item)
+        self.table.setUpdatesEnabled(True)
+        self.table.resizeColumnsToContents()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._loading = False
         self._status.setText("")
 
@@ -1357,7 +1377,7 @@ def _make_table(cols: list, editable: bool = False) -> QTableWidget:
     else:
         t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
     t.setAlternatingRowColors(True)
-    t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+    t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
     return t
 
 
@@ -1484,6 +1504,9 @@ class SKUProcessWidget(QWidget):
         else:
             rows = SKUProcessRepo.for_sku(sku_filter)
 
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.table.setUpdatesEnabled(False)
         self.table.setRowCount(len(rows))
         for ri, r in enumerate(rows):
             is_final = "✅ YES" if r["is_final_seq"] else ""
@@ -1495,6 +1518,9 @@ class SKUProcessWidget(QWidget):
                 if r["is_final_seq"] and ci == 4:
                     item.setBackground(QBrush(QColor("#d4f0c0")))
                 self.table.setItem(ri, ci, item)
+        self.table.setUpdatesEnabled(True)
+        self.table.resizeColumnsToContents()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
 
     def _add(self):
         dlg = SKUProcessEditDialog({}, self)
@@ -1797,6 +1823,9 @@ class ProcessRoutingWidget(QWidget):
         if f:
             rows = [r for r in rows if f in r["entity_code"].lower()]
 
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.table.setUpdatesEnabled(False)
         self.table.setRowCount(len(rows))
         for ri, r in enumerate(rows):
             final_txt = "✅" if r["is_final_seq"] else ""
@@ -1823,6 +1852,9 @@ class ProcessRoutingWidget(QWidget):
                 if rtp and ci == 8:
                     item.setBackground(QBrush(QColor("#f0e8ff")))
                 self.table.setItem(ri, ci, item)
+        self.table.setUpdatesEnabled(True)
+        self.table.resizeColumnsToContents()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._loading = False
 
     def _add(self):

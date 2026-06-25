@@ -3830,7 +3830,7 @@ class PullForwardDialog(QDialog):
         self.table.verticalHeader().setVisible(False)
         hdr = self.table.horizontalHeader()
         hdr.setMinimumSectionSize(40)
-        hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         hdr.setSectionResizeMode(self.C_CUST,  QHeaderView.ResizeMode.Stretch)
         # Widget columns: Fixed with generous widths that survive DPI scaling
         for col, w in [(self.C_LINE, 55), (self.C_TGT, 135),
@@ -3863,6 +3863,9 @@ class PullForwardDialog(QDialog):
                         if final_plans else "-")
             rows.append((so, cur_comp))
 
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.table.setUpdatesEnabled(False)
         self.table.setRowCount(len(rows))
         for ri, (so, cur_comp) in enumerate(rows):
             so_no  = so["so_number"]
@@ -3932,6 +3935,15 @@ class PullForwardDialog(QDialog):
                     it = self.table.item(ri, c)
                     if it:
                         it.setBackground(QBrush(QColor("#ffebee")))
+
+        self.table.setUpdatesEnabled(True)
+        self.table.resizeColumnsToContents()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        hdr.setSectionResizeMode(self.C_CUST, QHeaderView.ResizeMode.Stretch)
+        for col, w in [(self.C_LINE, 55), (self.C_TGT, 135),
+                       (self.C_CALC, 52), (self.C_APPLY, 140)]:
+            hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
+            self.table.setColumnWidth(col, w)
 
     def _inner_btn(self, row: int, col: int):
         """Return the inner widget from a _cell_center container."""
@@ -4119,7 +4131,7 @@ class _PullImpactDialog(QDialog):
             "Requested Due", "Committed Due",
             "Current Completion", "New Completion", "Status After"])
         tbl.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.ResizeToContents)
+            QHeaderView.ResizeMode.Interactive)
         tbl.horizontalHeader().setSectionResizeMode(
             3, QHeaderView.ResizeMode.Stretch)
         tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -4151,6 +4163,7 @@ class _PullImpactDialog(QDialog):
                     it.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
                 tbl.setItem(ri, ci, it)
 
+        tbl.resizeColumnsToContents()
         lay.addWidget(tbl)
 
         info = QLabel(
@@ -4494,7 +4507,7 @@ class PlanTimeMachineDialog(QDialog):
             diff_tbl.horizontalHeader().setSectionResizeMode(
                 0, QHeaderView.ResizeMode.Stretch)
             diff_tbl.horizontalHeader().setSectionResizeMode(
-                1, QHeaderView.ResizeMode.ResizeToContents)
+                1, QHeaderView.ResizeMode.Interactive)
             diff_tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
             diff_tbl.setFixedHeight(120)
             diff_tbl.setSelectionMode(QTableWidget.SelectionMode.NoSelection)

@@ -699,7 +699,7 @@ class SOUploadPreviewDialog(QDialog):
         self._table.setHorizontalHeaderLabels(self.COLS)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._table.setAlternatingRowColors(False)
         layout.addWidget(self._table)
 
@@ -725,6 +725,9 @@ class SOUploadPreviewDialog(QDialog):
         rows = [r for r in self._preview["rows"]
                 if f == "ALL" or r["change_type"] == f]
 
+        _hdr = self._table.horizontalHeader()
+        _hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self._table.setUpdatesEnabled(False)
         self._table.setRowCount(len(rows))
         for ri, r in enumerate(rows):
             ct  = r["change_type"]
@@ -764,6 +767,9 @@ class SOUploadPreviewDialog(QDialog):
                         "Split children are NOT auto-closed by upload.\n"
                         "Review and adjust split quantities manually if needed.")
                 self._table.setItem(ri, ci, item)
+        self._table.setUpdatesEnabled(True)
+        self._table.resizeColumnsToContents()
+        _hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
 
     def _confirm(self):
         self._confirmed = True
@@ -1534,7 +1540,7 @@ class InternalOrderTab(QWidget):
                 "Requester", "Qty", "Internal Due", "Priority", "Status", "Note"]
         self._table.setColumnCount(len(cols))
         self._table.setHorizontalHeaderLabels(cols)
-        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         layout.addWidget(self._table, stretch=1)
 
         self.refresh()
@@ -1555,7 +1561,10 @@ class InternalOrderTab(QWidget):
                 (io.get("requester") or "") + (io.get("purpose") or "")
             ).lower()]
 
+        io_hdr = self._table.horizontalHeader()
+        io_hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         self._table.setSortingEnabled(False)
+        self._table.setUpdatesEnabled(False)
         self._table.setRowCount(len(ios))
         today = date.today()
 
@@ -1588,6 +1597,9 @@ class InternalOrderTab(QWidget):
             for ci in range(self._table.columnCount()):
                 self._table.item(ri, ci).setBackground(QBrush(bg))
 
+        self._table.setUpdatesEnabled(True)
+        self._table.resizeColumnsToContents()
+        io_hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._table.setSortingEnabled(True)
 
     def _context_menu(self, pos):
@@ -1939,7 +1951,7 @@ class CheckATPDialog(QDialog):
         self._tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._tbl.setAlternatingRowColors(True)
         hdr = self._tbl.horizontalHeader()
-        hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self._tbl.hide()
         lay.addWidget(self._tbl)
@@ -2014,6 +2026,9 @@ class CheckATPDialog(QDialog):
             " border:1px solid #a5d6a7; border-radius:4px; font-size:12px;")
 
         # Fill displaced table
+        pf_hdr = self._tbl.horizontalHeader()
+        pf_hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self._tbl.setUpdatesEnabled(False)
         self._tbl.setRowCount(len(displaced))
         for ri, d in enumerate(displaced):
             after = d["status_after"]
@@ -2033,6 +2048,10 @@ class CheckATPDialog(QDialog):
                         self._STATUS_FG.get(after, QColor("#1e293b"))))
                     it.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
                 self._tbl.setItem(ri, ci, it)
+        self._tbl.setUpdatesEnabled(True)
+        self._tbl.resizeColumnsToContents()
+        pf_hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        pf_hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
 
         if displaced:
             self._tbl.show()

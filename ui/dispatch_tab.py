@@ -156,7 +156,7 @@ class DispatchListTab(QWidget):
         self._table.setAlternatingRowColors(False)
         self._table.setSortingEnabled(True)
         self._table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.ResizeToContents)
+            QHeaderView.ResizeMode.Interactive)
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.verticalHeader().setDefaultSectionSize(26)
         self._table.setStyleSheet(
@@ -387,7 +387,10 @@ class DispatchListTab(QWidget):
             f"🔴 Critical: {n_crit}  🟠 At Risk: {n_risk}  🟢 On Time: {n_ok}")
 
     def _populate_table(self, rows: List[Dict]):
+        hdr = self._table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         self._table.setSortingEnabled(False)
+        self._table.setUpdatesEnabled(False)
         self._table.setRowCount(len(rows))
 
         bold = QFont()
@@ -439,6 +442,9 @@ class DispatchListTab(QWidget):
                     item.setFont(bold)
                 self._table.setItem(ri, ci, item)
 
+        self._table.setUpdatesEnabled(True)
+        hdr.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._table.setSortingEnabled(True)
         self._table.resizeColumnsToContents()
 

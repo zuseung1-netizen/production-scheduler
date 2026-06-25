@@ -318,7 +318,7 @@ class CapacityAnalysisWidget(QWidget):
         t = QTableWidget()
         t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         t.setAlternatingRowColors(True)
-        t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         t.verticalHeader().setVisible(False)
         return t
 
@@ -826,7 +826,7 @@ class CRPTab(QWidget):
         self.table = QTableWidget()
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table.itemChanged.connect(self._on_crp_cell_changed)
         layout.addWidget(self.table, stretch=1)
 
@@ -882,6 +882,7 @@ class CRPTab(QWidget):
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.table.setItem(ri, 1 + di, item)
 
+        self.table.resizeColumnsToContents()
         self._crp_loading = False
 
     def _toggle_crp_edit_mode(self, checked: bool):
@@ -1068,7 +1069,7 @@ class ActualsTab(QWidget):
             "Due Date", "SO Qty", "Actual So Far", "Allocate Qty",
         ])
         hh = self.alloc_table.horizontalHeader()
-        hh.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.alloc_table.setAlternatingRowColors(True)
         self.alloc_table.itemChanged.connect(self._on_alloc_changed)
@@ -1133,7 +1134,7 @@ class ActualsTab(QWidget):
         ])
         self.log_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         lhh = self.log_table.horizontalHeader()
-        lhh.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        lhh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         lhh.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.log_table.setAlternatingRowColors(True)
         ll.addWidget(self.log_table, stretch=1)
@@ -1225,6 +1226,9 @@ class ActualsTab(QWidget):
 
     def _render_alloc_table(self):
         self._loading_alloc = True
+        hdr = self.alloc_table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.alloc_table.setUpdatesEnabled(False)
         self.alloc_table.setRowCount(len(self._alloc_rows))
         today = date.today()
         for ri, row in enumerate(self._alloc_rows):
@@ -1254,6 +1258,10 @@ class ActualsTab(QWidget):
                     except ValueError:
                         pass
                 self.alloc_table.setItem(ri, ci, item)
+        self.alloc_table.setUpdatesEnabled(True)
+        self.alloc_table.resizeColumnsToContents()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._loading_alloc = False
         self._update_alloc_summary()
 
@@ -1374,6 +1382,9 @@ class ActualsTab(QWidget):
     def _refresh_log(self):
         d = self.log_date.date().toString("yyyy-MM-dd")
         actuals = ActualRepo.for_date(d)
+        lhdr = self.log_table.horizontalHeader()
+        lhdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.log_table.setUpdatesEnabled(False)
         self.log_table.setRowCount(len(actuals))
         for ri, a in enumerate(actuals):
             ts = a.get("entered_at", "")
@@ -1395,6 +1406,10 @@ class ActualsTab(QWidget):
                 if tag and ci in (4, 7):
                     item.setForeground(QBrush(QColor("#e67e22")))
                 self.log_table.setItem(ri, ci, item)
+        self.log_table.setUpdatesEnabled(True)
+        self.log_table.resizeColumnsToContents()
+        lhdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        lhdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
 
         total_sku = sum(
             a.get("qty_actual", 0) for a in actuals
@@ -1466,7 +1481,7 @@ class ReplanReportDialog(QDialog):
         # ── Deleted ──
         t_del = QTableWidget(len(deleted), 4)
         t_del.setHorizontalHeaderLabels(["Plan ID", "SO", "SKU / Line", "Reason"])
-        t_del.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        t_del.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         t_del.horizontalHeader().setStretchLastSection(True)
         t_del.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         for ri, d in enumerate(deleted):
@@ -1476,12 +1491,13 @@ class ReplanReportDialog(QDialog):
             t_del.setItem(ri, 3, QTableWidgetItem(d["reason"]))
             for ci in range(4):
                 t_del.item(ri, ci).setBackground(QBrush(QColor("#fff9c4")))
+        t_del.resizeColumnsToContents()
         tabs.addTab(t_del, f"Deleted ({len(deleted)})")
 
         # ── Re-planned ──
         t_rep = QTableWidget(len(replanned), 5)
         t_rep.setHorizontalHeaderLabels(["SO", "SKU", "Line", "Actual Qty", "Remaining Qty"])
-        t_rep.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        t_rep.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         t_rep.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         for ri, r in enumerate(replanned):
             t_rep.setItem(ri, 0, QTableWidgetItem(r["so_number"]))
@@ -1491,12 +1507,13 @@ class ReplanReportDialog(QDialog):
             t_rep.setItem(ri, 4, QTableWidgetItem(str(r["remaining_qty"])))
             for ci in range(5):
                 t_rep.item(ri, ci).setBackground(QBrush(QColor("#c8e6c9")))
+        t_rep.resizeColumnsToContents()
         tabs.addTab(t_rep, f"Re-planned ({len(replanned)})")
 
         # ── Errors ──
         t_err = QTableWidget(len(errors), 2)
         t_err.setHorizontalHeaderLabels(["SO", "Reason"])
-        t_err.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        t_err.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         t_err.horizontalHeader().setStretchLastSection(True)
         t_err.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         for ri, e in enumerate(errors):
@@ -1504,6 +1521,7 @@ class ReplanReportDialog(QDialog):
             t_err.setItem(ri, 1, QTableWidgetItem(str(e.get("reason", ""))))
             for ci in range(2):
                 t_err.item(ri, ci).setBackground(QBrush(QColor("#ffcdd2")))
+        t_err.resizeColumnsToContents()
         tabs.addTab(t_err, f"Errors ({len(errors)})")
 
         layout.addWidget(tabs, stretch=1)
@@ -1568,6 +1586,10 @@ class AlertsTab(QWidget):
             self.conflict_table.setSpan(0, 0, 1, self.conflict_table.columnCount())
             return
         self.conflict_grp.setTitle(f"⚠ Capacity Conflicts ({len(conflicts)})")
+        red_bg = QBrush(QColor("#ffe0e0"))
+        hdr = self.conflict_table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.conflict_table.setUpdatesEnabled(False)
         self.conflict_table.setRowCount(len(conflicts))
         for ri, c in enumerate(conflicts):
             if c.get("conflict_type") == "multi_process":
@@ -1579,8 +1601,11 @@ class AlertsTab(QWidget):
                             c["planned_inner"], c["capacity_inner"], c["overrun_inner"]]
             for ci, val in enumerate(row_vals):
                 item = QTableWidgetItem(str(val))
-                item.setBackground(QBrush(QColor("#ffe0e0")))
+                item.setBackground(red_bg)
                 self.conflict_table.setItem(ri, ci, item)
+        self.conflict_table.setUpdatesEnabled(True)
+        self.conflict_table.resizeColumnsToContents()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
 
     def _load_late(self):
         today = date.today()
@@ -1624,6 +1649,10 @@ class AlertsTab(QWidget):
             self.late_table.setSpan(0, 0, 1, self.late_table.columnCount())
         else:
             self.late_grp.setTitle(f"🔴 Late / At-Risk SOs ({len(late_rows)})")
+            late_bg = QBrush(QColor("#ffcccc"))
+            hdr = self.late_table.horizontalHeader()
+            hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+            self.late_table.setUpdatesEnabled(False)
             self.late_table.setRowCount(len(late_rows))
             for ri, r in enumerate(late_rows):
                 for ci, val in enumerate([
@@ -1631,8 +1660,11 @@ class AlertsTab(QWidget):
                     r["complete"], r["remaining"], r["reason"]
                 ]):
                     item = QTableWidgetItem(str(val))
-                    item.setBackground(QBrush(QColor("#ffcccc")))
+                    item.setBackground(late_bg)
                     self.late_table.setItem(ri, ci, item)
+            self.late_table.setUpdatesEnabled(True)
+            self.late_table.resizeColumnsToContents()
+            hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
 
         # QC shortfall section — pass pre-fetched maps to avoid re-querying
         self._load_qc_shortfall(sos, actual_map)
@@ -1693,6 +1725,12 @@ class AlertsTab(QWidget):
             self.qc_table.setSpan(0, 0, 1, self.qc_table.columnCount())
             return
         self.qc_grp.setTitle(f"🔴 QC Shortfall — {len(shortfall_rows)} SO(s)")
+        red_bg    = QBrush(QColor("#ffcccc"))
+        yellow_bg = QBrush(QColor("#fffbe6"))
+        orange_bg = QBrush(QColor("#fde8d8"))
+        hdr = self.qc_table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.qc_table.setUpdatesEnabled(False)
         self.qc_table.setRowCount(len(shortfall_rows))
         for ri, r in enumerate(shortfall_rows):
             for ci, val in enumerate([
@@ -1701,13 +1739,16 @@ class AlertsTab(QWidget):
                 r["net"], r["needed"], r["short"]
             ]):
                 item = QTableWidgetItem(str(val))
-                if ci in (6, 9):   # reject col, short-by col — strong red
-                    item.setBackground(QBrush(QColor("#ffcccc")))
-                elif ci == 5:      # sample col — yellow
-                    item.setBackground(QBrush(QColor("#fffbe6")))
-                elif ci == 7:      # net qty — orange
-                    item.setBackground(QBrush(QColor("#fde8d8")))
+                if ci in (6, 9):
+                    item.setBackground(red_bg)
+                elif ci == 5:
+                    item.setBackground(yellow_bg)
+                elif ci == 7:
+                    item.setBackground(orange_bg)
                 self.qc_table.setItem(ri, ci, item)
+        self.qc_table.setUpdatesEnabled(True)
+        self.qc_table.resizeColumnsToContents()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
 
 
 def _alerts_table(cols: list) -> QTableWidget:
@@ -1716,8 +1757,22 @@ def _alerts_table(cols: list) -> QTableWidget:
     t.setHorizontalHeaderLabels(cols)
     t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
     t.setAlternatingRowColors(True)
-    t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+    t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+    t.horizontalHeader().setStretchLastSection(True)
     return t
+
+
+def _fill_alerts_table(table: QTableWidget, rows: list, fill_fn):
+    """Fill an alerts table with Fixed mode during fill then Interactive after."""
+    hdr = table.horizontalHeader()
+    hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+    table.setUpdatesEnabled(False)
+    table.setRowCount(len(rows))
+    for ri, r in enumerate(rows):
+        fill_fn(table, ri, r)
+    table.setUpdatesEnabled(True)
+    table.resizeColumnsToContents()
+    hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1749,7 +1804,7 @@ class DashboardTab(QWidget):
         self.week_table.setHorizontalHeaderLabels(
             ["Week", "Total SOs", "Fully Planned", "Partially Planned",
              "Not Planned", "Actual Started"])
-        self.week_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.week_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.week_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.week_table.setAlternatingRowColors(True)
         layout.addWidget(self.week_table, stretch=1)
@@ -1806,16 +1861,24 @@ class DashboardTab(QWidget):
         )
 
         week_keys = sorted(weeks.keys())
+        none_bg = QBrush(QColor("#ffcccc"))
+        total_bg = QBrush(QColor("#e8f0fe"))
+        hdr = self.week_table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.week_table.setUpdatesEnabled(False)
         self.week_table.setRowCount(len(week_keys))
         for ri, wk in enumerate(week_keys):
             w = weeks[wk]
             for ci, val in enumerate([wk, w["total"], w["full"], w["part"], w["none"], w["started"]]):
                 item = QTableWidgetItem(str(val))
                 if ci == 4 and val > 0:
-                    item.setBackground(QBrush(QColor("#ffcccc")))
+                    item.setBackground(none_bg)
                 elif ci == 1:
-                    item.setBackground(QBrush(QColor("#e8f0fe")))
+                    item.setBackground(total_bg)
                 self.week_table.setItem(ri, ci, item)
+        self.week_table.setUpdatesEnabled(True)
+        self.week_table.resizeColumnsToContents()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1873,7 +1936,7 @@ class LotSampleDialog(QDialog):
             "Sample Qty ✏", "Reject Qty ✏", "Net Qty", "Note ✏"
         ])
         self.table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.ResizeToContents)
+            QHeaderView.ResizeMode.Interactive)
         self.table.setAlternatingRowColors(True)
         layout.addWidget(self.table, stretch=1)
 
@@ -1899,6 +1962,9 @@ class LotSampleDialog(QDialog):
                        if f in (a.get("so_number", "") +
                                 a.get("entity_code", "")).lower()]
 
+        lot_hdr = self.table.horizontalHeader()
+        lot_hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.table.setUpdatesEnabled(False)
         self.table.setRowCount(len(actuals))
         self._actual_rows = actuals
 
@@ -1965,6 +2031,10 @@ class LotSampleDialog(QDialog):
                         item.flags() & ~Qt.ItemFlag.ItemIsEditable)
 
                 self.table.setItem(ri, ci, item)
+
+        self.table.setUpdatesEnabled(True)
+        self.table.resizeColumnsToContents()
+        lot_hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
 
         if short_count:
             self.summary_label.setText(
@@ -2106,7 +2176,7 @@ class InventoryTab(QWidget):
             "Production Date", "Expiry Date", "Status"
         ])
         self.inv_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.ResizeToContents)
+            QHeaderView.ResizeMode.Interactive)
         self.inv_table.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers)
         self.inv_table.setAlternatingRowColors(True)
@@ -2128,7 +2198,7 @@ class InventoryTab(QWidget):
             "LOT", "Qty Allocated", "Allocated At", "Note"
         ])
         self.alloc_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.ResizeToContents)
+            QHeaderView.ResizeMode.Interactive)
         self.alloc_table.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers)
         self.alloc_table.setAlternatingRowColors(True)
@@ -2163,7 +2233,6 @@ class InventoryTab(QWidget):
             f"Total available: {total_avail:,}  |  "
             f"Total remaining: {total_rem:,}")
 
-        self.inv_table.setRowCount(len(rows))
         STATUS_COLORS = {
             "AVAILABLE": QColor("#d4f0c0"),
             "ALLOCATED": QColor("#ffe0a0"),
@@ -2171,6 +2240,10 @@ class InventoryTab(QWidget):
             "EXPIRED":   QColor("#ffcccc"),
             "BLOCKED":   QColor("#f87171"),
         }
+        inv_hdr = self.inv_table.horizontalHeader()
+        inv_hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.inv_table.setUpdatesEnabled(False)
+        self.inv_table.setRowCount(len(rows))
         for ri, r in enumerate(rows):
             vals = [
                 r["inv_id"], r["sku_code"], r["lot_number"],
@@ -2191,6 +2264,9 @@ class InventoryTab(QWidget):
                 elif ci == 8:
                     item.setBackground(QBrush(bg))
                 self.inv_table.setItem(ri, ci, item)
+        self.inv_table.setUpdatesEnabled(True)
+        self.inv_table.resizeColumnsToContents()
+        inv_hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._inv_loading = False
         self._inv_status.setText("")
 
@@ -2278,6 +2354,9 @@ class InventoryTab(QWidget):
     def _load_allocations(self):
         from data.repositories import AllocationRepo
         rows = AllocationRepo.all_allocations()
+        alloc_hdr = self.alloc_table.horizontalHeader()
+        alloc_hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.alloc_table.setUpdatesEnabled(False)
         self.alloc_table.setRowCount(len(rows))
         for ri, r in enumerate(rows):
             for ci, v in enumerate([
@@ -2287,6 +2366,9 @@ class InventoryTab(QWidget):
                 r.get("note") or ""
             ]):
                 self.alloc_table.setItem(ri, ci, QTableWidgetItem(str(v)))
+        self.alloc_table.setUpdatesEnabled(True)
+        self.alloc_table.resizeColumnsToContents()
+        alloc_hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
 
     def _upload(self):
         from utils.excel_io import upload_inventory, parse_inventory_preview
@@ -2473,7 +2555,7 @@ class InventoryAllocationDialog(QDialog):
             "Lot Remaining", "Allocate Qty ✏", "Note ✏"
         ])
         self.sug_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.ResizeToContents)
+            QHeaderView.ResizeMode.Interactive)
         self.sug_table.setAlternatingRowColors(True)
         sug_l.addWidget(self.sug_table)
 
@@ -3108,7 +3190,7 @@ class MB51UploadDialog(QDialog):
         tbl.setColumnCount(len(cols))
         tbl.setHorizontalHeaderLabels(cols)
         tbl.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.ResizeToContents)
+            QHeaderView.ResizeMode.Interactive)
         tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         tbl.setAlternatingRowColors(True)
 
@@ -3136,6 +3218,7 @@ class MB51UploadDialog(QDialog):
                 if ci == 6 and not is_new:
                     item.setForeground(QBrush(QColor("#999999")))
                 tbl.setItem(ri, ci, item)
+        tbl.resizeColumnsToContents()
         gl.addWidget(tbl)
         vl.addWidget(grp, stretch=1)
 
@@ -3270,7 +3353,7 @@ class HCDemandDialog(QDialog):
         self.table.setHorizontalHeaderLabels([
             "Apply", "Date", "Shift",
             "Current CRP Total HC", "Recommended Total HC", "Diff"])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
 
@@ -3297,6 +3380,7 @@ class HCDemandDialog(QDialog):
                 if self.table.item(ri, ci):
                     self.table.item(ri, ci).setBackground(QBrush(row_bg))
 
+        self.table.resizeColumnsToContents()
         layout.addWidget(self.table, stretch=1)
 
         # ── Buttons ───────────────────────────────────────────────────────────
@@ -3356,7 +3440,7 @@ class _LOTBatchDialog(QDialog):
             ["SO", "SKU", "Line", "Qty", "LOT Number"])
         self._tbl.verticalHeader().setVisible(False)
         self._tbl.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.ResizeToContents)
+            QHeaderView.ResizeMode.Interactive)
         self._tbl.horizontalHeader().setSectionResizeMode(
             4, QHeaderView.ResizeMode.Stretch)
 
@@ -3447,7 +3531,7 @@ class PlanHistoryDialog(QDialog):
         self._tbl.verticalHeader().setVisible(False)
         self._tbl.setStyleSheet("QTableWidget { font-size:12px; }")
         hdr = self._tbl.horizontalHeader()
-        hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         hdr.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
         lay.addWidget(self._tbl)
 
@@ -3464,6 +3548,9 @@ class PlanHistoryDialog(QDialog):
         rows = (self._all_rows if f == "ALL"
                 else [r for r in self._all_rows if r["action"] == f])
 
+        _ph_hdr = self._tbl.horizontalHeader()
+        _ph_hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self._tbl.setUpdatesEnabled(False)
         self._tbl.setRowCount(len(rows))
         for i, r in enumerate(rows):
             old = self._parse(r.get("old_value"))
@@ -3491,6 +3578,11 @@ class PlanHistoryDialog(QDialog):
                 if bg:
                     item.setBackground(QBrush(bg))
                 self._tbl.setItem(i, j, item)
+
+        self._tbl.setUpdatesEnabled(True)
+        self._tbl.resizeColumnsToContents()
+        _ph_hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        _ph_hdr.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
 
         self._count_lbl.setText(
             f"{len(rows)} record(s) shown  (total {len(self._all_rows)})")
@@ -3639,7 +3731,7 @@ class ImpactReportTab(QWidget):
         self._table.setAlternatingRowColors(False)
         self._table.verticalHeader().setVisible(False)
         hh = self._table.horizontalHeader()
-        hh.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self._table.itemSelectionChanged.connect(self._on_row_selected)
         splitter.addWidget(self._table)
@@ -3663,7 +3755,7 @@ class ImpactReportTab(QWidget):
         self._det_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._det_table.verticalHeader().setVisible(False)
         dhh = self._det_table.horizontalHeader()
-        dhh.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        dhh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         dhh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         dl.addWidget(self._det_table)
 
@@ -3768,6 +3860,9 @@ class ImpactReportTab(QWidget):
     # ── Table rendering ───────────────────────────────────────────────────
 
     def _render_table(self, rows: List[Dict]):
+        hdr = self._table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self._table.setUpdatesEnabled(False)
         self._table.setRowCount(len(rows))
         self._table.setProperty("_rows", rows)
 
@@ -3804,6 +3899,9 @@ class ImpactReportTab(QWidget):
                     item.setForeground(QBrush(QColor("#999")))
                 self._table.setItem(ri, ci, item)
 
+        self._table.setUpdatesEnabled(True)
+        self._table.resizeColumnsToContents()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._footer_lbl.setText(f"{len(rows)} SO(s) shown")
         self._detail.setVisible(False)
 
@@ -3973,7 +4071,7 @@ class ScenarioTab(QWidget):
         lv.addWidget(self._section_label("BOTTLENECKS"))
         self._bn_tbl = QTableWidget(0, 4)
         self._bn_tbl.setHorizontalHeaderLabels(["Room", "Process", "Unmet Qty", "Rec. HC"])
-        self._bn_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self._bn_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._bn_tbl.verticalHeader().setVisible(False)
         self._bn_tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._bn_tbl.setFixedHeight(140)
@@ -4014,7 +4112,7 @@ class ScenarioTab(QWidget):
         self._cmp_tbl = QTableWidget(0, 5)
         self._cmp_tbl.setHorizontalHeaderLabels(
             ["HC Added", "LATE Before", "LATE After", "Resolved", "Resolution Rate"])
-        self._cmp_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self._cmp_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._cmp_tbl.verticalHeader().setVisible(False)
         self._cmp_tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._cmp_tbl.setAlternatingRowColors(True)
@@ -4323,7 +4421,7 @@ class LaborUtilizationTab(QWidget):
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.ResizeToContents)
+            QHeaderView.ResizeMode.Interactive)
         self._table.horizontalHeader().setMinimumSectionSize(70)
         self._table.verticalHeader().setVisible(False)
         self._table.setAlternatingRowColors(False)
@@ -4400,6 +4498,9 @@ class LaborUtilizationTab(QWidget):
         n_cols = 1 + len(col_keys)
         n_rows = len(flat_rows) + N_FOOTER
 
+        hdr = self._table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self._table.setUpdatesEnabled(False)
         self._table.setRowCount(n_rows)
         self._table.setColumnCount(n_cols)
 
@@ -4494,7 +4595,9 @@ class LaborUtilizationTab(QWidget):
                     r, ci + 1,
                     _cell(txt, font=f_bold, bg=bg, fg=fg, selectable=False))
 
+        self._table.setUpdatesEnabled(True)
         self._table.resizeColumnsToContents()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         # Freeze first column width after resize
         self._table.setColumnWidth(0, max(self._table.columnWidth(0), 180))
 
