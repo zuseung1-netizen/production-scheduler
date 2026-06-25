@@ -17,8 +17,9 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QComboBox, QLineEdit, QFileDialog,
     QMessageBox, QDialog, QDialogButtonBox, QTextEdit, QSpinBox,
     QDateEdit, QCheckBox, QGroupBox, QSplitter, QAbstractItemView,
-    QHeaderView, QTabWidget, QMenu
+    QHeaderView, QTabWidget, QMenu, QApplication, QFormLayout
 )
+from PyQt6.QtGui import QFont
 from PyQt6.QtCore import Qt, QDate
 from PyQt6.QtGui import QColor, QBrush, QCursor
 
@@ -91,6 +92,16 @@ class SOTab(QWidget):
         btn_bulk_alloc.clicked.connect(self._open_bulk_allocation)
         fbar.addWidget(btn_bulk_alloc)
 
+        self._btn_atp = QPushButton("🔍 Check ATP")
+        self._btn_atp.setStyleSheet(
+            "background:#7C3AED; color:white; font-weight:bold; padding:5px 12px;")
+        self._btn_atp.setToolTip(
+            "Select an SO row, then click to check if pull-in is feasible\n"
+            "without missing any existing committed due dates.")
+        self._btn_atp.setEnabled(False)
+        self._btn_atp.clicked.connect(self._check_atp)
+        fbar.addWidget(self._btn_atp)
+
         self._btn_edit = QPushButton("✏ Edit Mode")
         self._btn_edit.clicked.connect(self._toggle_edit_mode)
         self._btn_save = QPushButton("💾 Save Changes")
@@ -119,6 +130,7 @@ class SOTab(QWidget):
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._context_menu)
         self.table.itemChanged.connect(self._on_cell_changed)
+        self.table.itemSelectionChanged.connect(self._on_selection_changed)
 
         cols = ["SO Number", "SKU Code", "Line", "Customer", "Qty", "Planned Qty",
                 "Actual Qty", "📦 Inventory", "Due Date (Req)", "Committed Due", "Priority", "Status",
@@ -279,6 +291,8 @@ class SOTab(QWidget):
             menu.addAction("📅 Set Start-No-Earlier", lambda: self._set_start_date(so_no, sku, li))
             menu.addSeparator()
             menu.addAction("📦 Allocate Inventory", lambda: self._open_inv_allocation(so_no, sku, li))
+            if status == "OPEN":
+                menu.addAction("🔍 Check ATP (Pull-in)", lambda: self._check_atp())
             menu.addSeparator()
             act_del = menu.addAction("🗑 Delete SO")
             act_del.triggered.connect(lambda: self._delete_so(so_no, sku, li))
@@ -509,6 +523,25 @@ class SOTab(QWidget):
             self.refresh()
             if self.main_window:
                 self.main_window.notify(f"Inventory allocated: {so_no}/{sku}/{li}")
+
+    def _on_selection_changed(self):
+        rows = {idx.row() for idx in self.table.selectedIndexes()}
+        self._btn_atp.setEnabled(len(rows) == 1)
+
+    def _check_atp(self):
+        rows = {idx.row() for idx in self.table.selectedIndexes()}
+        if len(rows) != 1:
+            return
+        row = next(iter(rows))
+        so_no = self.table.item(row, 0).text()
+        sku   = self.table.item(row, 1).text()
+        li    = self.table.item(row, 2).text()
+        so = SORepo.get(so_no, sku, li)
+        if not so:
+            return
+        dlg = CheckATPDialog(so, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.refresh()
 
     def _open_bulk_allocation(self):
         dlg = BulkAllocationDialog(self)
@@ -1790,4 +1823,259 @@ class IOEditDialog(QDialog):
             "note":       self._note_edit.text().strip() or None,
             "order_type": "INTERNAL",
         })
+        self.accept()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Check ATP Dialog
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class CheckATPDialog(QDialog):
+    """
+    ATP (Available to Promise) check for a pull-in request.
+
+    Flow:
+      1. User picks a target (earlier) due date.
+      2. simulate_single_pull_forward(allow_push=True) runs.
+      3. Feasible → show displaced SOs + new completion dates.
+         Not feasible → show which SOs are blocking.
+      4. Confirm → apply_single_pull_forward + update committed_due_date.
+    """
+
+    _STATUS_BG = {
+        "ON TIME":       QColor("#e8f5e9"),
+        "LATE":          QColor("#ffebee"),
+        "CANNOT REPLAN": QColor("#ffebee"),
+    }
+    _STATUS_FG = {
+        "ON TIME":       QColor("#2e7d32"),
+        "LATE":          QColor("#c62828"),
+        "CANNOT REPLAN": QColor("#c62828"),
+    }
+
+    def __init__(self, so: Dict, parent=None):
+        super().__init__(parent)
+        self._so   = so
+        self._sim  = None   # last simulation result
+        self.setWindowTitle(f"Check ATP — {so['so_number']} / {so['sku_code']}")
+        self.resize(1000, 580)
+        self._build_ui()
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self)
+
+        # ── Header ────────────────────────────────────────────────────────────
+        so = self._so
+        rdue = so.get("due_date", "")
+        cdue = so.get("committed_due_date") or ""
+        hdr = QLabel(
+            f"<b>{so['so_number']}</b> &nbsp;|&nbsp; {so['sku_code']} / {so['line_item']}"
+            f" &nbsp;|&nbsp; Customer: <b>{so.get('customer_name') or '—'}</b><br>"
+            f"Requested Due: <b>{rdue}</b>"
+            + (f" &nbsp;|&nbsp; Committed Due: <b>{cdue}</b>" if cdue else "")
+        )
+        hdr.setStyleSheet(
+            "background:#1e3a5f; color:white; padding:8px 10px;"
+            " border-radius:4px; font-size:12px;")
+        hdr.setWordWrap(True)
+        lay.addWidget(hdr)
+
+        # ── Target date row ───────────────────────────────────────────────────
+        tgt_row = QHBoxLayout()
+        tgt_row.addWidget(QLabel("Pull-in to (new due date):"))
+        self._tgt_edit = QDateEdit()
+        self._tgt_edit.setDisplayFormat("yyyy-MM-dd")
+        self._tgt_edit.setCalendarPopup(True)
+        self._tgt_edit.calendarWidget().setMinimumWidth(265)
+        ref = cdue if cdue else rdue
+        self._tgt_edit.setDate(
+            QDate.fromString(ref, "yyyy-MM-dd") if ref else QDate.currentDate())
+        tgt_row.addWidget(self._tgt_edit)
+
+        self._btn_sim = QPushButton("🔍 Simulate")
+        self._btn_sim.setStyleSheet(
+            "background:#2563EB; color:white; font-weight:bold;"
+            " border:none; border-radius:5px; padding:6px 18px;")
+        self._btn_sim.clicked.connect(self._run_simulate)
+        tgt_row.addWidget(self._btn_sim)
+        tgt_row.addStretch()
+        lay.addLayout(tgt_row)
+
+        # ── Result banner ─────────────────────────────────────────────────────
+        self._banner = QLabel("")
+        self._banner.setWordWrap(True)
+        self._banner.setStyleSheet("padding:6px; border-radius:4px; font-size:12px;")
+        self._banner.hide()
+        lay.addWidget(self._banner)
+
+        # ── Displaced SOs table ───────────────────────────────────────────────
+        self._tbl = QTableWidget(0, 9)
+        self._tbl.setHorizontalHeaderLabels([
+            "SO", "SKU", "Line", "Customer",
+            "Requested Due", "Committed Due",
+            "Current Completion", "New Completion", "Status After"])
+        self._tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._tbl.setAlternatingRowColors(True)
+        hdr = self._tbl.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self._tbl.hide()
+        lay.addWidget(self._tbl)
+
+        # ── Bottom buttons ────────────────────────────────────────────────────
+        bbar = QHBoxLayout()
+        bbar.addStretch()
+
+        self._btn_apply = QPushButton("✅ Confirm & Apply Pull-in")
+        self._btn_apply.setStyleSheet(
+            "background:#16A34A; color:white; font-weight:bold;"
+            " border:none; border-radius:5px; padding:6px 18px;")
+        self._btn_apply.setEnabled(False)
+        self._btn_apply.clicked.connect(self._apply)
+        bbar.addWidget(self._btn_apply)
+
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+        bbar.addWidget(btn_cancel)
+        lay.addLayout(bbar)
+
+    def _run_simulate(self):
+        target_date = self._tgt_edit.date().toString("yyyy-MM-dd")
+        so = self._so
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            from core.scheduler import scheduler
+            sim = scheduler.simulate_single_pull_forward(
+                so["so_number"], so["sku_code"], so["line_item"],
+                target_date, allow_push=True)
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, "Error", str(e))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        self._sim = sim
+        self._show_result(sim, target_date)
+
+    def _show_result(self, sim: Dict, target_date: str):
+        self._banner.show()
+        self._btn_apply.setEnabled(False)
+
+        if not sim["feasible"]:
+            self._banner.setText(
+                f"Not feasible: {sim.get('error', 'Cannot schedule to target date.')}")
+            self._banner.setStyleSheet(
+                "background:#ffebee; color:#c62828; padding:8px;"
+                " border:1px solid #ef9a9a; border-radius:4px; font-size:12px;")
+            self._tbl.hide()
+            return
+
+        # Feasible
+        final = sim.get("final_date") or target_date
+        displaced = sim.get("displaced", [])
+        n_disp = len(displaced)
+
+        if n_disp == 0:
+            msg = (f"ATP PASS — No existing orders displaced.\n"
+                   f"Estimated completion: {final}")
+        else:
+            on_time = sum(1 for d in displaced if d["status_after"] == "ON TIME")
+            msg = (f"ATP PASS — {n_disp} order(s) will be re-planned; "
+                   f"{on_time}/{n_disp} remain on time.\n"
+                   f"Estimated completion: {final}")
+
+        self._banner.setText(msg)
+        self._banner.setStyleSheet(
+            "background:#e8f5e9; color:#1b5e20; padding:8px;"
+            " border:1px solid #a5d6a7; border-radius:4px; font-size:12px;")
+
+        # Fill displaced table
+        self._tbl.setRowCount(len(displaced))
+        for ri, d in enumerate(displaced):
+            after = d["status_after"]
+            vals = [
+                d["so_number"], d["sku_code"], d["line_item"],
+                d["customer_name"],
+                d["due_date"], d["committed_due_date"],
+                d["current_completion"], d["new_completion"], after,
+            ]
+            for ci, v in enumerate(vals):
+                it = QTableWidgetItem(str(v or ""))
+                it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if ci == 8:
+                    it.setBackground(QBrush(
+                        self._STATUS_BG.get(after, QColor("white"))))
+                    it.setForeground(QBrush(
+                        self._STATUS_FG.get(after, QColor("#1e293b"))))
+                    it.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+                self._tbl.setItem(ri, ci, it)
+
+        if displaced:
+            self._tbl.show()
+        else:
+            self._tbl.hide()
+
+        self._btn_apply.setEnabled(True)
+
+    def _apply(self):
+        if not self._sim or not self._sim["feasible"]:
+            return
+
+        target_date = self._tgt_edit.date().toString("yyyy-MM-dd")
+        so = self._so
+        displaced = self._sim.get("displaced", [])
+
+        # Confirm if there are displaced SOs
+        if displaced:
+            n = len(displaced)
+            ans = QMessageBox.question(
+                self, "Confirm Pull-in",
+                f"Apply pull-in to {target_date}?\n\n"
+                f"{n} order(s) will be re-planned within their due dates.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+
+        # Snapshot before applying
+        try:
+            from data.repositories import PlanSnapshotRepo
+            from datetime import datetime as _dt
+            PlanSnapshotRepo.save(
+                f"ATP: Pull-in {so['so_number']}/{so['sku_code']} "
+                f"-> {target_date} {_dt.now().strftime('%H:%M')}")
+        except Exception:
+            pass
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            from core.scheduler import scheduler
+            result = scheduler.apply_single_pull_forward(
+                so["so_number"], so["sku_code"], so["line_item"],
+                target_date, allow_push=True, displaced=displaced)
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, "Error", str(e))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if not result.get("success"):
+            QMessageBox.warning(self, "Failed",
+                result.get("error", "Apply failed."))
+            return
+
+        # Update committed_due_date on the SO
+        so_data = dict(so)
+        so_data["committed_due_date"] = target_date
+        SORepo.upsert(so_data)
+
+        QMessageBox.information(
+            self, "Pull-in Applied",
+            f"Pull-in to {target_date} applied.\n"
+            f"Plans created: {result.get('planned', 0)}\n"
+            f"Orders re-planned: {result.get('displaced_count', 0)}\n\n"
+            f"Committed due date updated to {target_date}.")
         self.accept()
