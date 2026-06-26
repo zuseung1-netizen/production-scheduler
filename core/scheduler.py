@@ -139,6 +139,7 @@ class Scheduler:
 
     def auto_plan(self, date_from: str, date_to: str,
                   progress_cb=None) -> Dict:
+        crp_manager.refresh()   # always reload Excel before planning so stale in-memory HC is never used
         self._reload_masters()
 
         # Frozen zone: plans within frozen_days of today are never touched
