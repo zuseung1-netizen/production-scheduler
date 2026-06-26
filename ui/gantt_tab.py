@@ -834,6 +834,7 @@ class GanttCanvas(QWidget):
 
         self._plans         : List[Dict] = []
         self._expanded_plans: List[Dict] = []   # mat plans split per SO (or == _plans)
+        self._pid_to_plan   : Dict[int, Dict] = {}  # plan_id → plan dict (fast lookup)
         self._sos      : Dict       = {}
         self._skus     : Dict       = {}
         self._shifts   : List[Dict] = []
@@ -882,7 +883,11 @@ class GanttCanvas(QWidget):
         # Raw LABOR data for tooltip: date_str -> (alloc_hc, total_hc)
         self._hc_alloc_by_date: Dict[str, Tuple[float, float]] = {}
         # plan_id -> (slot_index, total_in_slot) for vertical stacking
-        self._plan_layout : Dict[int, Tuple[int, int]] = {}
+        self._plan_layout    : Dict[int, Tuple[int, int]] = {}
+        # Pre-built rects (avoid datetime.strptime in paint loop)
+        self._prebuilt_rects : Dict[int, QRect]           = {}
+        # (col, row_idx) → [plan_ids] for O(1) hover hit-testing
+        self._spatial_index  : Dict[Tuple[int,int], List[int]] = {}
         # O(1) row lookup built in _build_rows()
         self._row_index   : Dict[str, int] = {}
         # Calendar unavailability maps
@@ -1148,20 +1153,29 @@ class GanttCanvas(QWidget):
         per-row heights based on the max number of plans in any slot of that row.
         Uses the actual rendered column index as the slot key so that day-view
         (shift_no ignored) and shift-view produce correct non-overlapping stacks.
+        Also pre-builds _prebuilt_rects (eliminates datetime.strptime per repaint)
+        and _spatial_index (O(1) plan hit-testing for mouse hover).
         """
         from collections import defaultdict
-        # slot key: (col_index, row_key) — col_index already accounts for
-        # shift_view vs day-view, so plans that render in the same visual cell
-        # are grouped together regardless of their shift_no.
+
+        # ── Pass 1: compute (col, row_key) for every plan ──────────────────────
+        # Store col per plan_id so we reuse it for rect pre-build below.
+        # Also rebuild pid_to_plan lookup (used by _plan_at fast path).
+        _pid_col: Dict[int, Optional[int]] = {}
+        _pid_rk : Dict[int, str]           = {}
         slot_plans: Dict[Tuple, List[int]] = defaultdict(list)
+        self._pid_to_plan = {}
         for p in self._display_plans:
             rk  = self._plan_row_key(p)
             col = self._date_to_col(p["plan_date"], p["shift_no"])
+            _pid_col[p["plan_id"]] = col
+            _pid_rk [p["plan_id"]] = rk
+            self._pid_to_plan[p["plan_id"]] = p
             if col is None:
                 continue
             slot_plans[(col, rk)].append(p["plan_id"])
 
-        # Assign vertical index within each slot — stack_order ASC, then plan_id
+        # ── Pass 2: stack order within each slot ───────────────────────────────
         self._plan_layout = {}
         pid_to_so = {p["plan_id"]: p.get("stack_order", 0) for p in self._display_plans}
         for sk, pids in slot_plans.items():
@@ -1169,7 +1183,7 @@ class GanttCanvas(QWidget):
             for i, pid in enumerate(pids_sorted):
                 self._plan_layout[pid] = (i, len(pids_sorted))
 
-        # Row heights: max cards-per-slot in each row × CARD_H
+        # ── Pass 3: row heights ────────────────────────────────────────────────
         row_max: Dict[str, int] = {}
         for (_, rk), pids in slot_plans.items():
             row_max[rk] = max(row_max.get(rk, 1), len(pids))
@@ -1186,6 +1200,29 @@ class GanttCanvas(QWidget):
             self._row_heights.append(h)
             y += h
         self._total_body_h = y - self._body_top()
+
+        # ── Pass 4: pre-build QRects ───────────────────────────────────────────
+        # Avoids datetime.strptime + dict lookups inside every paintEvent call.
+        col_w = self._col_w()
+        self._prebuilt_rects: Dict[int, QRect] = {}
+        # Spatial index: (col, row_idx) → [plan_id, ...] for O(1) hover detection
+        self._spatial_index: Dict[Tuple[int, int], List[int]] = defaultdict(list)
+        for p in self._display_plans:
+            pid = p["plan_id"]
+            col = _pid_col.get(pid)
+            if col is None:
+                continue
+            rk  = _pid_rk.get(pid, "")
+            ri  = self._row_index.get(rk)
+            if ri is None or ri >= len(self._row_y_list):
+                continue
+            slot_idx = self._plan_layout.get(pid, (0, 1))[0]
+            x = col * col_w + 1
+            w = col_w - 2
+            y_pos = self._row_y_list[ri] + slot_idx * CARD_H + 2
+            rect = QRect(x, y_pos, w, CARD_H - 4)
+            self._prebuilt_rects[pid] = rect
+            self._spatial_index[(col, ri)].append(pid)
 
     def _build_hc_map(self):
         """Build headcount utilisation map: (date_str, shift_no) -> (alloc, crp_total).
@@ -1248,10 +1285,15 @@ class GanttCanvas(QWidget):
         return self._body_top() + self._total_body_h + 20
 
     def _row_at_y(self, y: int) -> int:
-        """Return the row index at pixel y, or -1 if outside all rows."""
-        for ri, (ry, rh) in enumerate(zip(self._row_y_list, self._row_heights)):
-            if ry <= y < ry + rh:
-                return ri
+        """Return the row index at pixel y, or -1 if outside all rows.
+        Uses bisect for O(log N) lookup instead of O(N) linear scan.
+        """
+        import bisect
+        idx = bisect.bisect_right(self._row_y_list, y) - 1
+        if idx < 0 or idx >= len(self._row_heights):
+            return -1
+        if y < self._row_y_list[idx] + self._row_heights[idx]:
+            return idx
         return -1
 
     def _update_size(self):
@@ -1297,6 +1339,11 @@ class GanttCanvas(QWidget):
         return sorted(rows)
 
     def _plan_rect(self, plan: Dict) -> Optional[QRect]:
+        # Fast path: use pre-built rect (avoids datetime.strptime per call)
+        cached = self._prebuilt_rects.get(plan["plan_id"])
+        if cached is not None:
+            return cached
+        # Fallback for plans added after the last _build_layout_and_heights call
         col = self._date_to_col(plan["plan_date"], plan["shift_no"])
         row = self._row_for_plan(plan)
         if col is None or row is None or row >= len(self._row_y_list):
@@ -2267,6 +2314,17 @@ class GanttCanvas(QWidget):
         self.update()
 
     def _plan_at(self, pos: QPoint) -> Optional[Dict]:
+        # Fast path: spatial index → only plans in the cell under cursor.
+        col_w = self._col_w()
+        if col_w > 0 and self._spatial_index:
+            col = pos.x() // col_w
+            ri  = self._row_at_y(pos.y())
+            if ri >= 0:
+                for pid in self._spatial_index.get((col, ri), []):
+                    rect = self._prebuilt_rects.get(pid) or self._cell_map.get(pid)
+                    if rect and rect.contains(pos):
+                        return self._pid_to_plan.get(pid)
+        # Fallback: linear scan (before first load_data or after live plan move)
         for plan in self._display_plans:
             rect = self._cell_map.get(plan["plan_id"])
             if rect and rect.contains(pos):
