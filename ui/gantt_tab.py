@@ -23,10 +23,10 @@ from PyQt6.QtWidgets import (
     QLineEdit, QButtonGroup, QSizePolicy, QSplitter, QGroupBox,
     QListWidget, QListWidgetItem, QStyle
 )
-from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, QPointF, pyqtSignal, QTimer, QThread, QByteArray, QSize
+from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, QPointF, pyqtSignal, QTimer, QThread, QByteArray, QSize, QMimeData
 from PyQt6.QtGui import (
     QPainter, QPainterPath, QColor, QFont, QFontMetrics, QPen, QBrush, QCursor,
-    QPixmap, QIcon, QShortcut, QKeySequence
+    QPixmap, QIcon, QShortcut, QKeySequence, QDrag
 )
 from PyQt6.QtSvg import QSvgRenderer
 
@@ -139,6 +139,7 @@ HEADER_H   = 40   # date-header height (mockup: 40px)
 UTIL_ROW_H = 20
 UTIL_H     = UTIL_ROW_H * 2   # cap-row height: 2 rows × 20px = 40px
 DIM_COL_W  = 124  # Y-label width per dimension (mockup: 124px)
+_PANEL_DRAG_MIME = "application/x-gantt-plan-id"
 SKU_COL_W  = 72
 Y_LABEL_W  = DIM_COL_W
 
@@ -808,9 +809,10 @@ class GanttYLabelWidget(QWidget):
 # ─── Gantt Canvas ─────────────────────────────────────────────────────────────
 
 class GanttCanvas(QWidget):
-    planMoved        = pyqtSignal(int, str, int, str)
-    planSelected     = pyqtSignal(dict)
-    selectionChanged = pyqtSignal(list)
+    planMoved           = pyqtSignal(int, str, int, str)
+    planSelected        = pyqtSignal(dict)
+    selectionChanged    = pyqtSignal(list)
+    summaryCardClicked  = pyqtSignal(dict)
 
     # Legacy mode constants kept for any external references
     Y_MODE_ROOM = "room"
@@ -869,6 +871,10 @@ class GanttCanvas(QWidget):
         self._summarize          : bool            = True
         self._summarized_plans   : List[Dict]      = []   # merged plan dicts
         self._summary_groups     : Dict[int, List[int]] = {}  # rep_id → member_ids
+
+        # Panel drop highlight rect (set during dragMoveEvent from SummaryDetailPanel)
+        self._panel_drop_rect    : Optional[QRect] = None
+        self.setAcceptDrops(True)
 
         # Active-filter result: subset of _display_plans after search/status/final_only
         self._filtered_plans     : List[Dict]      = []
@@ -1469,6 +1475,13 @@ class GanttCanvas(QWidget):
 
     def _draw_hover_overlay(self, p: QPainter):
         """Draw hover highlight on top of the cached pixmap (dynamic overlay)."""
+        # Panel drop target highlight
+        if self._panel_drop_rect:
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            p.setPen(QPen(QColor(37, 99, 235, 180), 2, Qt.PenStyle.DashLine))
+            p.setBrush(QBrush(QColor(37, 99, 235, 30)))
+            p.drawRect(self._panel_drop_rect)
+        # Existing hover card outline
         if not self._hover_plan_id:
             return
         rect = self._prebuilt_rects.get(self._hover_plan_id)
@@ -2404,8 +2417,107 @@ class GanttCanvas(QWidget):
                             QMessageBox.information(
                                 self, "Locked",
                                 "This plan is locked. Unlock it first.")
+            else:
+                # Click without drag on a merged summary card → open detail panel
+                if self._drag_plan_id:
+                    plan = self._pid_to_plan.get(self._drag_plan_id)
+                    if plan and len(plan.get("_merged_ids", [])) > 1:
+                        self.summaryCardClicked.emit(plan)
             self._reset_drag_state()
             self.update()
+
+    # ── Panel → Canvas drag-and-drop ─────────────────────────────────────────
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasFormat(_PANEL_DRAG_MIME):
+            e.acceptProposedAction()
+        else:
+            e.ignore()
+
+    def dragMoveEvent(self, e):
+        if not e.mimeData().hasFormat(_PANEL_DRAG_MIME):
+            e.ignore()
+            return
+        e.acceptProposedAction()
+        pos = e.position().toPoint()
+        col = pos.x() // self._col_w()
+        ri  = self._row_at_y(pos.y())
+        cw  = self._col_w()
+        if 0 <= col < self._col_count() and 0 <= ri < len(self._row_y_list):
+            self._panel_drop_rect = QRect(
+                col * cw, self._row_y_list[ri], cw, self._row_heights[ri])
+        else:
+            self._panel_drop_rect = None
+        self.update()
+
+    def dragLeaveEvent(self, e):
+        self._panel_drop_rect = None
+        self.update()
+
+    def dropEvent(self, e):
+        if not e.mimeData().hasFormat(_PANEL_DRAG_MIME):
+            e.ignore()
+            return
+        self._panel_drop_rect = None
+        self.update()
+        try:
+            plan_id = int(bytes(e.mimeData().data(_PANEL_DRAG_MIME)).decode())
+        except (ValueError, Exception):
+            e.ignore()
+            return
+        plan = next((p for p in self._plans if p["plan_id"] == plan_id), None)
+        if not plan:
+            e.ignore()
+            return
+        if plan.get("is_locked"):
+            QMessageBox.information(self, "Locked", "This plan is locked. Unlock it first.")
+            e.ignore()
+            return
+        pos = e.position().toPoint()
+        col = pos.x() // self._col_w()
+        ri  = self._row_at_y(pos.y())
+        if not (0 <= col < self._col_count() and 0 <= ri < len(self._rows)):
+            e.ignore()
+            return
+        new_date, new_shift = self._col_to_date_shift(col)
+        new_room = plan["room_code"]
+        if "Room" in self.y_dims and 0 <= ri < len(self._rows):
+            parts = self._rows[ri].split("|")
+            room_idx = self.y_dims.index("Room")
+            if room_idx < len(parts):
+                new_room = parts[room_idx]
+        date_changed = (new_date.strftime("%Y-%m-%d") != plan["plan_date"]
+                        or new_shift != plan["shift_no"])
+        room_changed = (new_room != plan["room_code"])
+        if not date_changed and not room_changed:
+            e.acceptProposedAction()
+            return
+        if room_changed and (new_room, plan["process_name"]) not in self._room_proc_set:
+            QMessageBox.warning(self, "Invalid Move",
+                                f"Room {new_room} does not support {plan['process_name']}.")
+            e.ignore()
+            return
+        reason, ok = QInputDialog.getText(
+            self, "Move Reason",
+            f"Reason for moving {plan.get('so_number', f'plan #{plan_id}')}?")
+        if not ok:
+            e.ignore()
+            return
+        fields: Dict = {"plan_date": new_date.strftime("%Y-%m-%d"), "shift_no": new_shift}
+        if room_changed:
+            fields["room_code"] = new_room
+        if self.parent_tab:
+            self.parent_tab.push_undo({
+                "type":     "move",
+                "label":    f"Move Plan #{plan_id} (panel drag)",
+                "plan_id":  plan_id,
+                "plan_date": plan["plan_date"],
+                "shift_no":  plan["shift_no"],
+                "room_code": plan["room_code"],
+            })
+        PlanRepo.update(plan_id, fields, reason=reason)
+        self.planMoved.emit(plan_id, plan["plan_date"], plan["shift_no"], reason)
+        e.acceptProposedAction()
 
     def _do_split_drop(self, plan: Dict, new_date, new_shift: int, new_room: str):
         orig_qty = plan["qty_planned"]
@@ -2765,6 +2877,303 @@ class PriorityConflictDialog(QDialog):
             SORepo.upsert(updated)
 
 
+# ─── Summary Detail Panel ────────────────────────────────────────────────────
+
+
+class SoPlanRow(QWidget):
+    """One draggable row in SummaryDetailPanel."""
+
+    def __init__(self, plan: Dict, so_rec, parent=None):
+        super().__init__(parent)
+        self._plan = plan
+        self._drag_start = None
+        self.setFixedHeight(44)
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(14, 6, 14, 6)
+        lay.setSpacing(6)
+
+        handle = QLabel("⠿")
+        handle.setFixedWidth(16)
+        handle.setStyleSheet("color:#cbd5e1; font-size:14px;")
+        lay.addWidget(handle)
+
+        info_col = QVBoxLayout()
+        info_col.setSpacing(1)
+        so_num = plan.get("so_number", "—")
+        status = (so_rec or {}).get("status", "")
+        dot_color = "#22c55e" if status == "OPEN" else "#f59e0b"
+        lbl_so = QLabel(f"● {so_num}")
+        lbl_so.setStyleSheet(f"font-size:10px; font-weight:700; color:{dot_color};")
+        cust = (so_rec or {}).get("customer_name", "") or ""
+        lbl_cust = QLabel(cust if cust else "—")
+        lbl_cust.setStyleSheet("font-size:8px; color:#94a3b8;")
+        info_col.addWidget(lbl_so)
+        info_col.addWidget(lbl_cust)
+        lay.addLayout(info_col, stretch=1)
+
+        lbl_qty = QLabel(str(plan.get("qty_planned", 0)))
+        lbl_qty.setFixedWidth(52)
+        lbl_qty.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        lbl_qty.setStyleSheet("font-size:10px; font-weight:600; color:#334155;")
+        lay.addWidget(lbl_qty)
+
+        lbl_line = QLabel(f"L{plan.get('line_item', '?')}")
+        lbl_line.setFixedWidth(34)
+        lbl_line.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_line.setStyleSheet("font-size:10px; color:#64748b;")
+        lay.addWidget(lbl_line)
+
+        badge_w = QWidget()
+        badge_w.setFixedWidth(40)
+        b_lay = QHBoxLayout(badge_w)
+        b_lay.setContentsMargins(0, 0, 0, 0)
+        b_lay.setSpacing(2)
+        if plan.get("is_locked"):
+            bl = QLabel("🔒")
+            bl.setFixedSize(18, 18)
+            bl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            bl.setStyleSheet("background:#f1f5f9; border-radius:3px; font-size:9px;")
+            bl.setToolTip("Locked")
+            b_lay.addWidget(bl)
+        if plan.get("is_final_seq"):
+            bf = QLabel("★")
+            bf.setFixedSize(18, 18)
+            bf.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            bf.setStyleSheet("background:#fed7aa; color:#c2410c; border-radius:3px; font-size:9px; font-weight:700;")
+            bf.setToolTip("Final process")
+            b_lay.addWidget(bf)
+        b_lay.addStretch()
+        lay.addWidget(badge_w)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = e.pos()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if not (e.buttons() & Qt.MouseButton.LeftButton) or self._drag_start is None:
+            super().mouseMoveEvent(e)
+            return
+        if (e.pos() - self._drag_start).manhattanLength() < 8:
+            super().mouseMoveEvent(e)
+            return
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(_PANEL_DRAG_MIME, str(self._plan["plan_id"]).encode())
+        drag.setMimeData(mime)
+        pm = QPixmap(200, 28)
+        pm.fill(QColor(239, 246, 255, 220))
+        pp = QPainter(pm)
+        pp.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pp.setPen(QPen(QColor(37, 99, 235), 1.5))
+        pp.setBrush(QBrush(QColor(239, 246, 255, 200)))
+        pp.drawRoundedRect(pm.rect().adjusted(1, 1, -1, -1), 5, 5)
+        pp.setPen(QPen(QColor(37, 99, 235)))
+        pp.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        pp.drawText(pm.rect().adjusted(8, 0, -8, 0), Qt.AlignmentFlag.AlignVCenter,
+                    f"⠿  {self._plan.get('so_number', '')}  ·  {self._plan.get('qty_planned', 0)}")
+        pp.end()
+        drag.setPixmap(pm)
+        drag.setHotSpot(QPoint(100, 14))
+        drag.exec(Qt.DropAction.MoveAction)
+        self._drag_start = None
+
+    def mouseReleaseEvent(self, e):
+        self._drag_start = None
+        super().mouseReleaseEvent(e)
+
+
+class SummaryDetailPanel(QWidget):
+    """Right-side panel showing individual plans merged in a summary card."""
+
+    closed = pyqtSignal()
+
+    def __init__(self, canvas: "GanttCanvas", parent=None):
+        super().__init__(parent)
+        self._canvas = canvas
+        self._current_plan: Optional[Dict] = None
+        self.setFixedWidth(340)
+        self.setStyleSheet("background:#fff; border-left:1px solid #DDE3ED;")
+        self.hide()
+        self._build_ui()
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        # Header
+        self._header_w = QWidget()
+        self._header_w.setFixedHeight(76)
+        self._header_w.setStyleSheet(
+            "background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #1e3a6e,stop:1 #2563EB);")
+        h_lay = QVBoxLayout(self._header_w)
+        h_lay.setContentsMargins(14, 10, 38, 10)
+        h_lay.setSpacing(2)
+        self._lbl_room = QLabel("")
+        self._lbl_room.setStyleSheet("color:rgba(255,255,255,0.8); font-size:9px; font-weight:700; letter-spacing:0.5px;")
+        self._lbl_sku = QLabel("")
+        self._lbl_sku.setStyleSheet("color:#fff; font-size:14px; font-weight:700;")
+        self._lbl_meta = QLabel("")
+        self._lbl_meta.setStyleSheet("color:rgba(255,255,255,0.85); font-size:9px;")
+        h_lay.addWidget(self._lbl_room)
+        h_lay.addWidget(self._lbl_sku)
+        h_lay.addWidget(self._lbl_meta)
+        self._btn_close_hdr = QPushButton("✕", self._header_w)
+        self._btn_close_hdr.setFixedSize(22, 22)
+        self._btn_close_hdr.setStyleSheet(
+            "QPushButton{background:rgba(255,255,255,0.15);border:none;color:#fff;border-radius:4px;font-size:11px;}"
+            "QPushButton:hover{background:rgba(255,255,255,0.3);}")
+        self._btn_close_hdr.clicked.connect(self._close)
+        self._btn_close_hdr.move(self.width() - 30 if self.width() > 30 else 300, 8)
+        lay.addWidget(self._header_w)
+
+        # Drag hint
+        hint = QLabel("  ⠿  Drag a row to the Gantt to move that SO individually")
+        hint.setStyleSheet(
+            "background:#f8fafc; color:#94a3b8; font-size:9px; padding:5px 0;"
+            "border-bottom:1px solid #eef0f4;")
+        hint.setFixedHeight(24)
+        lay.addWidget(hint)
+
+        # Column header
+        col_h = QWidget()
+        col_h.setFixedHeight(22)
+        col_h.setStyleSheet("background:#f1f5f9; border-bottom:1px solid #e2e8f0;")
+        ch_lay = QHBoxLayout(col_h)
+        ch_lay.setContentsMargins(14, 0, 14, 0)
+        ch_lay.setSpacing(6)
+        ch_lay.addSpacing(22)
+        for txt, w_fixed in [("SO / Customer", 0), ("Qty", 52), ("Line", 34), ("", 40)]:
+            lbl = QLabel(txt)
+            lbl.setStyleSheet("font-size:8px; font-weight:700; color:#94a3b8;")
+            if w_fixed:
+                lbl.setFixedWidth(w_fixed)
+                lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                ch_lay.addWidget(lbl)
+            else:
+                ch_lay.addWidget(lbl, stretch=1)
+        lay.addWidget(col_h)
+
+        # Scroll list
+        self._scroll_area = QScrollArea()
+        self._scroll_area.setWidgetResizable(True)
+        self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll_area.setStyleSheet("QScrollArea{border:none;}")
+        self._list_w = QWidget()
+        self._list_lay = QVBoxLayout(self._list_w)
+        self._list_lay.setContentsMargins(0, 0, 0, 0)
+        self._list_lay.setSpacing(0)
+        self._list_lay.addStretch()
+        self._scroll_area.setWidget(self._list_w)
+        lay.addWidget(self._scroll_area, stretch=1)
+
+        # Footer
+        footer = QWidget()
+        footer.setFixedHeight(46)
+        footer.setStyleSheet("border-top:1px solid #eef0f4;")
+        f_lay = QHBoxLayout(footer)
+        f_lay.setContentsMargins(14, 8, 14, 8)
+        f_lay.setSpacing(8)
+        btn_unlock = QPushButton("🔓 Unlock All")
+        btn_unlock.setStyleSheet(
+            "QPushButton{font-size:10px;font-weight:700;padding:5px;"
+            "border:1px solid #d4d7e0;border-radius:5px;background:#fff;color:#3a4255;}"
+            "QPushButton:hover{background:#f5f6fa;}")
+        btn_unlock.clicked.connect(self._unlock_all)
+        btn_del = QPushButton("🗑 Delete All")
+        btn_del.setStyleSheet(
+            "QPushButton{font-size:10px;font-weight:700;padding:5px;"
+            "border:1px solid #fca5a5;border-radius:5px;background:#fff;color:#dc2626;}"
+            "QPushButton:hover{background:#fef2f2;}")
+        btn_del.clicked.connect(self._delete_all)
+        f_lay.addWidget(btn_unlock, stretch=1)
+        f_lay.addWidget(btn_del, stretch=1)
+        lay.addWidget(footer)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._btn_close_hdr.move(self.width() - 30, 8)
+
+    def show_for(self, merged_plan: Dict):
+        self._current_plan = merged_plan
+        self._lbl_room.setText(
+            f"{merged_plan.get('room_code', '')}  ·  {merged_plan.get('process_name', '')}".upper())
+        self._lbl_sku.setText(merged_plan.get("sku_code", ""))
+        n = merged_plan.get("_merged_count", 1)
+        self._lbl_meta.setText(
+            f"📅 {merged_plan.get('plan_date', '')}  Shift {merged_plan.get('shift_no', '')}   ·   "
+            f"📦 {merged_plan.get('qty_planned', 0)}   ·   {n} plans")
+
+        # Clear existing rows (keep the trailing stretch)
+        while self._list_lay.count() > 1:
+            item = self._list_lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        member_ids = set(merged_plan.get("_merged_ids", [merged_plan["plan_id"]]))
+        members = sorted(
+            [p for p in self._canvas._plans if p["plan_id"] in member_ids],
+            key=lambda p: (p.get("so_number", ""), p.get("line_item", 0)))
+
+        for i, plan in enumerate(members):
+            so_key = (plan.get("so_number", ""), plan.get("sku_code", ""), plan.get("line_item", 0))
+            so_rec = self._canvas._sos.get(so_key)
+            row = SoPlanRow(plan, so_rec, self._list_w)
+            if i % 2 == 1:
+                row.setStyleSheet("SoPlanRow{background:#f9fafb;}")
+            # Separator
+            sep = QFrame()
+            sep.setFrameShape(QFrame.Shape.HLine)
+            sep.setStyleSheet("background:#f1f5f9; border:none; max-height:1px;")
+            self._list_lay.insertWidget(self._list_lay.count() - 1, row)
+            self._list_lay.insertWidget(self._list_lay.count() - 1, sep)
+
+        self.show()
+
+    def _close(self):
+        self.hide()
+        self._current_plan = None
+        self.closed.emit()
+
+    def _find_gantt_tab(self):
+        p = self.parent()
+        while p:
+            if isinstance(p, GanttTab):
+                return p
+            p = p.parent() if hasattr(p, "parent") else None
+        return None
+
+    def _unlock_all(self):
+        if not self._current_plan:
+            return
+        for mid in self._current_plan.get("_merged_ids", []):
+            plan = next((p for p in self._canvas._plans if p["plan_id"] == mid), None)
+            if plan and plan.get("is_locked"):
+                PlanRepo.lock(mid, False)
+        gt = self._find_gantt_tab()
+        if gt:
+            gt.refresh()
+
+    def _delete_all(self):
+        if not self._current_plan:
+            return
+        member_ids = self._current_plan.get("_merged_ids", [])
+        if QMessageBox.question(
+            self, "Delete All",
+            f"Delete {len(member_ids)} plans in this merged card?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        for mid in member_ids:
+            PlanRepo.delete(mid, reason="bulk-delete from summary panel")
+        self._close()
+        gt = self._find_gantt_tab()
+        if gt:
+            gt.refresh()
+
+
 # ─── Gantt Tab ────────────────────────────────────────────────────────────────
 
 class GanttTab(QWidget):
@@ -2805,6 +3214,7 @@ class GanttTab(QWidget):
         self.canvas.planMoved.connect(self._on_plan_moved)
         self.canvas.planSelected.connect(self._on_plan_selected)
         self.canvas.selectionChanged.connect(self._on_selection_changed)
+        self.canvas.summaryCardClicked.connect(self._on_summary_card_clicked)
         self.scroll.setWidget(self.canvas)
         self._on_dim_changed()
 
@@ -2818,6 +3228,9 @@ class GanttTab(QWidget):
         self.unplanned_panel = self._build_unplanned_panel()
         self.unplanned_panel.setVisible(False)
         body.addWidget(self.unplanned_panel)
+
+        self.summary_panel = SummaryDetailPanel(self.canvas, self)
+        body.addWidget(self.summary_panel)
 
         layout.addLayout(body, stretch=1)
 
@@ -4022,6 +4435,12 @@ class GanttTab(QWidget):
         self.btn_consol.setText(f"🔗 Consolidate ({n})")
         self.btn_consol.setEnabled(n >= 2)
         self.btn_clear.setEnabled(n > 0)
+
+    def _on_summary_card_clicked(self, plan: Dict):
+        """Show the summary detail panel for the clicked merged card."""
+        if self.unplanned_panel.isVisible():
+            self.btn_unplanned.setChecked(False)
+        self.summary_panel.show_for(plan)
 
     def _export_plan(self):
         from PyQt6.QtWidgets import QFileDialog
