@@ -3061,6 +3061,7 @@ class _DraggableHeader(QWidget):
         self._panel = panel
         self._drag_start: Optional[QPoint] = None
         self.setCursor(Qt.CursorShape.SizeAllCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
@@ -3108,6 +3109,7 @@ class FloatingSummaryPanel(QWidget):
 
         self._card = QWidget()
         self._card.setObjectName("floatCard")
+        self._card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._card.setStyleSheet(
             "QWidget#floatCard { background:#ffffff; border-radius:10px; }")
 
@@ -3127,7 +3129,7 @@ class FloatingSummaryPanel(QWidget):
         self._hdr = _DraggableHeader(self)
         self._hdr.setFixedHeight(76)
         self._hdr.setStyleSheet(
-            "background:#F1F4FB; border-radius:10px 10px 0 0;"
+            "background:#ffffff; border-radius:10px 10px 0 0;"
             "border-bottom:1px solid #DDE3ED;")
 
         h_lay = QHBoxLayout(self._hdr)
