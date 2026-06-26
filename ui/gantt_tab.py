@@ -866,7 +866,7 @@ class GanttCanvas(QWidget):
         self._mat_first_use     : Dict[int, str]   = {}
 
         # Summarize mode — collapse same (date,shift,room,process,sku) into one card
-        self._summarize          : bool            = False
+        self._summarize          : bool            = True
         self._summarized_plans   : List[Dict]      = []   # merged plan dicts
         self._summary_groups     : Dict[int, List[int]] = {}  # rep_id → member_ids
 
@@ -3177,13 +3177,14 @@ class GanttTab(QWidget):
             " border-radius:4px; padding:3px 9px; font-size:10px; font-weight:600; }"
             "QPushButton:hover { background:#1e40af; }"
         )
-        self._btn_sum.setStyleSheet(_sum_css_off)
+        self._btn_sum.setStyleSheet(_sum_css_on)   # default ON
         def _on_sum_toggle(checked):
             self._btn_sum.setStyleSheet(_sum_css_on if checked else _sum_css_off)
             self.canvas.toggle_summarize(checked)
             self.gantt_header.sync_from(self.canvas)
             self.gantt_y_label.sync_from(self.canvas)
         self._btn_sum.toggled.connect(_on_sum_toggle)
+        self._btn_sum.setChecked(True)             # default ON
         r1.addWidget(self._btn_sum)
 
         # Final-only filter toggle
