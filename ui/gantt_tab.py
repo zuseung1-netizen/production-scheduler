@@ -3101,14 +3101,14 @@ class FloatingSummaryPanel(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        self.setFixedSize(self._PANEL_W + 20, self._PANEL_H + 20)  # extra for shadow
+        self.setFixedSize(self._PANEL_W + 28, self._PANEL_H + 28)  # extra for shadow
         self._build_ui()
 
     # ── UI construction ───────────────────────────────────────────────────────
 
     def _build_ui(self):
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(10, 10, 10, 10)  # shadow room
+        outer.setContentsMargins(14, 14, 14, 14)  # extra room for shadow artifact
         outer.setSpacing(0)
 
         self._card = QWidget()
@@ -3117,9 +3117,9 @@ class FloatingSummaryPanel(QWidget):
             "QWidget#floatCard { background:#ffffff; border-radius:10px; }")
 
         shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(20)
-        shadow.setOffset(0, 4)
-        shadow.setColor(QColor(0, 0, 0, 55))
+        shadow.setBlurRadius(18)
+        shadow.setOffset(0, 2)
+        shadow.setColor(QColor(0, 0, 0, 45))
         self._card.setGraphicsEffect(shadow)
 
         outer.addWidget(self._card)
@@ -3128,12 +3128,12 @@ class FloatingSummaryPanel(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
 
-        # Draggable gradient header
+        # Draggable header
         self._hdr = _DraggableHeader(self)
         self._hdr.setFixedHeight(76)
         self._hdr.setStyleSheet(
-            "background:#f8faff; border-radius:10px 10px 0 0;"
-            "border-bottom:2px solid #2563EB;")
+            "background:#F1F4FB; border-radius:10px 10px 0 0;"
+            "border-bottom:1px solid #DDE3ED;")
 
         h_lay = QHBoxLayout(self._hdr)
         h_lay.setContentsMargins(14, 8, 10, 8)
@@ -3160,7 +3160,7 @@ class FloatingSummaryPanel(QWidget):
         btn_close.setStyleSheet(
             "QPushButton{background:#e2e8f0;border:none;color:#475569;"
             "border-radius:5px;font-size:12px;}"
-            "QPushButton:hover{background:#cbd5e1;}")
+            "QPushButton:hover{background:#cbd5e1;border:none;}")
         btn_close.clicked.connect(self.close_panel)
         h_lay.addWidget(btn_close, alignment=Qt.AlignmentFlag.AlignTop)
 
@@ -3170,21 +3170,23 @@ class FloatingSummaryPanel(QWidget):
         hint = QLabel("  ⠿  Drag a row to the Gantt to move that plan")
         hint.setFixedHeight(24)
         hint.setStyleSheet(
-            "background:#f8fafc; color:#94a3b8; font-size:9px; padding:5px 0;"
-            "border-bottom:1px solid #eef0f4;")
+            "QLabel { background:#f8fafc; color:#94a3b8; font-size:9px; padding:5px 0;"
+            "border-bottom:1px solid #DDE3ED; }")
         lay.addWidget(hint)
 
         # Column header
         col_h = QWidget()
+        col_h.setObjectName("floatColHeader")
         col_h.setFixedHeight(22)
-        col_h.setStyleSheet("background:#f1f5f9; border-bottom:1px solid #e2e8f0;")
+        col_h.setStyleSheet(
+            "QWidget#floatColHeader { background:#f1f5f9; border-bottom:1px solid #DDE3ED; }")
         ch_lay = QHBoxLayout(col_h)
         ch_lay.setContentsMargins(14, 0, 14, 0)
         ch_lay.setSpacing(6)
         ch_lay.addSpacing(22)
         for txt, w_fixed in [("SO / Customer", 0), ("Qty", 52), ("Deadline", 40), ("", 40)]:
             lbl = QLabel(txt)
-            lbl.setStyleSheet("font-size:8px; font-weight:700; color:#94a3b8;")
+            lbl.setStyleSheet("QLabel { font-size:8px; font-weight:700; color:#94a3b8; }")
             if w_fixed:
                 lbl.setFixedWidth(w_fixed)
                 lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -3193,13 +3195,19 @@ class FloatingSummaryPanel(QWidget):
                 ch_lay.addWidget(lbl, stretch=1)
         lay.addWidget(col_h)
 
-        # Scroll list
+        # Scroll list — NoFrame + NoFocus to kill blue focus border
         self._scroll_area = QScrollArea()
         self._scroll_area.setWidgetResizable(True)
         self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._scroll_area.setStyleSheet("QScrollArea{border:none; background:transparent;}")
+        self._scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll_area.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._scroll_area.setStyleSheet(
+            "QScrollArea { border:none; outline:none; background:transparent; }"
+            "QScrollArea > QWidget { background:transparent; }"
+            "QScrollArea > QWidget > QWidget { background:#ffffff; }")
         self._list_w = QWidget()
-        self._list_w.setStyleSheet("background:#ffffff;")
+        self._list_w.setObjectName("floatListContent")
+        self._list_w.setStyleSheet("QWidget#floatListContent { background:#ffffff; }")
         self._list_lay = QVBoxLayout(self._list_w)
         self._list_lay.setContentsMargins(0, 0, 0, 0)
         self._list_lay.setSpacing(0)
@@ -3211,7 +3219,7 @@ class FloatingSummaryPanel(QWidget):
         self._footer = QWidget()
         self._footer.setFixedHeight(46)
         self._footer.setStyleSheet(
-            "background:#ffffff; border-top:1px solid #eef0f4;"
+            "background:#ffffff; border-top:1px solid #DDE3ED;"
             "border-radius: 0 0 10px 10px;")
         f_lay = QHBoxLayout(self._footer)
         f_lay.setContentsMargins(14, 8, 14, 8)
