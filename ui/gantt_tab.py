@@ -1728,8 +1728,7 @@ class GanttCanvas(QWidget):
             if self._final_only and not plan.get("is_final_seq"):
                 continue
 
-            # Soft filter (status): dim non-matching plans
-            dim_out = False
+            # Status filter: hide non-matching plans
             if self._status_filter:
                 due_str = (so_rec or {}).get("due_date")
                 if due_str:
@@ -1738,9 +1737,9 @@ class GanttCanvas(QWidget):
                 else:
                     so_status = "on_time"
                 if so_status != self._status_filter:
-                    dim_out = True
+                    continue
 
-            p.setOpacity(0.12 if dim_out else 1.0)
+            p.setOpacity(1.0)
 
             is_mat = plan.get("entity_type") == "MATERIAL"
             so = self._sos.get((plan["so_number"], plan["sku_code"], plan["line_item"]))
