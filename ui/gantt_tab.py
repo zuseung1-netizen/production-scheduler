@@ -3132,8 +3132,8 @@ class FloatingSummaryPanel(QWidget):
         self._hdr = _DraggableHeader(self)
         self._hdr.setFixedHeight(76)
         self._hdr.setStyleSheet(
-            "background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #1e3a6e,stop:1 #2563EB);"
-            "border-radius: 10px 10px 0 0;")
+            "background:#f8faff; border-radius:10px 10px 0 0;"
+            "border-bottom:2px solid #2563EB;")
 
         h_lay = QHBoxLayout(self._hdr)
         h_lay.setContentsMargins(14, 8, 10, 8)
@@ -3143,14 +3143,13 @@ class FloatingSummaryPanel(QWidget):
         title_col.setSpacing(2)
         self._lbl_room = QLabel("")
         self._lbl_room.setStyleSheet(
-            "QLabel { color:#c8d8f8; font-size:9px; font-weight:700; "
-            "letter-spacing:0.5px; background:transparent; }")
+            "QLabel { color:#64748b; font-size:9px; font-weight:700; letter-spacing:0.5px; }")
         self._lbl_sku = QLabel("")
         self._lbl_sku.setStyleSheet(
-            "QLabel { color:#ffffff; font-size:14px; font-weight:700; background:transparent; }")
+            "QLabel { color:#1e293b; font-size:14px; font-weight:700; }")
         self._lbl_meta = QLabel("")
         self._lbl_meta.setStyleSheet(
-            "QLabel { color:#ddeeff; font-size:9px; background:transparent; }")
+            "QLabel { color:#475569; font-size:9px; }")
         title_col.addWidget(self._lbl_room)
         title_col.addWidget(self._lbl_sku)
         title_col.addWidget(self._lbl_meta)
@@ -3159,9 +3158,9 @@ class FloatingSummaryPanel(QWidget):
         btn_close = QPushButton("✕")
         btn_close.setFixedSize(24, 24)
         btn_close.setStyleSheet(
-            "QPushButton{background:rgba(255,255,255,0.15);border:none;color:#fff;"
+            "QPushButton{background:#e2e8f0;border:none;color:#475569;"
             "border-radius:5px;font-size:12px;}"
-            "QPushButton:hover{background:rgba(255,255,255,0.3);}")
+            "QPushButton:hover{background:#cbd5e1;}")
         btn_close.clicked.connect(self.close_panel)
         h_lay.addWidget(btn_close, alignment=Qt.AlignmentFlag.AlignTop)
 
