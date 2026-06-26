@@ -881,6 +881,8 @@ class GanttCanvas(QWidget):
 
         # CLOSE badge visibility (off by default)
         self._show_close_badge   : bool            = False
+        self._show_so_num        : bool            = True
+        self._show_customer      : bool            = True
 
         # Final-only filter — hide non-final-seq plans
         self._final_only         : bool            = False
@@ -1018,6 +1020,27 @@ class GanttCanvas(QWidget):
         self._show_close_badge = on
         self._pixmap_dirty = True
         self.update()
+
+    def toggle_so_num(self, on: bool):
+        self._show_so_num = on
+        self._rebuild_card_height()
+
+    def toggle_customer(self, on: bool):
+        self._show_customer = on
+        self._rebuild_card_height()
+
+    def _rebuild_card_height(self):
+        """Rebuild layout after card height changes (SO#/Customer visibility)."""
+        self._build_layout_and_heights()
+        self._update_size()
+        self._pixmap_dirty = True
+        self.update()
+
+    @property
+    def _card_h(self) -> int:
+        """Dynamic card slot height based on visible text lines."""
+        extra = int(self._show_so_num) + int(self._show_customer)
+        return 72 - (2 - extra) * 10   # 72 / 62 / 52
 
     def toggle_final_only(self, on: bool):
         self._final_only = on
@@ -1272,7 +1295,7 @@ class GanttCanvas(QWidget):
         y = self._body_top()
         _room_mode = (self.y_dims == ["Room"])
         for rk in self._rows:
-            h = max(1, row_max.get(rk, 1)) * CARD_H
+            h = max(1, row_max.get(rk, 1)) * self._card_h
             if _room_mode:
                 h += CELL_UTIL_H  # reserve bottom strip for per-cell util bar
             self._row_y_list.append(y)
@@ -1298,8 +1321,8 @@ class GanttCanvas(QWidget):
             slot_idx = self._plan_layout.get(pid, (0, 1))[0]
             x = col * col_w + 1
             w = col_w - 2
-            y_pos = self._row_y_list[ri] + slot_idx * CARD_H + 2
-            rect = QRect(x, y_pos, w, CARD_H - 4)
+            y_pos = self._row_y_list[ri] + slot_idx * self._card_h + 2
+            rect = QRect(x, y_pos, w, self._card_h - 4)
             self._prebuilt_rects[pid] = rect
             self._spatial_index[(col, ri)].append(pid)
 
@@ -1435,8 +1458,8 @@ class GanttCanvas(QWidget):
         col_w = self._col_w()
         x = col * col_w + 1
         w = col_w - 2
-        y = self._row_y_list[row] + slot_idx * CARD_H + 2
-        return QRect(x, y, w, CARD_H - 4)
+        y = self._row_y_list[row] + slot_idx * self._card_h + 2
+        return QRect(x, y, w, self._card_h - 4)
 
     def _checkbox_rect(self, plan_rect: QRect) -> QRect:
         pill_y = plan_rect.y() + PILL_MARGIN
@@ -1973,32 +1996,34 @@ class GanttCanvas(QWidget):
                        qty_str)
 
             if not is_mat:
-                if is_merged:
-                    so_list = plan.get("_so_list", [])
-                    n_unique = len(so_list)
-                    so_str = so_list[0] if n_unique == 1 else f"{n_unique} SOs"
-                    p.setPen(QPen(QColor(100, 130, 200) if n_unique > 1 else CARD_TEXT_L3))
-                    p.setFont(f_l3)
-                    p.drawText(QRect(tx, ty + 25, tw, 10),
-                               Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                               QFontMetrics(f_l3).elidedText(so_str, Qt.TextElideMode.ElideRight, tw))
-                elif plan.get("so_number"):
-                    p.setPen(QPen(CARD_TEXT_L3))
-                    p.setFont(f_l3)
-                    p.drawText(QRect(tx, ty + 25, tw, 10),
-                               Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                               QFontMetrics(f_l3).elidedText(
-                                   plan["so_number"], Qt.TextElideMode.ElideRight, tw))
+                _extra_y = ty + 25   # Y for next optional line
+                if self._show_so_num:
+                    if is_merged:
+                        so_list = plan.get("_so_list", [])
+                        n_unique = len(so_list)
+                        so_str = so_list[0] if n_unique == 1 else f"{n_unique} SOs"
+                        p.setPen(QPen(QColor(100, 130, 200) if n_unique > 1 else CARD_TEXT_L3))
+                    elif plan.get("so_number"):
+                        so_str = plan["so_number"]
+                        p.setPen(QPen(CARD_TEXT_L3))
+                    else:
+                        so_str = None
+                    if so_str:
+                        p.setFont(f_l3)
+                        p.drawText(QRect(tx, _extra_y, tw, 10),
+                                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                                   QFontMetrics(f_l3).elidedText(so_str, Qt.TextElideMode.ElideRight, tw))
+                        _extra_y += 10
 
-            if not is_mat and not is_merged:
-                customer_name = (so or {}).get("customer_name") or ""
-                if customer_name:
-                    p.setPen(QPen(CARD_TEXT_L3))
-                    p.setFont(f_l3)
-                    p.drawText(QRect(tx, ty + 35, tw, 10),
-                               Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                               QFontMetrics(f_l3).elidedText(
-                                   customer_name, Qt.TextElideMode.ElideRight, tw))
+                if self._show_customer and not is_merged:
+                    customer_name = (so or {}).get("customer_name") or ""
+                    if customer_name:
+                        p.setPen(QPen(CARD_TEXT_L3))
+                        p.setFont(f_l3)
+                        p.drawText(QRect(tx, _extra_y, tw, 10),
+                                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                                   QFontMetrics(f_l3).elidedText(
+                                       customer_name, Qt.TextElideMode.ElideRight, tw))
 
             if plan.get("consolidation_group"):
                 consol_groups.setdefault(plan["consolidation_group"], []).append(rect)
@@ -2176,9 +2201,9 @@ class GanttCanvas(QWidget):
                                      if 0 <= self._stack_orig_row < len(self._row_y_list) else 0)
                             n     = len(self._stack_cell_plans)
                             rel_y = pos.y() - row_y
-                            idx   = round(rel_y / CARD_H)
+                            idx   = round(rel_y / self._card_h)
                             self._stack_guide_idx = max(0, min(n, idx))
-                            self._stack_guide_y   = row_y + self._stack_guide_idx * CARD_H
+                            self._stack_guide_y   = row_y + self._stack_guide_idx * self._card_h
                         else:
                             # ── REGULAR DRAG MODE ───────────────────────────
                             self._stack_drag    = False
@@ -3689,6 +3714,38 @@ class GanttTab(QWidget):
             self.canvas.toggle_close_badge(checked)
         self._btn_close_badge.toggled.connect(_on_cb_toggle)
         r1.addWidget(self._btn_close_badge)
+
+        # Card label toggles: SO# and Customer
+        _lbl_css_on  = ("QPushButton { background:#475569; color:#fff; border:none;"
+                        " border-radius:4px; padding:3px 8px; font-size:10px; font-weight:600; }"
+                        "QPushButton:hover { background:#334155; }")
+        _lbl_css_off = ("QPushButton { background:#fff; color:#3a4255; border:1px solid #d4d7e0;"
+                        " border-radius:4px; padding:3px 8px; font-size:10px; font-weight:600; }"
+                        "QPushButton:hover { background:#f5f6fa; }")
+
+        self._btn_show_so = QPushButton("SO #")
+        self._btn_show_so.setCheckable(True)
+        self._btn_show_so.setChecked(True)
+        self._btn_show_so.setFixedHeight(26)
+        self._btn_show_so.setToolTip("Show/hide SO number line in Gantt cards.\nOff = shorter cards.")
+        self._btn_show_so.setStyleSheet(_lbl_css_on)
+        def _on_so_toggle(checked):
+            self._btn_show_so.setStyleSheet(_lbl_css_on if checked else _lbl_css_off)
+            self.canvas.toggle_so_num(checked)
+        self._btn_show_so.toggled.connect(_on_so_toggle)
+        r1.addWidget(self._btn_show_so)
+
+        self._btn_show_cust = QPushButton("Customer")
+        self._btn_show_cust.setCheckable(True)
+        self._btn_show_cust.setChecked(True)
+        self._btn_show_cust.setFixedHeight(26)
+        self._btn_show_cust.setToolTip("Show/hide customer name line in Gantt cards.\nOff = shorter cards.")
+        self._btn_show_cust.setStyleSheet(_lbl_css_on)
+        def _on_cust_toggle(checked):
+            self._btn_show_cust.setStyleSheet(_lbl_css_on if checked else _lbl_css_off)
+            self.canvas.toggle_customer(checked)
+        self._btn_show_cust.toggled.connect(_on_cust_toggle)
+        r1.addWidget(self._btn_show_cust)
 
         # Weekly reorganize button
         btn_reorg = QPushButton("🔀 Reorganize")
