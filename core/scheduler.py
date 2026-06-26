@@ -24,7 +24,7 @@ from typing import Dict, List, Optional, Tuple
 from data.repositories import (
     SKURepo, MaterialRepo, ProcessRoutingRepo, RoomRepo,
     ShiftRepo, CalendarRepo, SORepo, PlanRepo,
-    ActualRepo, ConfigRepo, MaterialDemandRepo, AllocationRepo, _now
+    ActualRepo, LotSampleRepo, ConfigRepo, MaterialDemandRepo, AllocationRepo, _now
 )
 from data.crp_excel import crp_manager
 
@@ -155,6 +155,15 @@ class Scheduler:
         report   = {"planned": 0, "skipped": 0, "late": [],
                     "routing_errors": [], "material_plans": 0}
 
+        # M2: Warn about MANUAL rooms with UPPH=0 — they produce zero capacity silently
+        for room_code, rps in self.room_procs.items():
+            for rp in rps:
+                if rp["process_type"] == "MANUAL" and not float(rp.get("upph") or 0):
+                    report["routing_errors"].append({
+                        "so": None,
+                        "reason": f"Config: {room_code}/{rp['process_name']} UPPH=0 — no capacity generated"
+                    })
+
         # 1. Campaign grouping: merge same-SKU SOs within max_consolidation_days
         #    into virtual combined SOs (earliest due date is the cutoff).
         #    SKUs with campaign_mode=0 are planned individually.
@@ -224,10 +233,13 @@ class Scheduler:
                     clusters.append([so])
 
             for cluster in clusters:
-                # Plan each SO individually in due-date order.
+                # Plan each SO individually, priority first then due-date.
                 # Opt-A+B adjacency bonus + SKU clustering achieves physical
                 # grouping without mixing SO identifiers in plan records.
-                merged.extend(sorted(cluster, key=lambda s: s["due_date"]))
+                merged.extend(sorted(cluster, key=lambda s: (
+                    s["priority"] if s.get("priority") is not None else 9999,
+                    s["due_date"],
+                )))
 
         # Re-sort merged + individual by same priority key as _sorted_open_sos
         def _key(so):
@@ -688,33 +700,34 @@ class Scheduler:
             so = SORepo.get(so_no, sku_c, li)
             if not so:
                 continue
-            actual_total = ActualRepo.actual_qty(so_no, sku_c, li)
+            # Use net qty (actual - sample - reject) as completion criterion (M1)
+            net_total = LotSampleRepo.net_qty(so_no, sku_c, li)
 
-            if actual_total >= so["qty"]:
-                # Fully produced → delete remaining plans
+            if net_total >= so["qty"]:
+                # Fully produced (net of QC deductions) → delete remaining plans
                 for p in plans:
                     PlanRepo.delete(p["plan_id"], reason="replan_completed")
                     report["deleted"].append({
                         "plan_id": p["plan_id"], "so_number": so_no,
                         "sku_code": sku_c, "line_item": li,
-                        "reason": "SO fully produced"
+                        "reason": "SO fully produced (net)"
                     })
-            elif actual_total > 0:
+            elif net_total > 0:
                 # Partially produced → delete then re-plan remainder
                 for p in plans:
                     PlanRepo.delete(p["plan_id"], reason="replan_partial")
                     report["deleted"].append({
                         "plan_id": p["plan_id"], "so_number": so_no,
                         "sku_code": sku_c, "line_item": li,
-                        "reason": f"Partial ({actual_total}/{so['qty']}) — re-planning"
+                        "reason": f"Partial ({net_total}/{so['qty']} net) — re-planning"
                     })
                 before = plan_report["planned"]
                 self._plan_so(so, slot_map, date_from, date_to, plan_report)
                 new_slots = plan_report["planned"] - before
                 report["replanned"].append({
                     "so_number": so_no, "sku_code": sku_c, "line_item": li,
-                    "actual_qty": actual_total,
-                    "remaining_qty": so["qty"] - actual_total,
+                    "actual_qty": net_total,
+                    "remaining_qty": so["qty"] - net_total,
                     "new_slots": new_slots,
                 })
 
@@ -1551,48 +1564,70 @@ class Scheduler:
 
     # ── Material Planning ────────────────────────────────────────────────────
 
-    def _plan_all_materials(self, slot_map: Dict[SlotKey, float],
-                             date_from: str, date_to: str, report: Dict):
-        """
-        Collect material demands from all SKU plans that have
-        requires_material_code on a process step, then plan each material.
-        """
-        # Clear previously auto-generated (unlocked) material plans first —
-        # otherwise every auto_plan() run re-derives the same demand and
-        # stacks a fresh duplicate layer on top of the last run's plans.
-        PlanRepo.delete_unlocked_material(date_from, date_to)
-
-        # Gather demands: material_code -> [(due_date, qty, so_no, sku, li)]
+    def _collect_material_demands(
+            self, plans: List[Dict], parent_entity_type: str
+    ) -> Dict[str, List[Dict]]:
+        """Extract requires_material_code demands from a list of plans.
+        due_date = plan["plan_date"] so material must be ready before the
+        consuming step runs (H4 fix — previously used SO due_date)."""
         demands: Dict[str, List[Dict]] = defaultdict(list)
-
-        sku_plans = PlanRepo.all(date_from, date_to, entity_type="SKU")
-        for plan in sku_plans:
-            sku_code = plan["sku_code"]
-            steps = ProcessRoutingRepo.for_entity("SKU", sku_code)
-            step  = next((s for s in steps
-                          if s["process_seq"] == plan["process_seq"]), None)
+        for plan in plans:
+            ec = plan["entity_code"]
+            steps = ProcessRoutingRepo.for_entity(parent_entity_type, ec)
+            step = next((s for s in steps
+                         if s["process_seq"] == plan["process_seq"]), None)
             if not step or not step.get("requires_material_code"):
                 continue
             mat_code = step["requires_material_code"]
-            sku      = self.sku_map.get(sku_code, {})
-            uom      = int(sku.get("uom") or 1)
-            # Material qty = plan qty (in SKU EA) * uom
-            mat_qty  = plan["qty_planned"] * uom
-
-            so = SORepo.get(plan["so_number"], sku_code, plan["line_item"])
-            due = so["due_date"] if so else plan["plan_date"]
-
+            # UoM conversion: parent qty × parent uom
+            if parent_entity_type == "SKU":
+                parent_obj = self.sku_map.get(ec, {})
+            else:
+                parent_obj = self.mat_map.get(ec, {})
+            uom = int(parent_obj.get("uom") or 1)
             demands[mat_code].append({
-                "due_date":   due,
-                "qty":        mat_qty,
-                "so_number":  plan["so_number"],
-                "sku_code":   sku_code,
-                "line_item":  plan["line_item"],
+                "due_date":  plan["plan_date"],   # H4: consuming step date, not SO date
+                "qty":       plan["qty_planned"] * uom,
+                "so_number": plan.get("so_number", ""),
+                "sku_code":  plan.get("sku_code", ""),
+                "line_item": plan.get("line_item", ""),
             })
+        return demands
 
-        for mat_code, demand_list in demands.items():
-            self._plan_material(mat_code, demand_list, slot_map,
-                                date_from, date_to, report)
+    def _plan_all_materials(self, slot_map: Dict[SlotKey, float],
+                             date_from: str, date_to: str, report: Dict):
+        """
+        Multi-level BOM expansion: plan materials required by SKU steps,
+        then recursively plan sub-materials required by those material steps.
+        Stops when no new demand is found or MAX_LEVELS is reached.
+        """
+        PlanRepo.delete_unlocked_material(date_from, date_to)
+
+        MAX_LEVELS = 6
+        planned_codes: set = set()
+
+        # Level 0: demands from SKU plans
+        sku_plans = PlanRepo.all(date_from, date_to, entity_type="SKU")
+        pending = self._collect_material_demands(sku_plans, "SKU")
+
+        for _level in range(MAX_LEVELS):
+            if not pending:
+                break
+            next_pending: Dict[str, List[Dict]] = defaultdict(list)
+            for mat_code, demand_list in pending.items():
+                if mat_code in planned_codes:
+                    continue
+                planned_codes.add(mat_code)
+                self._plan_material(mat_code, demand_list, slot_map,
+                                    date_from, date_to, report)
+                # Collect sub-material demands from newly inserted material plans
+                new_mat_plans = [p for p in PlanRepo.all(date_from, date_to, entity_type="MATERIAL")
+                                 if p["entity_code"] == mat_code]
+                sub = self._collect_material_demands(new_mat_plans, "MATERIAL")
+                for sub_code, sub_demands in sub.items():
+                    if sub_code not in planned_codes:
+                        next_pending[sub_code].extend(sub_demands)
+            pending = next_pending
 
     def _plan_material(self, mat_code: str, demands: List[Dict],
                         slot_map: Dict[SlotKey, float],

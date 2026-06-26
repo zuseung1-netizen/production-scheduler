@@ -1484,7 +1484,7 @@ class InventoryRepo:
                 LEFT JOIN so_inventory_allocation a ON a.inv_id = i.inv_id
                 {where}
                 GROUP BY i.inv_id
-                ORDER BY i.sku_code, i.expiry_date, i.production_date
+                ORDER BY i.sku_code, COALESCE(i.expiry_date,'9999-12-31'), i.production_date
             """, params).fetchall()
         return _rows_to_dicts(rows)
 
@@ -1641,17 +1641,25 @@ class InventoryRepo:
         return -1
 
     @staticmethod
-    def fefo_suggestion(sku_code: str, qty_needed: int) -> List[Dict]:
+    def fefo_suggestion(sku_code: str, qty_needed: int,
+                        delivery_date: str = None) -> List[Dict]:
         """
         FEFO auto-suggestion: returns a list of (inv_id, lot_number,
-        qty_to_allocate) covering qty_needed, sorted by expiry_date ASC.
-        Lots without expiry_date go last.
+        qty_to_allocate) covering qty_needed, sorted by expiry_date ASC
+        (NULL expiry goes last — COALESCE handled in InventoryRepo.all()).
+
+        delivery_date: if provided, lots expiring before this date are skipped
+        so expired-before-delivery stock is never auto-allocated.
         """
         available = InventoryRepo.available_for_sku(sku_code)
         suggestion, remaining = [], qty_needed
         for lot in available:
             if remaining <= 0:
                 break
+            # Skip lots that expire before the delivery date (M7)
+            if delivery_date and lot.get("expiry_date"):
+                if lot["expiry_date"] < delivery_date:
+                    continue
             alloc = min(lot["qty_remaining"], remaining)
             suggestion.append({
                 "inv_id":          lot["inv_id"],
@@ -1932,7 +1940,8 @@ class AllocationRepo:
                 so["so_number"], so["sku_code"], so["line_item"])
             if prod_needed <= 0:
                 continue
-            suggestion = InventoryRepo.fefo_suggestion(so["sku_code"], prod_needed)
+            suggestion = InventoryRepo.fefo_suggestion(
+                so["sku_code"], prod_needed, delivery_date=so.get("due_date"))
             if not suggestion:
                 skipped.append(so)
                 continue
@@ -2075,7 +2084,9 @@ class PlanSnapshotRepo:
 
     @staticmethod
     def rollback(batch_id: str):
-        """Replace all production_plan rows with the snapshot contents."""
+        """Replace all production_plan rows with the snapshot contents.
+        Locked plans that are NOT present in the snapshot (added after the
+        snapshot was taken) are re-inserted after restore so they are not lost."""
         with get_connection() as conn:
             row = conn.execute(
                 "SELECT snapshot_data FROM plan_snapshot WHERE batch_id=?",
@@ -2090,9 +2101,30 @@ class PlanSnapshotRepo:
             "is_locked", "is_consolidated", "consolidation_group",
             "material_group_id", "block_type", "memo", "created_at", "updated_at",
         )
+
+        def _slot_key(p):
+            return (p.get("so_number"), p.get("entity_code"),
+                    p.get("plan_date"), p.get("shift_no"),
+                    p.get("room_code"), p.get("process_name"))
+
+        snapshot_keys = {_slot_key(p) for p in plans}
+
         with get_connection() as conn:
+            # Locked plans that post-date the snapshot (not in snapshot keys)
+            current_locked = _rows_to_dicts(conn.execute(
+                "SELECT * FROM production_plan WHERE is_locked=1").fetchall())
+            orphan_locked = [p for p in current_locked
+                             if _slot_key(p) not in snapshot_keys]
+
             conn.execute("DELETE FROM production_plan")
             for p in plans:
+                vals = {f: p.get(f) for f in FIELDS}
+                conn.execute(
+                    f"INSERT INTO production_plan({','.join(FIELDS)})"
+                    f" VALUES({','.join(':'+f for f in FIELDS)})",
+                    vals)
+            # Re-insert locked plans that were not captured in this snapshot
+            for p in orphan_locked:
                 vals = {f: p.get(f) for f in FIELDS}
                 conn.execute(
                     f"INSERT INTO production_plan({','.join(FIELDS)})"

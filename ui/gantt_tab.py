@@ -3506,6 +3506,10 @@ class GanttTab(QWidget):
 
 
     def run_auto_plan(self):
+        # Prevent concurrent planning runs (e.g. double-click or detached window trigger)
+        if getattr(self, '_plan_worker', None) and self._plan_worker.isRunning():
+            return
+
         d0, d1 = self._date_range()
         from PyQt6.QtWidgets import QApplication
         from PyQt6.QtGui import QCursor
