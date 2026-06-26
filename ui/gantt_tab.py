@@ -34,7 +34,8 @@ import json
 
 from data.repositories import (
     PlanRepo, SORepo, SKURepo, ShiftRepo, RoomRepo,
-    CalendarRepo, ConfigRepo, MaterialDemandRepo, CompanyHolidayRepo
+    CalendarRepo, ConfigRepo, MaterialDemandRepo, CompanyHolidayRepo,
+    ProcessRoutingRepo
 )
 from core.scheduler import scheduler, sku_to_inner, shift_capacity_inner
 from utils.excel_io import export_gantt_plan
@@ -863,6 +864,8 @@ class GanttCanvas(QWidget):
         # (room_code, process_name) pairs that are valid — populated in load_data
         self._room_proc_set   : set = set()
         self._company_holidays: set = set()   # date ISO strings from DB
+        # process_name → minimum process_seq across all SKU routings (for Y-axis ordering)
+        self._proc_seq_order  : Dict[str, int] = {}
 
         # Material first-use date: plan_id → earliest SKU plan_date that consumes it
         self._mat_first_use     : Dict[int, str]   = {}
@@ -980,6 +983,13 @@ class GanttCanvas(QWidget):
         self._checked = self._checked & valid_ids
         self._room_proc_set    = {(r["room_code"], r["process_name"]) for r in RoomRepo.all()}
         self._company_holidays = CompanyHolidayRepo.date_set()
+        # Build process → min_seq map for Y-axis ordering when "Process" dim is active
+        self._proc_seq_order = {}
+        for rt in ProcessRoutingRepo.all():
+            pname = rt.get("process_name") or ""
+            seq   = int(rt.get("process_seq") or 99)
+            if pname and (pname not in self._proc_seq_order or seq < self._proc_seq_order[pname]):
+                self._proc_seq_order[pname] = seq
         self._expand_mat_plans()
         self._build_mat_first_use(self._expanded_plans)
         self._build_cap_map()
@@ -1217,7 +1227,22 @@ class GanttCanvas(QWidget):
         # so empty rooms are visible for drag-to-room validation
         if self.y_dims == ["Room"] and not self._has_active_filter():
             keys |= set(RoomRepo.rooms())
-        self._rows = sorted(keys)
+        # Sort: when Process is a Y dimension, order by process_seq; others alphabetical
+        if "Process" in self.y_dims:
+            proc_di = self.y_dims.index("Process")
+            def _row_sort_key(rk: str):
+                parts = rk.split("|")
+                key = []
+                for di, dim in enumerate(self.y_dims):
+                    part = parts[di] if di < len(parts) else ""
+                    if dim == "Process":
+                        key.append(f"{self._proc_seq_order.get(part, 999):04d}_{part}")
+                    else:
+                        key.append(part)
+                return key
+            self._rows = sorted(keys, key=_row_sort_key)
+        else:
+            self._rows = sorted(keys)
         # O(1) lookup dict
         self._row_index = {r: i for i, r in enumerate(self._rows)}
 
