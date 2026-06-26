@@ -21,9 +21,9 @@ from PyQt6.QtWidgets import (
     QApplication, QDateEdit, QFormLayout, QSpinBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QFrame,
     QLineEdit, QButtonGroup, QSizePolicy, QSplitter, QGroupBox,
-    QListWidget, QListWidgetItem, QStyle
+    QListWidget, QListWidgetItem, QStyle, QGraphicsDropShadowEffect
 )
-from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, QPointF, pyqtSignal, QTimer, QThread, QByteArray, QSize, QMimeData
+from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, QPointF, pyqtSignal, QTimer, QThread, QByteArray, QSize, QMimeData, QEvent
 from PyQt6.QtGui import (
     QPainter, QPainterPath, QColor, QFont, QFontMetrics, QPen, QBrush, QCursor,
     QPixmap, QIcon, QShortcut, QKeySequence, QDrag
@@ -2971,7 +2971,12 @@ class SoPlanRow(QWidget):
         # Production deadline chip (due_date - post_lead_days)
         if prod_deadline:
             days_to = (prod_deadline - date.today()).days
-            dl_str = f"{prod_deadline.month}/{prod_deadline.day}"
+            if days_to == 0:
+                dl_str = "D-Day"
+            elif days_to < 0:
+                dl_str = f"D+{abs(days_to)}"
+            else:
+                dl_str = f"D-{days_to}"
             if days_to < 0:
                 dl_bg, dl_fg = "#fee2e2", "#dc2626"
             elif days_to <= 7:
@@ -3053,57 +3058,121 @@ class SoPlanRow(QWidget):
         super().mouseReleaseEvent(e)
 
 
-class SummaryDetailPanel(QWidget):
-    """Right-side panel showing individual plans merged in a summary card."""
+class _DraggableHeader(QWidget):
+    """Header strip that lets the user drag the floating panel around."""
+
+    def __init__(self, panel: "FloatingSummaryPanel", parent=None):
+        super().__init__(parent)
+        self._panel = panel
+        self._drag_start: Optional[QPoint] = None
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = e.globalPosition().toPoint() - self._panel.pos()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if e.buttons() & Qt.MouseButton.LeftButton and self._drag_start is not None:
+            self._panel.move(e.globalPosition().toPoint() - self._drag_start)
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        self._drag_start = None
+        super().mouseReleaseEvent(e)
+
+
+class FloatingSummaryPanel(QWidget):
+    """OS-level floating card showing individual plans merged in a summary card."""
 
     closed = pyqtSignal()
 
+    _PANEL_W = 360
+    _PANEL_H = 480
+
     def __init__(self, canvas: "GanttCanvas", parent=None):
-        super().__init__(parent)
+        super().__init__(None)  # top-level — no Qt parent so it floats freely
         self._canvas = canvas
         self._current_plan: Optional[Dict] = None
-        self.setFixedWidth(340)
-        self.setStyleSheet("background:#fff; border-left:1px solid #DDE3ED;")
-        self.hide()
+        self.setWindowFlags(
+            Qt.WindowType.Tool |
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setFixedSize(self._PANEL_W + 20, self._PANEL_H + 20)  # extra for shadow
         self._build_ui()
 
+    # ── UI construction ───────────────────────────────────────────────────────
+
     def _build_ui(self):
-        lay = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 10, 10, 10)  # shadow room
+        outer.setSpacing(0)
+
+        self._card = QWidget()
+        self._card.setObjectName("floatCard")
+        self._card.setStyleSheet(
+            "QWidget#floatCard { background:#ffffff; border-radius:10px; }")
+
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(20)
+        shadow.setOffset(0, 4)
+        shadow.setColor(QColor(0, 0, 0, 55))
+        self._card.setGraphicsEffect(shadow)
+
+        outer.addWidget(self._card)
+
+        lay = QVBoxLayout(self._card)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
 
-        # Header
-        self._header_w = QWidget()
-        self._header_w.setFixedHeight(76)
-        self._header_w.setStyleSheet(
-            "background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #1e3a6e,stop:1 #2563EB);")
-        h_lay = QVBoxLayout(self._header_w)
-        h_lay.setContentsMargins(14, 10, 38, 10)
-        h_lay.setSpacing(2)
-        self._lbl_room = QLabel("")
-        self._lbl_room.setStyleSheet("color:rgba(255,255,255,0.8); font-size:9px; font-weight:700; letter-spacing:0.5px;")
-        self._lbl_sku = QLabel("")
-        self._lbl_sku.setStyleSheet("color:#fff; font-size:14px; font-weight:700;")
-        self._lbl_meta = QLabel("")
-        self._lbl_meta.setStyleSheet("color:rgba(255,255,255,0.85); font-size:9px;")
-        h_lay.addWidget(self._lbl_room)
-        h_lay.addWidget(self._lbl_sku)
-        h_lay.addWidget(self._lbl_meta)
-        self._btn_close_hdr = QPushButton("✕", self._header_w)
-        self._btn_close_hdr.setFixedSize(22, 22)
-        self._btn_close_hdr.setStyleSheet(
-            "QPushButton{background:rgba(255,255,255,0.15);border:none;color:#fff;border-radius:4px;font-size:11px;}"
-            "QPushButton:hover{background:rgba(255,255,255,0.3);}")
-        self._btn_close_hdr.clicked.connect(self._close)
-        self._btn_close_hdr.move(self.width() - 30 if self.width() > 30 else 300, 8)
-        lay.addWidget(self._header_w)
+        # Draggable gradient header
+        self._hdr = _DraggableHeader(self)
+        self._hdr.setFixedHeight(76)
+        self._hdr.setStyleSheet(
+            "background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #1e3a6e,stop:1 #2563EB);"
+            "border-radius: 10px 10px 0 0;")
 
-        # Drag hint
-        hint = QLabel("  ⠿  Drag a row to the Gantt to move that SO individually")
+        h_lay = QHBoxLayout(self._hdr)
+        h_lay.setContentsMargins(14, 8, 10, 8)
+        h_lay.setSpacing(6)
+
+        title_col = QVBoxLayout()
+        title_col.setSpacing(2)
+        self._lbl_room = QLabel("")
+        self._lbl_room.setStyleSheet(
+            "color:rgba(255,255,255,0.8); font-size:9px; font-weight:700; "
+            "letter-spacing:0.5px; background:transparent;")
+        self._lbl_sku = QLabel("")
+        self._lbl_sku.setStyleSheet(
+            "color:#fff; font-size:14px; font-weight:700; background:transparent;")
+        self._lbl_meta = QLabel("")
+        self._lbl_meta.setStyleSheet(
+            "color:rgba(255,255,255,0.85); font-size:9px; background:transparent;")
+        title_col.addWidget(self._lbl_room)
+        title_col.addWidget(self._lbl_sku)
+        title_col.addWidget(self._lbl_meta)
+        h_lay.addLayout(title_col, stretch=1)
+
+        btn_close = QPushButton("✕")
+        btn_close.setFixedSize(24, 24)
+        btn_close.setStyleSheet(
+            "QPushButton{background:rgba(255,255,255,0.15);border:none;color:#fff;"
+            "border-radius:5px;font-size:12px;}"
+            "QPushButton:hover{background:rgba(255,255,255,0.3);}")
+        btn_close.clicked.connect(self.close_panel)
+        h_lay.addWidget(btn_close, alignment=Qt.AlignmentFlag.AlignTop)
+
+        lay.addWidget(self._hdr)
+
+        # Drag hint bar
+        hint = QLabel("  ⠿  Drag a row to the Gantt to move that plan")
+        hint.setFixedHeight(24)
         hint.setStyleSheet(
             "background:#f8fafc; color:#94a3b8; font-size:9px; padding:5px 0;"
             "border-bottom:1px solid #eef0f4;")
-        hint.setFixedHeight(24)
         lay.addWidget(hint)
 
         # Column header
@@ -3129,8 +3198,9 @@ class SummaryDetailPanel(QWidget):
         self._scroll_area = QScrollArea()
         self._scroll_area.setWidgetResizable(True)
         self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._scroll_area.setStyleSheet("QScrollArea{border:none;}")
+        self._scroll_area.setStyleSheet("QScrollArea{border:none; background:transparent;}")
         self._list_w = QWidget()
+        self._list_w.setStyleSheet("background:#ffffff;")
         self._list_lay = QVBoxLayout(self._list_w)
         self._list_lay.setContentsMargins(0, 0, 0, 0)
         self._list_lay.setSpacing(0)
@@ -3139,44 +3209,51 @@ class SummaryDetailPanel(QWidget):
         lay.addWidget(self._scroll_area, stretch=1)
 
         # Footer
-        footer = QWidget()
-        footer.setFixedHeight(46)
-        footer.setStyleSheet("border-top:1px solid #eef0f4;")
-        f_lay = QHBoxLayout(footer)
+        self._footer = QWidget()
+        self._footer.setFixedHeight(46)
+        self._footer.setStyleSheet(
+            "background:#ffffff; border-top:1px solid #eef0f4;"
+            "border-radius: 0 0 10px 10px;")
+        f_lay = QHBoxLayout(self._footer)
         f_lay.setContentsMargins(14, 8, 14, 8)
         f_lay.setSpacing(8)
+
+        self._lbl_footer = QLabel("")
+        self._lbl_footer.setStyleSheet("font-size:9px; color:#64748b;")
+        f_lay.addWidget(self._lbl_footer, stretch=1)
+
         btn_unlock = QPushButton("🔓 Unlock All")
         btn_unlock.setStyleSheet(
-            "QPushButton{font-size:10px;font-weight:700;padding:5px;"
+            "QPushButton{font-size:10px;font-weight:700;padding:4px 8px;"
             "border:1px solid #d4d7e0;border-radius:5px;background:#fff;color:#3a4255;}"
             "QPushButton:hover{background:#f5f6fa;}")
         btn_unlock.clicked.connect(self._unlock_all)
-        btn_del = QPushButton("🗑 Delete All")
+        btn_del = QPushButton("🗑 Delete")
         btn_del.setStyleSheet(
-            "QPushButton{font-size:10px;font-weight:700;padding:5px;"
+            "QPushButton{font-size:10px;font-weight:700;padding:4px 8px;"
             "border:1px solid #fca5a5;border-radius:5px;background:#fff;color:#dc2626;}"
             "QPushButton:hover{background:#fef2f2;}")
         btn_del.clicked.connect(self._delete_all)
-        f_lay.addWidget(btn_unlock, stretch=1)
-        f_lay.addWidget(btn_del, stretch=1)
-        lay.addWidget(footer)
+        f_lay.addWidget(btn_unlock)
+        f_lay.addWidget(btn_del)
+        lay.addWidget(self._footer)
 
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        self._btn_close_hdr.move(self.width() - 30, 8)
+    # ── Public API ────────────────────────────────────────────────────────────
 
-    def show_for(self, merged_plan: Dict):
+    def show_for(self, merged_plan: Dict, anchor: Optional[QPoint] = None):
         self._current_plan = merged_plan
         self._lbl_room.setText(
             f"{merged_plan.get('room_code', '')}  ·  {merged_plan.get('process_name', '')}".upper())
         self._lbl_sku.setText(merged_plan.get("sku_code", ""))
         n = merged_plan.get("_merged_count", 1)
+        qty = merged_plan.get("qty_planned", 0)
         plan_lbl = "plan" if n == 1 else "plans"
         self._lbl_meta.setText(
             f"📅 {merged_plan.get('plan_date', '')}  Shift {merged_plan.get('shift_no', '')}   ·   "
-            f"📦 {merged_plan.get('qty_planned', 0)}   ·   {n} {plan_lbl}")
+            f"📦 {qty:,}")
+        self._lbl_footer.setText(f"Total {qty:,} units  ·  {n} {plan_lbl}")
 
-        # Clear existing rows (keep the trailing stretch)
+        # Clear existing rows (keep trailing stretch)
         while self._list_lay.count() > 1:
             item = self._list_lay.takeAt(0)
             if item.widget():
@@ -3190,7 +3267,6 @@ class SummaryDetailPanel(QWidget):
         for i, plan in enumerate(members):
             so_key = (plan.get("so_number", ""), plan.get("sku_code", ""), plan.get("line_item", 0))
             so_rec = self._canvas._sos.get(so_key)
-            # Compute production deadline = due_date - post_lead_days
             _prod_dl = None
             _due_str = (so_rec or {}).get("due_date")
             if _due_str:
@@ -3203,26 +3279,67 @@ class SummaryDetailPanel(QWidget):
             row = SoPlanRow(plan, so_rec, prod_deadline=_prod_dl, parent=self._list_w)
             if i % 2 == 1:
                 row.setStyleSheet("SoPlanRow{background:#f9fafb;}")
-            # Separator
             sep = QFrame()
             sep.setFrameShape(QFrame.Shape.HLine)
             sep.setStyleSheet("background:#f1f5f9; border:none; max-height:1px;")
             self._list_lay.insertWidget(self._list_lay.count() - 1, row)
             self._list_lay.insertWidget(self._list_lay.count() - 1, sep)
 
+        self._position_near(anchor or QCursor.pos())
         self.show()
+        self.raise_()
 
-    def _close(self):
+    def close_panel(self):
         self.hide()
         self._current_plan = None
         self.closed.emit()
 
+    # ── Smart positioning ─────────────────────────────────────────────────────
+
+    def _position_near(self, anchor: QPoint):
+        offset = QPoint(14, 14)
+        pos = anchor + offset
+        screen = QApplication.screenAt(anchor)
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        avail = screen.availableGeometry()
+        pw, ph = self.width(), self.height()
+        # Reflect at right/bottom edges
+        if pos.x() + pw > avail.right():
+            pos.setX(anchor.x() - pw - 4)
+        if pos.y() + ph > avail.bottom():
+            pos.setY(anchor.y() - ph - 4)
+        # Clamp to screen bounds
+        pos.setX(max(avail.left(), min(pos.x(), avail.right() - pw)))
+        pos.setY(max(avail.top(), min(pos.y(), avail.bottom() - ph)))
+        self.move(pos)
+
+    # ── Outside-click close via app-level event filter ─────────────────────────
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        QApplication.instance().installEventFilter(self)
+
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        QApplication.instance().removeEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.MouseButtonPress:
+            if not self.geometry().contains(QCursor.pos()):
+                self.close_panel()
+        return False
+
+    # ── Actions ───────────────────────────────────────────────────────────────
+
     def _find_gantt_tab(self):
-        p = self.parent()
-        while p:
-            if isinstance(p, GanttTab):
-                return p
-            p = p.parent() if hasattr(p, "parent") else None
+        for w in QApplication.topLevelWidgets():
+            if isinstance(w, GanttTab):
+                return w
+            # check children recursively
+            result = w.findChild(GanttTab)
+            if result:
+                return result
         return None
 
     def _unlock_all(self):
@@ -3241,14 +3358,14 @@ class SummaryDetailPanel(QWidget):
             return
         member_ids = self._current_plan.get("_merged_ids", [])
         if QMessageBox.question(
-            self, "Delete All",
-            f"Delete {len(member_ids)} plans in this merged card?",
+            self, "Delete Plans",
+            f"Delete {len(member_ids)} plan(s) in this card?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         ) != QMessageBox.StandardButton.Yes:
             return
         for mid in member_ids:
             PlanRepo.delete(mid, reason="bulk-delete from summary panel")
-        self._close()
+        self.close_panel()
         gt = self._find_gantt_tab()
         if gt:
             gt.refresh()
@@ -3309,9 +3426,6 @@ class GanttTab(QWidget):
         self.unplanned_panel.setVisible(False)
         body.addWidget(self.unplanned_panel)
 
-        self.summary_panel = SummaryDetailPanel(self.canvas, self)
-        body.addWidget(self.summary_panel)
-
         layout.addLayout(body, stretch=1)
 
         self.detail_label = QLabel("Click a plan block to see details.")
@@ -3321,7 +3435,12 @@ class GanttTab(QWidget):
         self.detail_label.setMaximumHeight(48)
         layout.addWidget(self.detail_label)
 
+        # Floating summary panel — OS-level tool window, no parent layout slot
+        self.summary_panel = FloatingSummaryPanel(self.canvas)
+
         QShortcut(QKeySequence("Ctrl+Z"), self).activated.connect(self._undo_last)
+        QShortcut(QKeySequence("Escape"), self).activated.connect(
+            lambda: self.summary_panel.close_panel() if self.summary_panel.isVisible() else None)
 
         self.refresh()
 
@@ -3686,9 +3805,10 @@ class GanttTab(QWidget):
         self._btn_sum.setStyleSheet(_sum_css_on)   # default ON
         def _on_sum_toggle(checked):
             self._btn_sum.setStyleSheet(_sum_css_on if checked else _sum_css_off)
-            self.canvas.toggle_summarize(checked)
-            self.gantt_header.sync_from(self.canvas)
-            self.gantt_y_label.sync_from(self.canvas)
+            if hasattr(self, 'canvas'):
+                self.canvas.toggle_summarize(checked)
+                self.gantt_header.sync_from(self.canvas)
+                self.gantt_y_label.sync_from(self.canvas)
         self._btn_sum.toggled.connect(_on_sum_toggle)
         self._btn_sum.setChecked(True)             # default ON
         r1.addWidget(self._btn_sum)
@@ -4549,10 +4669,10 @@ class GanttTab(QWidget):
         self.btn_clear.setEnabled(n > 0)
 
     def _on_summary_card_clicked(self, plan: Dict):
-        """Show the summary detail panel for the clicked merged card."""
+        """Show the floating summary card for the clicked plan."""
         if self.unplanned_panel.isVisible():
             self.btn_unplanned.setChecked(False)
-        self.summary_panel.show_for(plan)
+        self.summary_panel.show_for(plan, anchor=QCursor.pos())
 
     def _export_plan(self):
         from PyQt6.QtWidgets import QFileDialog
