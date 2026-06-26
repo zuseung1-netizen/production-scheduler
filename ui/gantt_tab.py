@@ -3143,14 +3143,14 @@ class FloatingSummaryPanel(QWidget):
         title_col.setSpacing(2)
         self._lbl_room = QLabel("")
         self._lbl_room.setStyleSheet(
-            "color:rgba(255,255,255,0.8); font-size:9px; font-weight:700; "
-            "letter-spacing:0.5px; background:transparent;")
+            "QLabel { color:#c8d8f8; font-size:9px; font-weight:700; "
+            "letter-spacing:0.5px; background:transparent; }")
         self._lbl_sku = QLabel("")
         self._lbl_sku.setStyleSheet(
-            "color:#fff; font-size:14px; font-weight:700; background:transparent;")
+            "QLabel { color:#ffffff; font-size:14px; font-weight:700; background:transparent; }")
         self._lbl_meta = QLabel("")
         self._lbl_meta.setStyleSheet(
-            "color:rgba(255,255,255,0.85); font-size:9px; background:transparent;")
+            "QLabel { color:#ddeeff; font-size:9px; background:transparent; }")
         title_col.addWidget(self._lbl_room)
         title_col.addWidget(self._lbl_sku)
         title_col.addWidget(self._lbl_meta)
@@ -3296,23 +3296,18 @@ class FloatingSummaryPanel(QWidget):
 
     # ── Smart positioning ─────────────────────────────────────────────────────
 
-    def _position_near(self, anchor: QPoint):
-        offset = QPoint(14, 14)
-        pos = anchor + offset
-        screen = QApplication.screenAt(anchor)
-        if screen is None:
-            screen = QApplication.primaryScreen()
-        avail = screen.availableGeometry()
+    def _position_near(self, anchor: Optional[QPoint] = None):
+        # Always appear on the right side of the main window (side-panel feel)
+        main_win = self._canvas.window()
+        geo = main_win.frameGeometry()
         pw, ph = self.width(), self.height()
-        # Reflect at right/bottom edges
-        if pos.x() + pw > avail.right():
-            pos.setX(anchor.x() - pw - 4)
-        if pos.y() + ph > avail.bottom():
-            pos.setY(anchor.y() - ph - 4)
-        # Clamp to screen bounds
-        pos.setX(max(avail.left(), min(pos.x(), avail.right() - pw)))
-        pos.setY(max(avail.top(), min(pos.y(), avail.bottom() - ph)))
-        self.move(pos)
+        x = geo.right() - pw + 8   # slightly overlap the right edge
+        y = geo.top() + 80         # below toolbar area
+        screen = (QApplication.screenAt(geo.center()) or QApplication.primaryScreen())
+        avail = screen.availableGeometry()
+        x = max(avail.left(), min(x, avail.right() - pw))
+        y = max(avail.top(), min(y, avail.bottom() - ph))
+        self.move(x, y)
 
     # ── Outside-click close via app-level event filter ─────────────────────────
 
