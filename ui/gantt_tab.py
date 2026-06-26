@@ -2883,7 +2883,7 @@ class PriorityConflictDialog(QDialog):
 class SoPlanRow(QWidget):
     """One draggable row in SummaryDetailPanel."""
 
-    def __init__(self, plan: Dict, so_rec, parent=None):
+    def __init__(self, plan: Dict, so_rec, prod_deadline=None, parent=None):
         super().__init__(parent)
         self._plan = plan
         self._drag_start = None
@@ -2918,11 +2918,30 @@ class SoPlanRow(QWidget):
         lbl_qty.setStyleSheet("font-size:10px; font-weight:600; color:#334155;")
         lay.addWidget(lbl_qty)
 
-        lbl_line = QLabel(f"L{plan.get('line_item', '?')}")
-        lbl_line.setFixedWidth(34)
-        lbl_line.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_line.setStyleSheet("font-size:10px; color:#64748b;")
-        lay.addWidget(lbl_line)
+        # Production deadline chip (due_date - post_lead_days)
+        if prod_deadline:
+            days_to = (prod_deadline - date.today()).days
+            dl_str = f"{prod_deadline.month}/{prod_deadline.day}"
+            if days_to < 0:
+                dl_bg, dl_fg = "#fee2e2", "#dc2626"
+            elif days_to <= 7:
+                dl_bg, dl_fg = "#fef3c7", "#d97706"
+            else:
+                dl_bg, dl_fg = "#dbeafe", "#2563eb"
+            lbl_dl = QLabel(dl_str)
+            lbl_dl.setFixedWidth(40)
+            lbl_dl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl_dl.setStyleSheet(
+                f"font-size:9px; font-weight:700; color:{dl_fg};"
+                f"background:{dl_bg}; border-radius:4px; padding:1px 2px;")
+            lbl_dl.setToolTip(f"Production Deadline: {prod_deadline}  ({days_to:+d} days)")
+            lay.addWidget(lbl_dl)
+        else:
+            lbl_line = QLabel(f"L{plan.get('line_item', '?')}")
+            lbl_line.setFixedWidth(40)
+            lbl_line.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl_line.setStyleSheet("font-size:10px; color:#64748b;")
+            lay.addWidget(lbl_line)
 
         badge_w = QWidget()
         badge_w.setFixedWidth(40)
@@ -3045,7 +3064,7 @@ class SummaryDetailPanel(QWidget):
         ch_lay.setContentsMargins(14, 0, 14, 0)
         ch_lay.setSpacing(6)
         ch_lay.addSpacing(22)
-        for txt, w_fixed in [("SO / Customer", 0), ("Qty", 52), ("Line", 34), ("", 40)]:
+        for txt, w_fixed in [("SO / Customer", 0), ("Qty", 52), ("Deadline", 40), ("", 40)]:
             lbl = QLabel(txt)
             lbl.setStyleSheet("font-size:8px; font-weight:700; color:#94a3b8;")
             if w_fixed:
@@ -3120,7 +3139,17 @@ class SummaryDetailPanel(QWidget):
         for i, plan in enumerate(members):
             so_key = (plan.get("so_number", ""), plan.get("sku_code", ""), plan.get("line_item", 0))
             so_rec = self._canvas._sos.get(so_key)
-            row = SoPlanRow(plan, so_rec, self._list_w)
+            # Compute production deadline = due_date - post_lead_days
+            _prod_dl = None
+            _due_str = (so_rec or {}).get("due_date")
+            if _due_str:
+                _lead = int((self._canvas._skus.get(plan.get("sku_code", "")) or {}).get("post_lead_days") or 0)
+                try:
+                    _prod_dl = (datetime.strptime(_due_str, "%Y-%m-%d").date()
+                                - timedelta(days=_lead))
+                except ValueError:
+                    pass
+            row = SoPlanRow(plan, so_rec, prod_deadline=_prod_dl, parent=self._list_w)
             if i % 2 == 1:
                 row.setStyleSheet("SoPlanRow{background:#f9fafb;}")
             # Separator
