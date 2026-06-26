@@ -977,7 +977,14 @@ class GanttCanvas(QWidget):
             self._mat_first_use[p["plan_id"]] = min(candidates) if candidates else None
 
     def _build_summarized_plans(self):
-        """Collapse plans sharing (date,shift,room,process,entity_code) into one card."""
+        """Collapse plans sharing the same Y-axis cell into one card.
+
+        Grouping key adapts to the current y_dims:
+        - Room in y_dims  → keep room_code  (different rooms = different rows)
+        - Process in y_dims → omit process_name (already captured in row_key)
+        - Otherwise        → keep process_name so different processes within a
+                             row each get their own card.
+        """
         if not self._summarize:
             self._summarized_plans = []
             self._summary_groups   = {}
@@ -989,8 +996,14 @@ class GanttCanvas(QWidget):
             # In shift view each shift has its own column → keep shift_no in key.
             # In day view a single column spans all shifts → merge across shifts.
             shift_key = p["shift_no"] if self.shift_view else None
-            key = (p["plan_date"], shift_key, p["room_code"],
-                   p["process_name"], p["entity_code"], p["entity_type"])
+            # room_code: keep only when Room is a Y-dimension (different rooms = different rows)
+            room_key = p["room_code"] if "Room" in self.y_dims else None
+            # process_name: omit when Process is already a Y-dimension (row_key has it)
+            proc_key = p["process_name"] if "Process" not in self.y_dims else None
+            key = (p["plan_date"], shift_key,
+                   self._plan_row_key(p),
+                   room_key, proc_key,
+                   p["entity_code"], p["entity_type"])
             groups[key].append(p)
 
         merged: List[Dict] = []
