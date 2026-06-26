@@ -1712,9 +1712,9 @@ class GanttCanvas(QWidget):
             # Merged cards: register hit rect but block checkbox toggle in mousePressEvent
             self._check_hit_rects[plan["plan_id"]] = QRect(cx - 10, cy - 10, 20, 20)
 
-            # Search filter: dim non-matching plans
             so_rec = self._sos.get((plan["so_number"], plan["sku_code"], plan["line_item"]))
-            dim_out = False
+
+            # Hard filters (search + final-only): skip card entirely
             if self._search_filter:
                 haystack = " ".join(filter(None, [
                     plan.get("so_number", ""), plan.get("sku_code", ""),
@@ -1723,10 +1723,14 @@ class GanttCanvas(QWidget):
                     (so_rec or {}).get("customer_name", ""),
                 ])).lower()
                 if self._search_filter not in haystack:
-                    dim_out = True
+                    continue
 
-            # Status filter: dim plans whose SO doesn't match selected status
-            if self._status_filter and not dim_out:
+            if self._final_only and not plan.get("is_final_seq"):
+                continue
+
+            # Soft filter (status): dim non-matching plans
+            dim_out = False
+            if self._status_filter:
                 due_str = (so_rec or {}).get("due_date")
                 if due_str:
                     days = (datetime.strptime(due_str, "%Y-%m-%d").date() - date.today()).days
@@ -1734,11 +1738,6 @@ class GanttCanvas(QWidget):
                 else:
                     so_status = "on_time"
                 if so_status != self._status_filter:
-                    dim_out = True
-
-            # Final-only filter: dim plans that are not the final process step
-            if self._final_only and not dim_out:
-                if not plan.get("is_final_seq"):
                     dim_out = True
 
             p.setOpacity(0.12 if dim_out else 1.0)
