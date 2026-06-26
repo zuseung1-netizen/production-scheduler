@@ -2468,10 +2468,10 @@ class GanttCanvas(QWidget):
                                 self, "Locked",
                                 "This plan is locked. Unlock it first.")
             else:
-                # Click without drag on a merged summary card → open detail panel
+                # Click without drag on any plan card → open detail panel
                 if self._drag_plan_id:
                     plan = self._pid_to_plan.get(self._drag_plan_id)
-                    if plan and len(plan.get("_merged_ids", [])) > 1:
+                    if plan:
                         self.summaryCardClicked.emit(plan)
             self._reset_drag_state()
             self.update()
@@ -3171,9 +3171,10 @@ class SummaryDetailPanel(QWidget):
             f"{merged_plan.get('room_code', '')}  ·  {merged_plan.get('process_name', '')}".upper())
         self._lbl_sku.setText(merged_plan.get("sku_code", ""))
         n = merged_plan.get("_merged_count", 1)
+        plan_lbl = "plan" if n == 1 else "plans"
         self._lbl_meta.setText(
             f"📅 {merged_plan.get('plan_date', '')}  Shift {merged_plan.get('shift_no', '')}   ·   "
-            f"📦 {merged_plan.get('qty_planned', 0)}   ·   {n} plans")
+            f"📦 {merged_plan.get('qty_planned', 0)}   ·   {n} {plan_lbl}")
 
         # Clear existing rows (keep the trailing stretch)
         while self._list_lay.count() > 1:
