@@ -32,6 +32,14 @@ def isolated_db(monkeypatch):
     import data.database as db_mod
     tmp_dir = tempfile.mkdtemp()
     tmp_db  = os.path.join(tmp_dir, "test.db")
+
+    # Close and discard any existing connection before redirecting DB_PATH.
+    if db_mod._conn is not None:
+        try:
+            db_mod._conn.close()
+        except Exception:
+            pass
+    monkeypatch.setattr(db_mod, "_conn", None)
     monkeypatch.setattr(db_mod, "DB_PATH", tmp_db)
 
     from data.database import init_db
@@ -42,6 +50,12 @@ def isolated_db(monkeypatch):
         mock_crp.is_held.return_value = False
         yield mock_crp
 
+    # Close the test connection before cleanup
+    if db_mod._conn is not None:
+        try:
+            db_mod._conn.close()
+        except Exception:
+            pass
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
     # Reset lazy scheduler singleton so next test starts fresh

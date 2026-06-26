@@ -97,11 +97,6 @@ def init_db():
             "ALTER TABLE process_routing ADD COLUMN room_type_priority TEXT"
         )
 
-    # ── calendar.deduct_minutes migration ────────────────────────────────────
-    cal_cols = [r[1] for r in c.execute("PRAGMA table_info(calendar)").fetchall()]
-    if "deduct_minutes" not in cal_cols:
-        c.execute("ALTER TABLE calendar ADD COLUMN deduct_minutes INTEGER NOT NULL DEFAULT 0")
-
     # ── Company Holiday (사내 휴무일) ─────────────────────────────────────────
     c.execute("""
     CREATE TABLE IF NOT EXISTS company_holiday (
@@ -151,6 +146,11 @@ def init_db():
         PRIMARY KEY (cal_date, shift_no, room_code),
         FOREIGN KEY (shift_no) REFERENCES shift_config(shift_no)
     )""")
+
+    # Migration: add deduct_minutes to existing DBs
+    cal_cols = [r[1] for r in c.execute("PRAGMA table_info(calendar)").fetchall()]
+    if "deduct_minutes" not in cal_cols:
+        c.execute("ALTER TABLE calendar ADD COLUMN deduct_minutes INTEGER NOT NULL DEFAULT 0")
 
     # ── Sales Orders ─────────────────────────────────────────────────────────
     c.execute("""

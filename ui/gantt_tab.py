@@ -1721,13 +1721,14 @@ class GanttCanvas(QWidget):
 
             if not is_mat:
                 if is_merged:
-                    n_so = plan["_merged_count"]
-                    so_str = f"{n_so} SOs"
-                    p.setPen(QPen(QColor(100, 130, 200)))
+                    so_list = plan.get("_so_list", [])
+                    n_unique = len(so_list)
+                    so_str = so_list[0] if n_unique == 1 else f"{n_unique} SOs"
+                    p.setPen(QPen(QColor(100, 130, 200) if n_unique > 1 else CARD_TEXT_L3))
                     p.setFont(f_l3)
                     p.drawText(QRect(tx, ty + 25, tw, 10),
                                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                               so_str)
+                               QFontMetrics(f_l3).elidedText(so_str, Qt.TextElideMode.ElideRight, tw))
                 elif plan.get("so_number"):
                     p.setPen(QPen(CARD_TEXT_L3))
                     p.setFont(f_l3)
