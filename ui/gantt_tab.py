@@ -870,10 +870,13 @@ class GanttCanvas(QWidget):
         self._summarized_plans   : List[Dict]      = []   # merged plan dicts
         self._summary_groups     : Dict[int, List[int]] = {}  # rep_id → member_ids
 
+        # Active-filter result: subset of _display_plans after search/status/final_only
+        self._filtered_plans     : List[Dict]      = []
+
         # CLOSE badge visibility (off by default)
         self._show_close_badge   : bool            = False
 
-        # Final-only filter — dim non-final-seq plans
+        # Final-only filter — hide non-final-seq plans
         self._final_only         : bool            = False
 
         self._cell_map      : Dict[int, QRect] = {}
@@ -969,11 +972,12 @@ class GanttCanvas(QWidget):
         self._checked = self._checked & valid_ids
         self._room_proc_set    = {(r["room_code"], r["process_name"]) for r in RoomRepo.all()}
         self._company_holidays = CompanyHolidayRepo.date_set()
-        self._expand_mat_plans()          # must run before _build_rows
+        self._expand_mat_plans()
         self._build_mat_first_use(self._expanded_plans)
-        self._build_rows()
         self._build_cap_map()
         self._build_summarized_plans()
+        self._apply_filters()             # must run after summarize, before rows/layout
+        self._build_rows()
         self._build_layout_and_heights()
         self._build_hc_map()
         self._build_closed_map()
@@ -1011,12 +1015,13 @@ class GanttCanvas(QWidget):
 
     def toggle_final_only(self, on: bool):
         self._final_only = on
-        self._pixmap_dirty = True
-        self.update()
+        self._rebuild_after_filter()
 
     def toggle_summarize(self, on: bool):
         self._summarize = on
         self._build_summarized_plans()
+        self._apply_filters()
+        self._build_rows()
         self._build_layout_and_heights()
         self._update_size()
         self._pixmap_dirty = True
@@ -1115,16 +1120,22 @@ class GanttCanvas(QWidget):
     def _display_plans(self) -> List[Dict]:
         return self._summarized_plans if self._summarize else self._expanded_plans
 
-    def set_search_filter(self, text: str):
-        self._search_filter = text
+    def _rebuild_after_filter(self):
+        self._apply_filters()
+        self._build_rows()
+        self._build_layout_and_heights()
+        self._update_size()
         self._pixmap_dirty = True
         self.update()
+
+    def set_search_filter(self, text: str):
+        self._search_filter = text
+        self._rebuild_after_filter()
 
     def set_status_filter(self, status: str):
         """Filter by schedule status: 'on_time', 'at_risk', 'late', or '' to clear."""
         self._status_filter = status
-        self._pixmap_dirty = True
-        self.update()
+        self._rebuild_after_filter()
 
     def _is_holiday(self, d: date) -> bool:
         return is_holiday(d) or d.isoformat() in self._company_holidays
@@ -1133,11 +1144,49 @@ class GanttCanvas(QWidget):
         """Return the pipe-joined row key for a plan based on current y_dims."""
         return "|".join(_dim_key(d, plan) for d in self.y_dims)
 
+    def _has_active_filter(self) -> bool:
+        return bool(self._search_filter or self._final_only or self._status_filter)
+
+    def _apply_filters(self):
+        plans = self._display_plans
+        if self._search_filter:
+            sf = self._search_filter
+            filtered = []
+            for p in plans:
+                so_rec = self._sos.get((p["so_number"], p["sku_code"], p["line_item"]))
+                haystack = " ".join(filter(None, [
+                    p.get("so_number", ""), p.get("sku_code", ""),
+                    p.get("entity_code", ""), p.get("room_code", ""),
+                    p.get("process_name", ""),
+                    (so_rec or {}).get("customer_name", ""),
+                ])).lower()
+                if sf in haystack:
+                    filtered.append(p)
+            plans = filtered
+        if self._final_only:
+            plans = [p for p in plans if p.get("is_final_seq")]
+        if self._status_filter:
+            sf = self._status_filter
+            filtered = []
+            for p in plans:
+                so_rec = self._sos.get((p["so_number"], p["sku_code"], p["line_item"]))
+                due_str = (so_rec or {}).get("due_date")
+                if due_str:
+                    days = (datetime.strptime(due_str, "%Y-%m-%d").date() - date.today()).days
+                    so_status = "late" if days < 0 else ("at_risk" if days <= 3 else "on_time")
+                else:
+                    so_status = "on_time"
+                if so_status == sf:
+                    filtered.append(p)
+            plans = filtered
+        self._filtered_plans = plans
+
     def _build_rows(self):
-        keys = {self._plan_row_key(p) for p in self._expanded_plans}
-        # Room mode: always show all configured rooms so empty rooms are visible
-        # and drag-to-unsupported validation can work
-        if self.y_dims == ["Room"]:
+        source = self._filtered_plans if self._has_active_filter() else self._expanded_plans
+        keys = {self._plan_row_key(p) for p in source}
+        # Room mode with no active filter: always show all configured rooms
+        # so empty rooms are visible for drag-to-room validation
+        if self.y_dims == ["Room"] and not self._has_active_filter():
             keys |= set(RoomRepo.rooms())
         self._rows = sorted(keys)
         # O(1) lookup dict
@@ -1189,7 +1238,7 @@ class GanttCanvas(QWidget):
         _pid_rk : Dict[int, str]           = {}
         slot_plans: Dict[Tuple, List[int]] = defaultdict(list)
         self._pid_to_plan = {}
-        for p in self._display_plans:
+        for p in self._filtered_plans:
             rk  = self._plan_row_key(p)
             col = self._date_to_col(p["plan_date"], p["shift_no"])
             _pid_col[p["plan_id"]] = col
@@ -1201,7 +1250,7 @@ class GanttCanvas(QWidget):
 
         # ── Pass 2: stack order within each slot ───────────────────────────────
         self._plan_layout = {}
-        pid_to_so = {p["plan_id"]: p.get("stack_order", 0) for p in self._display_plans}
+        pid_to_so = {p["plan_id"]: p.get("stack_order", 0) for p in self._filtered_plans}
         for sk, pids in slot_plans.items():
             pids_sorted = sorted(pids, key=lambda pid: (pid_to_so.get(pid, 0), pid))
             for i, pid in enumerate(pids_sorted):
@@ -1231,7 +1280,7 @@ class GanttCanvas(QWidget):
         self._prebuilt_rects: Dict[int, QRect] = {}
         # Spatial index: (col, row_idx) → [plan_id, ...] for O(1) hover detection
         self._spatial_index: Dict[Tuple[int, int], List[int]] = defaultdict(list)
-        for p in self._display_plans:
+        for p in self._filtered_plans:
             pid = p["plan_id"]
             col = _pid_col.get(pid)
             if col is None:
@@ -1696,7 +1745,7 @@ class GanttCanvas(QWidget):
         f_tag = QFont("Segoe UI", 7, QFont.Weight.Bold)
         f_lock = QFont("Segoe UI", 7)
 
-        for plan in self._display_plans:
+        for plan in self._filtered_plans:
             rect = self._plan_rect(plan)
             if not rect:
                 continue
@@ -1713,31 +1762,6 @@ class GanttCanvas(QWidget):
             self._check_hit_rects[plan["plan_id"]] = QRect(cx - 10, cy - 10, 20, 20)
 
             so_rec = self._sos.get((plan["so_number"], plan["sku_code"], plan["line_item"]))
-
-            # Hard filters (search + final-only): skip card entirely
-            if self._search_filter:
-                haystack = " ".join(filter(None, [
-                    plan.get("so_number", ""), plan.get("sku_code", ""),
-                    plan.get("entity_code", ""), plan.get("room_code", ""),
-                    plan.get("process_name", ""),
-                    (so_rec or {}).get("customer_name", ""),
-                ])).lower()
-                if self._search_filter not in haystack:
-                    continue
-
-            if self._final_only and not plan.get("is_final_seq"):
-                continue
-
-            # Status filter: hide non-matching plans
-            if self._status_filter:
-                due_str = (so_rec or {}).get("due_date")
-                if due_str:
-                    days = (datetime.strptime(due_str, "%Y-%m-%d").date() - date.today()).days
-                    so_status = "late" if days < 0 else ("at_risk" if days <= 3 else "on_time")
-                else:
-                    so_status = "on_time"
-                if so_status != self._status_filter:
-                    continue
 
             p.setOpacity(1.0)
 
