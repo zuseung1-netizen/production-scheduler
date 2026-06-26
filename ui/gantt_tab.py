@@ -832,7 +832,8 @@ class GanttCanvas(QWidget):
         self.horizon_days = 90
         self.start_date   : date = date.today()
 
-        self._plans    : List[Dict] = []
+        self._plans         : List[Dict] = []
+        self._expanded_plans: List[Dict] = []   # mat plans split per SO (or == _plans)
         self._sos      : Dict       = {}
         self._skus     : Dict       = {}
         self._shifts   : List[Dict] = []
@@ -897,6 +898,50 @@ class GanttCanvas(QWidget):
 
     # ── Data loading ─────────────────────────────────────────────────────────
 
+    def _expand_mat_plans(self):
+        """When 'SO' is a Y-axis dimension, split each MATERIAL plan into
+        per-SO virtual plans so material steps appear in the same SO row
+        as the SKU processes that depend on them.
+
+        Virtual plans get negative plan_ids (no conflict with DB rows) and
+        a _virtual_mat=True flag to suppress interactive features.
+        qty is distributed proportionally by qty_required across members.
+        When 'SO' is NOT in y_dims, _expanded_plans == _plans (no copy).
+        """
+        if "SO" not in self.y_dims:
+            self._expanded_plans = self._plans
+            return
+
+        expanded: List[Dict] = []
+        vid = -1  # virtual plan_id counter (negative, counts down)
+        for p in self._plans:
+            if p.get("entity_type") != "MATERIAL":
+                expanded.append(p)
+                continue
+
+            gid     = p.get("material_group_id")
+            members = self._mat_groups.get(gid, []) if gid else []
+            if not members:
+                expanded.append(p)
+                continue
+
+            total_req = sum(m.get("qty_required", 0) for m in members) or 1
+            orig_qty  = p.get("qty_planned", 0)
+
+            for m in members:
+                ratio  = m.get("qty_required", 0) / total_req
+                vplan  = dict(p)
+                vplan["plan_id"]       = vid
+                vplan["so_number"]     = m["so_number"]
+                vplan["sku_code"]      = m["sku_code"]
+                vplan["line_item"]     = m["line_item"]
+                vplan["qty_planned"]   = max(1, round(orig_qty * ratio))
+                vplan["_virtual_mat"]  = True
+                expanded.append(vplan)
+                vid -= 1
+
+        self._expanded_plans = expanded
+
     def load_data(self, plans, sos, skus, shifts, conflicts, mat_groups=None):
         self._plans     = plans
         self._sos       = {(s["so_number"], s["sku_code"], s["line_item"]): s
@@ -909,7 +954,8 @@ class GanttCanvas(QWidget):
         self._checked = self._checked & valid_ids
         self._room_proc_set    = {(r["room_code"], r["process_name"]) for r in RoomRepo.all()}
         self._company_holidays = CompanyHolidayRepo.date_set()
-        self._build_mat_first_use(plans)
+        self._expand_mat_plans()          # must run before _build_rows
+        self._build_mat_first_use(self._expanded_plans)
         self._build_rows()
         self._build_cap_map()
         self._build_summarized_plans()
@@ -992,7 +1038,7 @@ class GanttCanvas(QWidget):
 
         from collections import defaultdict
         groups: Dict[Tuple, List[Dict]] = defaultdict(list)
-        for p in self._plans:
+        for p in self._expanded_plans:
             # In shift view each shift has its own column → keep shift_no in key.
             # In day view a single column spans all shifts → merge across shifts.
             shift_key = p["shift_no"] if self.shift_view else None
@@ -1040,7 +1086,7 @@ class GanttCanvas(QWidget):
 
     @property
     def _display_plans(self) -> List[Dict]:
-        return self._summarized_plans if self._summarize else self._plans
+        return self._summarized_plans if self._summarize else self._expanded_plans
 
     def set_search_filter(self, text: str):
         self._search_filter = text
@@ -1059,7 +1105,7 @@ class GanttCanvas(QWidget):
         return "|".join(_dim_key(d, plan) for d in self.y_dims)
 
     def _build_rows(self):
-        keys = {self._plan_row_key(p) for p in self._plans}
+        keys = {self._plan_row_key(p) for p in self._expanded_plans}
         # Room mode: always show all configured rooms so empty rooms are visible
         # and drag-to-unsupported validation can work
         if self.y_dims == ["Room"]:
