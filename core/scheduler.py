@@ -170,15 +170,27 @@ class Scheduler:
         campaign_sos = self._apply_campaign_grouping(open_sos)
         total = len(campaign_sos)
 
+        # Pre-compute production_needed for all SOs so we can pass
+        # campaign_extra_rem (future same-SKU demand) into _plan_so().
+        from data.repositories import AllocationRepo as _AR
+        _needed: Dict[Tuple[str, str, str], int] = {
+            (s["so_number"], s["sku_code"], s["line_item"]):
+                _AR.production_needed(s["so_number"], s["sku_code"], s["line_item"])
+            for s in campaign_sos
+        }
+
         for idx, so in enumerate(campaign_sos):
             if progress_cb:
                 progress_cb(idx, total, so)
-            has_successor = any(
-                s["sku_code"] == so["sku_code"]
+            # Sum of production_needed for future same-SKU SOs in this campaign.
+            # _plan_so() uses this to decide whether closing mode should engage.
+            campaign_extra_rem = sum(
+                _needed.get((s["so_number"], s["sku_code"], s["line_item"]), 0)
                 for s in campaign_sos[idx + 1:]
+                if s["sku_code"] == so["sku_code"]
             )
             self._plan_so(so, slot_map, effective_from, date_to, report,
-                          has_campaign_successor=has_successor)
+                          campaign_extra_rem=campaign_extra_rem)
 
         # 2. Plan derived Material demand
         self._plan_all_materials(slot_map, effective_from, date_to, report)
@@ -1410,7 +1422,7 @@ class Scheduler:
     def _plan_so(self, so: Dict, slot_map: Dict[SlotKey, float],
                  date_from: str, date_to: str, report: Dict,
                  force: bool = False,
-                 has_campaign_successor: bool = False):
+                 campaign_extra_rem: int = 0):
         sku_code = so["sku_code"]
         sku      = self.sku_map.get(sku_code)
         if not sku:
@@ -1522,19 +1534,23 @@ class Scheduler:
                 if step_rem <= 0:
                     break
 
-                # Campaign closing: check if remaining < sum of all rooms' cap this shift.
-                # Skip closing check when more same-SKU SOs follow in the campaign —
-                # their demand will consume the remaining capacity.
+                # Closing-mode: restrict to a single best room only on the very
+                # last shift of the campaign.  "Last shift" = total remaining qty
+                # (this SO + future same-SKU SOs) fits within the best single
+                # room's capacity for this one shift.
                 _shift_key = (ds, sno)
-                if has_campaign_successor:
-                    _closing_mode = False
-                elif _shift_key not in _closing_placed:
-                    _total_shift_cap = sum(
-                        inner_to_sku(slot_map.get((_ds, _r, proc_name, _sno), 0.0), uom)
-                        for _ds, _sno, _r, _ in candidates
-                        if _ds == ds and _sno == sno
+                if _shift_key not in _closing_placed:
+                    _total_campaign_rem = step_rem + campaign_extra_rem
+                    _best_single_cap = max(
+                        (inner_to_sku(slot_map.get((_ds, _r, proc_name, _sno), 0.0), uom)
+                         for _ds, _sno, _r, _ in candidates
+                         if _ds == ds and _sno == sno),
+                        default=0
                     )
-                    _closing_mode = (_total_shift_cap > 0 and step_rem < _total_shift_cap)
+                    _closing_mode = (
+                        _best_single_cap > 0 and
+                        _total_campaign_rem <= _best_single_cap
+                    )
                 else:
                     _closing_mode = True  # already chose one room for this shift
 
@@ -1597,15 +1613,18 @@ class Scheduler:
                         if step_rem <= 0:
                             break
                         _shift_key = (ds, sno)
-                        if has_campaign_successor:
-                            _ov_closing = False
-                        elif _shift_key not in _closing_placed_ov:
-                            _total_ov_cap = sum(
-                                inner_to_sku(slot_map.get((_ds, _r, proc_name, _sno), 0.0), uom)
-                                for _ds, _sno, _r, _ in overflow_cands
-                                if _ds == ds and _sno == sno
+                        if _shift_key not in _closing_placed_ov:
+                            _total_campaign_rem_ov = step_rem + campaign_extra_rem
+                            _best_ov_cap = max(
+                                (inner_to_sku(slot_map.get((_ds, _r, proc_name, _sno), 0.0), uom)
+                                 for _ds, _sno, _r, _ in overflow_cands
+                                 if _ds == ds and _sno == sno),
+                                default=0
                             )
-                            _ov_closing = (_total_ov_cap > 0 and step_rem < _total_ov_cap)
+                            _ov_closing = (
+                                _best_ov_cap > 0 and
+                                _total_campaign_rem_ov <= _best_ov_cap
+                            )
                         else:
                             _ov_closing = True
                         if _ov_closing and _shift_key in _closing_placed_ov:
