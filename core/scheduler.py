@@ -920,6 +920,14 @@ class Scheduler:
                 key=lambda ds: _sidx(*ds)
             )
 
+            # Qty budget per slot — prevents moving a high-qty plan into a
+            # low-capacity slot just because the count allows it.
+            # Budget = total qty of loose plans originally in that slot.
+            slot_loose_budget: Dict[Tuple, int] = _dd(int)
+            for p in loose_plans:
+                slot_loose_budget[(p["plan_date"], p["shift_no"])] += p["qty_planned"]
+            slot_loose_used: Dict[Tuple, int] = _dd(int)
+
             # Sort loose plans for SKU consolidation: (sku, earliest_start, deadline, orig)
             desired_loose = sorted(loose_plans, key=lambda p: (
                 p["sku_code"],
@@ -935,13 +943,21 @@ class Scheduler:
                 for i, (nd, ns) in enumerate(remaining_pool):
                     if nd > dl:                     # would miss deadline
                         continue
+                    # Capacity check: don't put more qty in a slot than it held
+                    # for loose plans originally (prevents swap-induced overcapacity).
+                    slot_k = (nd, ns)
+                    if slot_loose_used[slot_k] + plan["qty_planned"] > slot_loose_budget[slot_k]:
+                        continue
                     if _gap_ok(plan, nd, ns):
+                        slot_loose_used[slot_k] += plan["qty_planned"]
                         loose_assignments.append((plan, nd, ns))
                         remaining_pool.pop(i)
                         placed = True
                         break
                 if not placed:
                     # Fallback: anchor at original slot (deadline or gap constraint blocked all moves)
+                    orig_k = (plan["plan_date"], plan["shift_no"])
+                    slot_loose_used[orig_k] += plan["qty_planned"]
                     loose_assignments.append((plan, plan["plan_date"], plan["shift_no"]))
                     try:
                         remaining_pool.remove((plan["plan_date"], plan["shift_no"]))

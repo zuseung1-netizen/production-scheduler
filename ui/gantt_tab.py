@@ -3506,9 +3506,14 @@ class GanttTab(QWidget):
 
 
     def run_auto_plan(self):
-        # Prevent concurrent planning runs (e.g. double-click or detached window trigger)
-        if getattr(self, '_plan_worker', None) and self._plan_worker.isRunning():
-            return
+        # Prevent concurrent planning runs (e.g. double-click or detached window trigger).
+        # Guard with try/except: after worker.deleteLater() the C++ object is gone but
+        # self._plan_worker still holds a Python wrapper; isRunning() raises RuntimeError.
+        try:
+            if getattr(self, '_plan_worker', None) and self._plan_worker.isRunning():
+                return
+        except RuntimeError:
+            self._plan_worker = None
 
         d0, d1 = self._date_range()
         from PyQt6.QtWidgets import QApplication
@@ -3541,6 +3546,7 @@ class GanttTab(QWidget):
         worker = _Worker(d0, d1)
 
         def _on_done(report):
+            self._plan_worker = None  # clear before deleteLater fires
             QApplication.restoreOverrideCursor()
             if sender:
                 sender.setEnabled(True)
@@ -3554,6 +3560,7 @@ class GanttTab(QWidget):
                 self.main_window._check_conflicts_silent()
 
         def _on_error(msg):
+            self._plan_worker = None  # clear before deleteLater fires
             QApplication.restoreOverrideCursor()
             if sender:
                 sender.setEnabled(True)

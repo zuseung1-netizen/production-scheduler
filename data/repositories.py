@@ -1053,9 +1053,9 @@ class PlanRepo:
         Newest rows (highest rowid) = overflow and earliest-date slots — removed first."""
         with get_connection() as conn:
             rows = conn.execute(
-                "SELECT id, qty_planned FROM production_plan "
+                "SELECT plan_id, qty_planned FROM production_plan "
                 "WHERE so_number=? AND sku_code=? AND line_item=? "
-                "AND process_seq=? AND entity_type='SKU' ORDER BY id DESC",
+                "AND process_seq=? AND entity_type='SKU' ORDER BY plan_id DESC",
                 (so_number, sku_code, line_item, process_seq)
             ).fetchall()
             to_trim = excess_qty
@@ -1063,11 +1063,11 @@ class PlanRepo:
                 if to_trim <= 0:
                     break
                 if row_qty <= to_trim:
-                    conn.execute("DELETE FROM production_plan WHERE id=?", (row_id,))
+                    conn.execute("DELETE FROM production_plan WHERE plan_id=?", (row_id,))
                     to_trim -= row_qty
                 else:
                     conn.execute(
-                        "UPDATE production_plan SET qty_planned=? WHERE id=?",
+                        "UPDATE production_plan SET qty_planned=? WHERE plan_id=?",
                         (row_qty - to_trim, row_id))
                     to_trim = 0
             conn.commit()
