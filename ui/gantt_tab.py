@@ -870,6 +870,9 @@ class GanttCanvas(QWidget):
         self._summarized_plans   : List[Dict]      = []   # merged plan dicts
         self._summary_groups     : Dict[int, List[int]] = {}  # rep_id → member_ids
 
+        # CLOSE badge visibility (off by default)
+        self._show_close_badge   : bool            = False
+
         self._cell_map      : Dict[int, QRect] = {}
         self._check_rects   : Dict[int, QRect] = {}
         self._check_hit_rects: Dict[int, QRect] = {}
@@ -997,6 +1000,11 @@ class GanttCanvas(QWidget):
         self.update()
 
     # ── Summarize mode ───────────────────────────────────────────────────────
+
+    def toggle_close_badge(self, on: bool):
+        self._show_close_badge = on
+        self._pixmap_dirty = True
+        self.update()
 
     def toggle_summarize(self, on: bool):
         self._summarize = on
@@ -1815,7 +1823,7 @@ class GanttCanvas(QWidget):
                 lock_right = lk_r.x() - 2
 
             # Campaign CLOSE badge (before CLOSED/HOLD and due-date badges)
-            if plan.get("is_closing_shift") and not is_mat:
+            if plan.get("is_closing_shift") and self._show_close_badge and not is_mat:
                 _cl_lbl = "CLOSE"
                 _cl_bw  = QFontMetrics(f_tag).horizontalAdvance(_cl_lbl) + 6
                 _cl_bh  = PILL_H - 4
@@ -3142,6 +3150,30 @@ class GanttTab(QWidget):
             self.gantt_y_label.sync_from(self.canvas)
         self._btn_sum.toggled.connect(_on_sum_toggle)
         r1.addWidget(self._btn_sum)
+
+        # CLOSE badge toggle
+        _cb_css_off = (
+            "QPushButton { background:#fff; color:#3a4255; border:1px solid #d4d7e0;"
+            " border-radius:4px; padding:3px 9px; font-size:10px; font-weight:600; }"
+            "QPushButton:hover { background:#f5f6fa; }"
+        )
+        _cb_css_on = (
+            "QPushButton { background:#b45309; color:#fff; border:none;"
+            " border-radius:4px; padding:3px 9px; font-size:10px; font-weight:600; }"
+            "QPushButton:hover { background:#92400e; }"
+        )
+        self._btn_close_badge = QPushButton("⬤  CLOSE badge")
+        self._btn_close_badge.setCheckable(True)
+        self._btn_close_badge.setFixedHeight(26)
+        self._btn_close_badge.setToolTip(
+            "Show/hide the CLOSE badge on closing-shift plan cards.\n"
+            "Off by default — enable to highlight campaign closing shifts.")
+        self._btn_close_badge.setStyleSheet(_cb_css_off)
+        def _on_cb_toggle(checked):
+            self._btn_close_badge.setStyleSheet(_cb_css_on if checked else _cb_css_off)
+            self.canvas.toggle_close_badge(checked)
+        self._btn_close_badge.toggled.connect(_on_cb_toggle)
+        r1.addWidget(self._btn_close_badge)
 
         # Weekly reorganize button
         btn_reorg = QPushButton("🔀 Reorganize")
