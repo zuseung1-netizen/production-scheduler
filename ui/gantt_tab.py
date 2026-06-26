@@ -2366,16 +2366,29 @@ class GanttCanvas(QWidget):
                                     }
                                     if room_changed:
                                         fields["room_code"] = new_room
-                                    for mid in member_ids:
-                                        if self.parent_tab and not is_merged:
+                                    if self.parent_tab:
+                                        if is_merged:
+                                            self.parent_tab.push_undo({
+                                                "type":    "move_merged",
+                                                "label":   f"Move {len(member_ids)} plans",
+                                                "members": [
+                                                    {"plan_id":   mid,
+                                                     "plan_date": plan["plan_date"],
+                                                     "shift_no":  plan["shift_no"],
+                                                     "room_code": plan["room_code"]}
+                                                    for mid in member_ids
+                                                ],
+                                            })
+                                        else:
                                             self.parent_tab.push_undo({
                                                 "type":     "move",
-                                                "label":    f"Move Plan #{mid}",
-                                                "plan_id":  mid,
+                                                "label":    f"Move Plan #{member_ids[0]}",
+                                                "plan_id":  member_ids[0],
                                                 "plan_date": plan["plan_date"],
                                                 "shift_no":  plan["shift_no"],
                                                 "room_code": plan["room_code"],
                                             })
+                                    for mid in member_ids:
                                         real = next(
                                             (rp for rp in self._plans
                                              if rp["plan_id"] == mid), None)
@@ -3956,6 +3969,13 @@ class GanttTab(QWidget):
                     "shift_no":  action["shift_no"],
                     "room_code": action["room_code"],
                 }, reason="undo-move")
+            elif action["type"] == "move_merged":
+                for m in action["members"]:
+                    PlanRepo.update(m["plan_id"], {
+                        "plan_date": m["plan_date"],
+                        "shift_no":  m["shift_no"],
+                        "room_code": m["room_code"],
+                    }, reason="undo-move")
             elif action["type"] == "delete":
                 pd = {k: v for k, v in action["plan_data"].items()
                       if k not in ("plan_id", "created_at", "updated_at")}
