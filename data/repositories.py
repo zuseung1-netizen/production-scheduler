@@ -1047,6 +1047,32 @@ class PlanRepo:
         return int(row["t"])
 
     @staticmethod
+    def trim_step_excess(so_number: str, sku_code: str,
+                         line_item: str, process_seq: int, excess_qty: int):
+        """Delete/reduce the newest plan rows for this step by excess_qty units.
+        Newest rows (highest rowid) = overflow and earliest-date slots — removed first."""
+        with get_connection() as conn:
+            rows = conn.execute(
+                "SELECT id, qty_planned FROM production_plan "
+                "WHERE so_number=? AND sku_code=? AND line_item=? "
+                "AND process_seq=? AND entity_type='SKU' ORDER BY id DESC",
+                (so_number, sku_code, line_item, process_seq)
+            ).fetchall()
+            to_trim = excess_qty
+            for row_id, row_qty in rows:
+                if to_trim <= 0:
+                    break
+                if row_qty <= to_trim:
+                    conn.execute("DELETE FROM production_plan WHERE id=?", (row_id,))
+                    to_trim -= row_qty
+                else:
+                    conn.execute(
+                        "UPDATE production_plan SET qty_planned=? WHERE id=?",
+                        (row_qty - to_trim, row_id))
+                    to_trim = 0
+            conn.commit()
+
+    @staticmethod
     def plan_history(plan_id: int = None) -> List[Dict]:
         with get_connection() as conn:
             if plan_id:

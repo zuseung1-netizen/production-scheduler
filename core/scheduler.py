@@ -1471,6 +1471,8 @@ class Scheduler:
 
             # Final step has no slots in constrained window → fall back to full
             # date range so production is always scheduled, even if it will be late.
+            # deadline_d tracks the original SO deadline before any fallback extension.
+            deadline_d = upper_d
             if not candidates and si == len(steps) - 1 and not force:
                 report["late"].append({
                     "so": so["so_number"], "sku": sku_code,
@@ -1480,6 +1482,7 @@ class Scheduler:
                 d0 = _date(date_from)
                 d1 = _date(date_to)
                 upper_d, upper_s = d1, shift_max
+                deadline_d = upper_d  # already at full range; no further overflow
                 candidates = self._candidates(
                     slot_map, step["process_name"], eligible, d0, upper_d, upper_s,
                     sku_code, rtp)
@@ -1550,13 +1553,113 @@ class Scheduler:
                 step_rem -= qty_this
                 report["planned"] += 1
 
+            # ── Forward overflow (final step only) ─────────────────────────────
+            # When backward fill in [d0, deadline_d] is exhausted but capacity
+            # remains past the SO deadline within the planning window, fill those
+            # slots in forward order (earliest first) so that the planner can see
+            # the actual expected completion date rather than seeing no plan at all.
+            overflow_placed = 0
+            if step_rem > 0 and is_final:
+                overflow_d_start = deadline_d + timedelta(days=1)
+                if overflow_d_start <= _date(date_to):
+                    overflow_cands = self._candidates(
+                        slot_map, proc_name, eligible,
+                        overflow_d_start, _date(date_to), shift_max,
+                        sku_code, rtp, forward=True)
+                    _closing_placed_ov: Dict[Tuple[str, int], str] = {}
+                    for ds, sno, room_code, rp in overflow_cands:
+                        if step_rem <= 0:
+                            break
+                        _shift_key = (ds, sno)
+                        if _shift_key not in _closing_placed_ov:
+                            _total_ov_cap = sum(
+                                inner_to_sku(slot_map.get((_ds, _r, proc_name, _sno), 0.0), uom)
+                                for _ds, _sno, _r, _ in overflow_cands
+                                if _ds == ds and _sno == sno
+                            )
+                            _ov_closing = (_total_ov_cap > 0 and step_rem < _total_ov_cap)
+                        else:
+                            _ov_closing = True
+                        if _ov_closing and _shift_key in _closing_placed_ov:
+                            if _closing_placed_ov[_shift_key] != room_code:
+                                continue
+                        co = self._changeover_shifts.get((room_code, proc_name), 0)
+                        if co > 0 and self._has_changeover_conflict(
+                                room_code, proc_name, ds, sno, co, sku_code):
+                            continue
+                        key_ov: SlotKey = (ds, room_code, proc_name, sno)
+                        avail_inner_ov = slot_map.get(key_ov, 0.0)
+                        avail_sku_ov   = inner_to_sku(avail_inner_ov, uom)
+                        if avail_sku_ov <= 0:
+                            continue
+                        qty_ov = min(step_rem, avail_sku_ov)
+                        if _ov_closing and _shift_key not in _closing_placed_ov:
+                            _closing_placed_ov[_shift_key] = room_code
+                        PlanRepo.insert({
+                            "entity_type":      "SKU",
+                            "entity_code":      sku_code,
+                            "so_number":        so["so_number"],
+                            "sku_code":         sku_code,
+                            "line_item":        so["line_item"],
+                            "process_name":     proc_name,
+                            "process_seq":      seq,
+                            "is_final_seq":     1,
+                            "room_code":        room_code,
+                            "plan_date":        ds,
+                            "shift_no":         sno,
+                            "qty_planned":      qty_ov,
+                            "is_closing_shift": 1 if _ov_closing else 0,
+                            "memo":             "[FINAL][LATE]",
+                        })
+                        slot_map[key_ov] = max(0.0, avail_inner_ov - sku_to_inner(qty_ov, uom))
+                        self._block_room_shift(slot_map, ds, room_code, proc_name, sno)
+                        self._record_placed(room_code, proc_name, ds, sno, sku_code)
+                        allocated.append((ds, sno, room_code, qty_ov))
+                        step_rem -= qty_ov
+                        overflow_placed += qty_ov
+                        report["planned"] += 1
+
             step_slots[seq] = allocated
-            if step_rem > 0 and si == len(steps) - 1:
-                report["late"].append({
-                    "so": so["so_number"], "sku": sku_code,
-                    "line": so["line_item"],
-                    "unplanned_qty": step_rem,
-                    "reason": "capacity_exceeded"})
+
+            if is_final:
+                if step_rem > 0:
+                    report["late"].append({
+                        "so": so["so_number"], "sku": sku_code,
+                        "line": so["line_item"],
+                        "unplanned_qty": step_rem,
+                        "reason": "capacity_exceeded"})
+                elif overflow_placed > 0:
+                    # Fully planned but some/all slots land past the SO deadline.
+                    report["late"].append({
+                        "so": so["so_number"], "sku": sku_code,
+                        "line": so["line_item"],
+                        "unplanned_qty": 0,
+                        "reason": "overflow_late",
+                        "overflow_qty": overflow_placed})
+
+        # ── M6: Qty Handoff Post-Pass ─────────────────────────────────────────
+        # Each upstream step's actual planned qty caps the downstream step.
+        # Example: step1 fills 1,500 due to capacity constraint, step2 (final)
+        # fills 2,000 independently → trim step2 to 1,500 and restore capacity.
+        if len(steps) > 1:
+            step_actual: Dict[int, int] = {
+                s["process_seq"]: sum(q for _, _, _, q in step_slots.get(s["process_seq"], []))
+                for s in steps
+            }
+            for i in range(1, len(steps)):
+                prev_seq = steps[i - 1]["process_seq"]
+                curr_seq = steps[i]["process_seq"]
+                prev_qty = step_actual.get(prev_seq, 0)
+                curr_qty = step_actual.get(curr_seq, 0)
+                if curr_qty > prev_qty:
+                    excess = curr_qty - prev_qty
+                    curr_proc = steps[i]["process_name"]
+                    new_slots = self._trim_step_by_excess(
+                        step_slots.get(curr_seq, []), excess, uom, curr_proc, slot_map)
+                    step_slots[curr_seq] = new_slots
+                    step_actual[curr_seq] = sum(q for _, _, _, q in new_slots)
+                    PlanRepo.trim_step_excess(
+                        so["so_number"], sku_code, so["line_item"], curr_seq, excess)
 
     # ── Material Planning ────────────────────────────────────────────────────
 
@@ -1781,9 +1884,39 @@ class Scheduler:
 
     # ── Shared slot utilities ────────────────────────────────────────────────
 
+    def _trim_step_by_excess(
+            self,
+            slots: List[Tuple],
+            excess_qty: int,
+            uom: int,
+            proc_name: str,
+            slot_map: Dict[SlotKey, float],
+    ) -> List[Tuple]:
+        """Remove `excess_qty` from the end of `slots` (overflow/earliest first),
+        restoring freed capacity back into slot_map.  Returns the updated list."""
+        to_trim = excess_qty
+        result: List[Tuple] = []
+        for slot in reversed(slots):
+            ds, sno, rc, qty = slot
+            if to_trim <= 0:
+                result.insert(0, slot)
+                continue
+            if qty <= to_trim:
+                # Remove this slot entirely; restore capacity.
+                key: SlotKey = (ds, rc, proc_name, sno)
+                slot_map[key] = slot_map.get(key, 0.0) + sku_to_inner(qty, uom)
+                to_trim -= qty
+            else:
+                # Partial trim.
+                key = (ds, rc, proc_name, sno)
+                slot_map[key] = slot_map.get(key, 0.0) + sku_to_inner(to_trim, uom)
+                result.insert(0, (ds, sno, rc, qty - to_trim))
+                to_trim = 0
+        return result
+
     def _candidates(self, slot_map, process_name, eligible_rooms,
                     d0, d_upper, shift_upper, sku_code: str = "",
-                    room_type_priority: str = ""):
+                    room_type_priority: str = "", forward: bool = False):
         eligible_codes = {r["room_code"] for r in eligible_rooms}
         rp_lookup      = {r["room_code"]: r for r in eligible_rooms}
         raw = []
@@ -1815,6 +1948,11 @@ class Scheduler:
                 # More exclusive room types (fewer SKUs allowed) come first.
                 return self._room_type_exclusivity.get(room_type, 0)
 
+        # forward=True: earliest date first (overflow / late planning).
+        # forward=False (default): latest date first (backward fill).
+        date_sign = 1 if forward else -1
+        sno_sign  = 1 if forward else -1
+
         if self.assign_mode == "UPH":
             def uph_key(item):
                 ds, sno, room, rp = item
@@ -1823,7 +1961,7 @@ class Scheduler:
                 adj = (1 if sku_code and self._is_same_sku_adjacent(
                            room, process_name, ds, sno, sku_code) else 0)
                 rt  = _rt_rank(rp.get("room_type", ""))
-                return (-_date(ds).toordinal(), -sno, rt, -adj, -calc_uph(rp, hc))
+                return (date_sign * _date(ds).toordinal(), sno_sign * sno, rt, -adj, -calc_uph(rp, hc))
             raw.sort(key=uph_key)
         else:
             def cap_key(item):
@@ -1832,7 +1970,7 @@ class Scheduler:
                 adj = (1 if sku_code and self._is_same_sku_adjacent(
                            room, process_name, ds, sno, sku_code) else 0)
                 rt  = _rt_rank(rp.get("room_type", ""))
-                return (-_date(ds).toordinal(), -sno, rt, -adj, -c)
+                return (date_sign * _date(ds).toordinal(), sno_sign * sno, rt, -adj, -c)
             raw.sort(key=cap_key)
         return raw
 
