@@ -173,7 +173,12 @@ class Scheduler:
         for idx, so in enumerate(campaign_sos):
             if progress_cb:
                 progress_cb(idx, total, so)
-            self._plan_so(so, slot_map, effective_from, date_to, report)
+            has_successor = any(
+                s["sku_code"] == so["sku_code"]
+                for s in campaign_sos[idx + 1:]
+            )
+            self._plan_so(so, slot_map, effective_from, date_to, report,
+                          has_campaign_successor=has_successor)
 
         # 2. Plan derived Material demand
         self._plan_all_materials(slot_map, effective_from, date_to, report)
@@ -1404,7 +1409,8 @@ class Scheduler:
 
     def _plan_so(self, so: Dict, slot_map: Dict[SlotKey, float],
                  date_from: str, date_to: str, report: Dict,
-                 force: bool = False):
+                 force: bool = False,
+                 has_campaign_successor: bool = False):
         sku_code = so["sku_code"]
         sku      = self.sku_map.get(sku_code)
         if not sku:
@@ -1516,9 +1522,13 @@ class Scheduler:
                 if step_rem <= 0:
                     break
 
-                # Campaign closing: check if remaining < sum of all rooms' cap this shift
+                # Campaign closing: check if remaining < sum of all rooms' cap this shift.
+                # Skip closing check when more same-SKU SOs follow in the campaign —
+                # their demand will consume the remaining capacity.
                 _shift_key = (ds, sno)
-                if _shift_key not in _closing_placed:
+                if has_campaign_successor:
+                    _closing_mode = False
+                elif _shift_key not in _closing_placed:
                     _total_shift_cap = sum(
                         inner_to_sku(slot_map.get((_ds, _r, proc_name, _sno), 0.0), uom)
                         for _ds, _sno, _r, _ in candidates
@@ -1587,7 +1597,9 @@ class Scheduler:
                         if step_rem <= 0:
                             break
                         _shift_key = (ds, sno)
-                        if _shift_key not in _closing_placed_ov:
+                        if has_campaign_successor:
+                            _ov_closing = False
+                        elif _shift_key not in _closing_placed_ov:
                             _total_ov_cap = sum(
                                 inner_to_sku(slot_map.get((_ds, _r, proc_name, _sno), 0.0), uom)
                                 for _ds, _sno, _r, _ in overflow_cands
