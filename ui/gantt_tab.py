@@ -2971,12 +2971,7 @@ class SoPlanRow(QWidget):
         # Production deadline chip (due_date - post_lead_days)
         if prod_deadline:
             days_to = (prod_deadline - date.today()).days
-            if days_to == 0:
-                dl_str = "D-Day"
-            elif days_to < 0:
-                dl_str = f"D+{abs(days_to)}"
-            else:
-                dl_str = f"D-{days_to}"
+            dl_str = f"{prod_deadline.month}/{prod_deadline.day}"
             if days_to < 0:
                 dl_bg, dl_fg = "#fee2e2", "#dc2626"
             elif days_to <= 7:
@@ -3144,31 +3139,19 @@ class FloatingSummaryPanel(QWidget):
 
         self._lbl_room = QLabel("")
         self._lbl_room.setStyleSheet(
-            "QLabel { color:#64748b; font-size:9px; font-weight:600; letter-spacing:0.4px; }")
+            "QLabel { color:#334155; font-size:9px; font-weight:600; letter-spacing:0.4px; }")
 
         self._lbl_sku = QLabel("")
         self._lbl_sku.setStyleSheet(
             "QLabel { color:#1e293b; font-size:15px; font-weight:700; }")
 
-        # Chip row — date / shift / qty as consistent pill labels
-        _chip_css = (
-            "QLabel { background:#E8ECF5; border-radius:4px; padding:1px 7px;"
-            " font-size:9px; font-weight:500; color:#475569; }")
-        chip_row = QHBoxLayout()
-        chip_row.setSpacing(5)
-        chip_row.setContentsMargins(0, 0, 0, 0)
-        self._chip_date  = QLabel("—")
-        self._chip_shift = QLabel("—")
-        self._chip_qty   = QLabel("—")
-        for chip in (self._chip_date, self._chip_shift, self._chip_qty):
-            chip.setStyleSheet(_chip_css)
-            chip.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-            chip_row.addWidget(chip)
-        chip_row.addStretch()
+        self._lbl_meta = QLabel("")
+        self._lbl_meta.setStyleSheet(
+            "QLabel { color:#334155; font-size:9px; font-weight:500; }")
 
         title_col.addWidget(self._lbl_room)
         title_col.addWidget(self._lbl_sku)
-        title_col.addLayout(chip_row)
+        title_col.addWidget(self._lbl_meta)
         h_lay.addLayout(title_col, stretch=1)
 
         btn_close = QPushButton("✕")
@@ -3272,9 +3255,8 @@ class FloatingSummaryPanel(QWidget):
         n = merged_plan.get("_merged_count", 1)
         qty = merged_plan.get("qty_planned", 0)
         plan_lbl = "plan" if n == 1 else "plans"
-        self._chip_date.setText(merged_plan.get("plan_date", "—"))
-        self._chip_shift.setText(f"Shift {merged_plan.get('shift_no', '—')}")
-        self._chip_qty.setText(f"{qty:,} units")
+        self._lbl_meta.setText(
+            f"{merged_plan.get('plan_date', '—')}  ·  Shift {merged_plan.get('shift_no', '—')}  ·  {qty:,} units")
         self._lbl_footer.setText(f"Total {qty:,} units  ·  {n} {plan_lbl}")
 
         # Clear existing rows (keep trailing stretch)
@@ -3325,7 +3307,7 @@ class FloatingSummaryPanel(QWidget):
         main_win = self._canvas.window()
         geo = main_win.frameGeometry()
         pw, ph = self.width(), self.height()
-        x = geo.right() - pw + 8   # slightly overlap the right edge
+        x = geo.right() - pw - 4   # 4px gap from right edge
         y = geo.top() + 80         # below toolbar area
         screen = (QApplication.screenAt(geo.center()) or QApplication.primaryScreen())
         avail = screen.availableGeometry()
