@@ -3136,31 +3136,48 @@ class FloatingSummaryPanel(QWidget):
             "border-bottom:1px solid #DDE3ED;")
 
         h_lay = QHBoxLayout(self._hdr)
-        h_lay.setContentsMargins(14, 8, 10, 8)
+        h_lay.setContentsMargins(14, 10, 10, 10)
         h_lay.setSpacing(6)
 
         title_col = QVBoxLayout()
-        title_col.setSpacing(2)
+        title_col.setSpacing(3)
+
         self._lbl_room = QLabel("")
         self._lbl_room.setStyleSheet(
-            "QLabel { color:#64748b; font-size:9px; font-weight:700; letter-spacing:0.5px; }")
+            "QLabel { color:#64748b; font-size:9px; font-weight:600; letter-spacing:0.4px; }")
+
         self._lbl_sku = QLabel("")
         self._lbl_sku.setStyleSheet(
-            "QLabel { color:#1e293b; font-size:14px; font-weight:700; }")
-        self._lbl_meta = QLabel("")
-        self._lbl_meta.setStyleSheet(
-            "QLabel { color:#475569; font-size:9px; }")
+            "QLabel { color:#1e293b; font-size:15px; font-weight:700; }")
+
+        # Chip row — date / shift / qty as consistent pill labels
+        _chip_css = (
+            "QLabel { background:#E8ECF5; border-radius:4px; padding:1px 7px;"
+            " font-size:9px; font-weight:500; color:#475569; }")
+        chip_row = QHBoxLayout()
+        chip_row.setSpacing(5)
+        chip_row.setContentsMargins(0, 0, 0, 0)
+        self._chip_date  = QLabel("—")
+        self._chip_shift = QLabel("—")
+        self._chip_qty   = QLabel("—")
+        for chip in (self._chip_date, self._chip_shift, self._chip_qty):
+            chip.setStyleSheet(_chip_css)
+            chip.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+            chip_row.addWidget(chip)
+        chip_row.addStretch()
+
         title_col.addWidget(self._lbl_room)
         title_col.addWidget(self._lbl_sku)
-        title_col.addWidget(self._lbl_meta)
+        title_col.addLayout(chip_row)
         h_lay.addLayout(title_col, stretch=1)
 
         btn_close = QPushButton("✕")
-        btn_close.setFixedSize(24, 24)
+        btn_close.setFixedSize(28, 28)
         btn_close.setStyleSheet(
-            "QPushButton{background:#e2e8f0;border:none;color:#475569;"
-            "border-radius:5px;font-size:12px;}"
-            "QPushButton:hover{background:#cbd5e1;border:none;}")
+            "QPushButton { background:transparent; border:none; color:#94a3b8;"
+            " border-radius:6px; font-size:13px; font-weight:700; }"
+            "QPushButton:hover { background:#FEE2E2; color:#DC2626; border:none; }"
+            "QPushButton:pressed { background:#FECACA; color:#DC2626; border:none; }")
         btn_close.clicked.connect(self.close_panel)
         h_lay.addWidget(btn_close, alignment=Qt.AlignmentFlag.AlignTop)
 
@@ -3255,9 +3272,9 @@ class FloatingSummaryPanel(QWidget):
         n = merged_plan.get("_merged_count", 1)
         qty = merged_plan.get("qty_planned", 0)
         plan_lbl = "plan" if n == 1 else "plans"
-        self._lbl_meta.setText(
-            f"📅 {merged_plan.get('plan_date', '')}  Shift {merged_plan.get('shift_no', '')}   ·   "
-            f"📦 {qty:,}")
+        self._chip_date.setText(merged_plan.get("plan_date", "—"))
+        self._chip_shift.setText(f"Shift {merged_plan.get('shift_no', '—')}")
+        self._chip_qty.setText(f"{qty:,} units")
         self._lbl_footer.setText(f"Total {qty:,} units  ·  {n} {plan_lbl}")
 
         # Clear existing rows (keep trailing stretch)
