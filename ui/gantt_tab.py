@@ -873,6 +873,9 @@ class GanttCanvas(QWidget):
         # CLOSE badge visibility (off by default)
         self._show_close_badge   : bool            = False
 
+        # Final-only filter — dim non-final-seq plans
+        self._final_only         : bool            = False
+
         self._cell_map      : Dict[int, QRect] = {}
         self._check_rects   : Dict[int, QRect] = {}
         self._check_hit_rects: Dict[int, QRect] = {}
@@ -1003,6 +1006,11 @@ class GanttCanvas(QWidget):
 
     def toggle_close_badge(self, on: bool):
         self._show_close_badge = on
+        self._pixmap_dirty = True
+        self.update()
+
+    def toggle_final_only(self, on: bool):
+        self._final_only = on
         self._pixmap_dirty = True
         self.update()
 
@@ -1726,6 +1734,11 @@ class GanttCanvas(QWidget):
                 else:
                     so_status = "on_time"
                 if so_status != self._status_filter:
+                    dim_out = True
+
+            # Final-only filter: dim plans that are not the final process step
+            if self._final_only and not dim_out:
+                if not plan.get("is_final_seq"):
                     dim_out = True
 
             p.setOpacity(0.12 if dim_out else 1.0)
@@ -3150,6 +3163,30 @@ class GanttTab(QWidget):
             self.gantt_y_label.sync_from(self.canvas)
         self._btn_sum.toggled.connect(_on_sum_toggle)
         r1.addWidget(self._btn_sum)
+
+        # Final-only filter toggle
+        _fo_css_off = (
+            "QPushButton { background:#fff; color:#3a4255; border:1px solid #d4d7e0;"
+            " border-radius:4px; padding:3px 9px; font-size:10px; font-weight:600; }"
+            "QPushButton:hover { background:#f5f6fa; }"
+        )
+        _fo_css_on = (
+            "QPushButton { background:#d97706; color:#fff; border:none;"
+            " border-radius:4px; padding:3px 9px; font-size:10px; font-weight:600; }"
+            "QPushButton:hover { background:#b45309; }"
+        )
+        self._btn_final_only = QPushButton("★  Final only")
+        self._btn_final_only.setCheckable(True)
+        self._btn_final_only.setFixedHeight(26)
+        self._btn_final_only.setToolTip(
+            "Highlight only final-process plans (is_final_seq = 1).\n"
+            "All other plans are dimmed.")
+        self._btn_final_only.setStyleSheet(_fo_css_off)
+        def _on_fo_toggle(checked):
+            self._btn_final_only.setStyleSheet(_fo_css_on if checked else _fo_css_off)
+            self.canvas.toggle_final_only(checked)
+        self._btn_final_only.toggled.connect(_on_fo_toggle)
+        r1.addWidget(self._btn_final_only)
 
         # CLOSE badge toggle
         _cb_css_off = (
