@@ -1224,6 +1224,10 @@ class GanttCanvas(QWidget):
             self._prebuilt_rects[pid] = rect
             self._spatial_index[(col, ri)].append(pid)
 
+        # Pre-populate _cell_map from prebuilt rects so hit-testing works
+        # even for plans that are outside the current paint clip region.
+        self._cell_map = dict(self._prebuilt_rects)
+
     def _build_hc_map(self):
         """Build headcount utilisation map: (date_str, shift_no) -> (alloc, crp_total).
         Denominator is CRP total HC, so ratio = people actually placed / people available.
@@ -1385,16 +1389,23 @@ class GanttCanvas(QWidget):
     def _draw_grid(self, p: QPainter):
         w, h = self._total_w(), self._total_h()
         cw_  = self._col_w()
-        # Alternating row backgrounds
+        clip = p.clipBoundingRect().toRect() if p.hasClipping() else QRect(0, 0, w, h)
+        cx0, cy0, cx1, cy1 = clip.left(), clip.top(), clip.right(), clip.bottom()
+
+        # Alternating row backgrounds (skip rows outside clip)
         for ri in range(len(self._rows)):
             y  = self._row_y_list[ri]
             rh = self._row_heights[ri]
+            if y + rh < cy0: continue
+            if y > cy1: break
             bg = ROW_BG_A if ri % 2 == 0 else ROW_BG_B
             p.fillRect(0, y, w, rh, bg)
-        # Weekend + today column tints
+        # Weekend + today column tints (skip columns outside clip)
         if not self.shift_view:
             today_col_idx = self._date_to_col(date.today().strftime("%Y-%m-%d"))
-            for col in range(self.horizon_days):
+            col_start = max(0, cx0 // DAY_W)
+            col_end   = min(self.horizon_days, cx1 // DAY_W + 1)
+            for col in range(col_start, col_end):
                 d = self.start_date + timedelta(days=col)
                 x = col * DAY_W
                 if d.weekday() >= 5:
@@ -1411,6 +1422,9 @@ class GanttCanvas(QWidget):
                 cy  = self._row_y_list[ri]
                 crh = self._row_heights[ri]
                 cx  = col * cw_
+                # Skip cells entirely outside clip
+                if cx + cw_ < cx0 or cx > cx1 or cy + crh < cy0 or cy > cy1:
+                    continue
                 if status == "hold":
                     base  = QColor(255, 160, 40, 55)
                     hatch = QColor(210, 120, 20, 110)
@@ -1427,16 +1441,21 @@ class GanttCanvas(QWidget):
                     p.drawLine(max(ax, x0), y0 if ax >= x0 else y0 + (x0 - ax),
                                min(ax + crh, x1), y0 + crh if ax + crh <= x1 else y1 - ((ax + crh) - x1))
                 p.setPen(old_pen)
-        # Vertical column dividers
+        # Vertical column dividers (skip columns outside clip)
         p.setPen(QPen(GRID_LINE, 1))
-        for col in range(self._col_count() + 1):
+        col_start = max(0, cx0 // cw_) if cw_ > 0 else 0
+        col_end   = min(self._col_count(), cx1 // cw_ + 1) if cw_ > 0 else self._col_count()
+        for col in range(col_start, col_end + 1):
             x = col * cw_
-            p.drawLine(x, 0, x, h)
-        # Horizontal row dividers
+            p.drawLine(x, cy0, x, min(cy1, h))
+        # Horizontal row dividers (skip rows outside clip)
         for ri in range(len(self._rows)):
             y = self._row_y_list[ri]
+            if y < cy0: continue
+            if y > cy1: break
             p.drawLine(0, y, w, y)
-        p.drawLine(0, self._total_body_h, w, self._total_body_h)
+        if cy0 <= self._total_body_h <= cy1:
+            p.drawLine(0, self._total_body_h, w, self._total_body_h)
 
     def _draw_y_labels(self, p: QPainter):
         """Y-axis labels — mockup style: #f7f8fb bg, bold name + muted sub-label."""
@@ -1572,7 +1591,8 @@ class GanttCanvas(QWidget):
         p.setOpacity(1.0)
 
     def _draw_plans(self, p: QPainter):
-        self._cell_map.clear()
+        # _cell_map pre-populated from _prebuilt_rects in _build_layout_and_heights;
+        # only clear the per-draw hit-test maps (populated for visible plans only).
         self._check_rects.clear()
         self._check_hit_rects.clear()
         conflict_slots = {
@@ -1581,6 +1601,9 @@ class GanttCanvas(QWidget):
         }
         consol_groups: Dict[str, List[QRect]] = {}
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        # Viewport culling: skip plans outside the current dirty/clip rect.
+        clip = p.clipBoundingRect().toRect() if p.hasClipping() else self.rect()
 
         f_l1 = QFont("Segoe UI", 9, QFont.Weight.Bold)
         f_l2 = QFont("Segoe UI", 8)
@@ -1592,6 +1615,9 @@ class GanttCanvas(QWidget):
         for plan in self._display_plans:
             rect = self._plan_rect(plan)
             if not rect:
+                continue
+            # Skip plans outside the clip region (viewport culling).
+            if not clip.intersects(rect):
                 continue
             is_merged = len(plan.get("_merged_ids", [])) > 1
             self._cell_map[plan["plan_id"]] = rect
@@ -2062,8 +2088,21 @@ class GanttCanvas(QWidget):
         plan = self._plan_at(pos)
         new_hover = plan["plan_id"] if plan else None
         if new_hover != self._hover_plan_id:
+            # Partial repaint: only the two cards whose hover state changes.
+            # This avoids a full-canvas repaint on every mouse move.
+            _dirty: List[QRect] = []
+            if self._hover_plan_id:
+                r = self._prebuilt_rects.get(self._hover_plan_id)
+                if r: _dirty.append(r.adjusted(-2, -2, 2, 2))
             self._hover_plan_id = new_hover
-            self.update()
+            if new_hover:
+                r = self._prebuilt_rects.get(new_hover)
+                if r: _dirty.append(r.adjusted(-2, -2, 2, 2))
+            if _dirty:
+                for r in _dirty:
+                    self.update(r)
+            else:
+                self.update()
         if plan:
             self.setCursor(Qt.CursorShape.OpenHandCursor)
             is_mat = plan.get("entity_type") == "MATERIAL"
