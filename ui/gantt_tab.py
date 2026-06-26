@@ -890,6 +890,10 @@ class GanttCanvas(QWidget):
         self._spatial_index  : Dict[Tuple[int,int], List[int]] = {}
         # O(1) row lookup built in _build_rows()
         self._row_index   : Dict[str, int] = {}
+        # QPixmap cache — static content rendered once per data change.
+        # Only used when canvas fits within MAX_PIXMAP_MP megapixels.
+        self._static_pixmap  : Optional["QPixmap"]         = None
+        self._pixmap_dirty   : bool                        = True
         # Calendar unavailability maps
         self._closed_map  : Dict[Tuple[int, int], str] = {}          # (ri,col)->status for hatching
         self._slot_closed : Dict[Tuple[str, str, int], str] = {}     # (room,date,shift)->status for badge
@@ -989,6 +993,7 @@ class GanttCanvas(QWidget):
             self._hc_util_by_date  = {}
             self._hc_alloc_by_date = {}
         self._update_size()
+        self._pixmap_dirty = True   # data changed — invalidate static cache
         self.update()
 
     # ── Summarize mode ───────────────────────────────────────────────────────
@@ -998,6 +1003,7 @@ class GanttCanvas(QWidget):
         self._build_summarized_plans()
         self._build_layout_and_heights()
         self._update_size()
+        self._pixmap_dirty = True
         self.update()
 
     def _build_mat_first_use(self, plans):
@@ -1095,11 +1101,13 @@ class GanttCanvas(QWidget):
 
     def set_search_filter(self, text: str):
         self._search_filter = text
+        self._pixmap_dirty = True
         self.update()
 
     def set_status_filter(self, status: str):
         """Filter by schedule status: 'on_time', 'at_risk', 'late', or '' to clear."""
         self._status_filter = status
+        self._pixmap_dirty = True
         self.update()
 
     def _is_holiday(self, d: date) -> bool:
@@ -1367,18 +1375,78 @@ class GanttCanvas(QWidget):
 
     # ── Painting ──────────────────────────────────────────────────────────────
 
-    def paintEvent(self, event):
-        p = QPainter(self)
+    # Maximum canvas size (in megapixels) to use QPixmap caching.
+    # Above this threshold the pixmap would be too large (> ~200 MB).
+    _MAX_PIXMAP_MP = 50
+
+    def _use_pixmap_cache(self) -> bool:
+        mp = (self._total_w() * self._total_h()) / 1_000_000
+        return mp <= self._MAX_PIXMAP_MP
+
+    def _render_to_pixmap(self):
+        from PyQt6.QtGui import QPixmap
+        sz = self.size()
+        if sz.isEmpty():
+            return
+        pm = QPixmap(sz)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
         try:
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
             self._draw_grid(p)
             self._draw_today_line(p)
             self._draw_plans(p)
             self._draw_cell_util_bars(p)
-            if self._stack_drag:
-                self._draw_stack_guide(p)
-            elif self._drag_rect:
-                self._draw_drag_ghost(p)
+        finally:
+            p.end()
+        self._static_pixmap = pm
+        self._pixmap_dirty  = False
+
+    def _draw_hover_overlay(self, p: QPainter):
+        """Draw hover highlight on top of the cached pixmap (dynamic overlay)."""
+        if not self._hover_plan_id:
+            return
+        rect = self._prebuilt_rects.get(self._hover_plan_id)
+        if rect:
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            p.setPen(QPen(QColor(37, 99, 235, 200), 2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(rect.adjusted(1, 1, -1, -1), CARD_RADIUS, CARD_RADIUS)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        try:
+            if self._use_pixmap_cache():
+                # ── Pixmap-cached path (most common case) ─────────────────────
+                # Re-render the static pixmap only when data/state changed.
+                need_render = (
+                    self._pixmap_dirty or
+                    self._static_pixmap is None or
+                    self._static_pixmap.size() != self.size()
+                )
+                if need_render:
+                    self._render_to_pixmap()
+                # Blit the cached pixmap — only the dirty rect for efficiency.
+                src = event.rect()
+                p.drawPixmap(src, self._static_pixmap, src)
+                # Dynamic overlays drawn on top (never invalidate the pixmap).
+                self._draw_hover_overlay(p)
+                if self._stack_drag:
+                    self._draw_stack_guide(p)
+                elif self._drag_rect:
+                    self._draw_drag_ghost(p)
+            else:
+                # ── Direct-render path (large SO-mode canvas) ─────────────────
+                p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                self._draw_grid(p)
+                self._draw_today_line(p)
+                self._draw_plans(p)
+                self._draw_cell_util_bars(p)
+                self._draw_hover_overlay(p)
+                if self._stack_drag:
+                    self._draw_stack_guide(p)
+                elif self._drag_rect:
+                    self._draw_drag_ghost(p)
         except Exception:
             import traceback
             with open("drag_crash.txt", "w", encoding="utf-8") as f:
@@ -1700,11 +1768,8 @@ class GanttCanvas(QWidget):
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRoundedRect(rect, CARD_RADIUS, CARD_RADIUS)
 
-            # ── Hover highlight ───────────────────────────────────────────────
-            if plan["plan_id"] == self._hover_plan_id:
-                p.setPen(QPen(QColor(37, 99, 235, 200), 2))
-                p.setBrush(Qt.BrushStyle.NoBrush)
-                p.drawRoundedRect(rect.adjusted(1, 1, -1, -1), CARD_RADIUS, CARD_RADIUS)
+            # Hover highlight is now drawn as a dynamic overlay in _draw_hover_overlay()
+            # to avoid invalidating the static pixmap on every mouse move.
 
             # ── PILL ROW (top PILL_H px) ──────────────────────────────────────
             pill_y = rect.y() + PILL_MARGIN
@@ -2350,6 +2415,7 @@ class GanttCanvas(QWidget):
         else:
             self._checked.add(plan_id)
         self.selectionChanged.emit(list(self._checked))
+        self._pixmap_dirty = True
         self.update()
 
     def _plan_at(self, pos: QPoint) -> Optional[Dict]:
