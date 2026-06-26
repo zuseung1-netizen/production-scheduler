@@ -930,12 +930,9 @@ class Scheduler:
 
             loose_assignments: List[Tuple[Dict, str, int]] = []
             for plan in desired_loose:
-                orig_idx = _sidx(plan["plan_date"], plan["shift_no"])
                 dl = _deadline(plan)
                 placed = False
                 for i, (nd, ns) in enumerate(remaining_pool):
-                    if _sidx(nd, ns) < orig_idx:   # directional constraint
-                        continue
                     if nd > dl:                     # would miss deadline
                         continue
                     if _gap_ok(plan, nd, ns):
@@ -944,11 +941,10 @@ class Scheduler:
                         placed = True
                         break
                 if not placed:
-                    # Fallback: anchor at original slot
-                    orig = (plan["plan_date"], plan["shift_no"])
-                    loose_assignments.append((plan, orig[0], orig[1]))
+                    # Fallback: anchor at original slot (deadline or gap constraint blocked all moves)
+                    loose_assignments.append((plan, plan["plan_date"], plan["shift_no"]))
                     try:
-                        remaining_pool.remove(orig)
+                        remaining_pool.remove((plan["plan_date"], plan["shift_no"]))
                     except ValueError:
                         pass
                     frozen += 1
