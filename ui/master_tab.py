@@ -1227,6 +1227,16 @@ class AppConfigWidget(QWidget):
             "to reduce changeovers. Plans never cross week boundaries.")
         form.addRow("Weekly Reorganize:", self.weekly_reorg_enabled)
 
+        self.frozen_days = QSpinBox()
+        self.frozen_days.setRange(0, 30)
+        self.frozen_days.setSuffix(" days")
+        self.frozen_days.setValue(int(ConfigRepo.get("frozen_days", "0")))
+        self.frozen_days.setToolTip(
+            "Plans within this many days of today are protected from Auto-Plan.\n"
+            "Auto-Plan will not delete or reschedule these plans.\n"
+            "0 = no frozen zone (default). Recommended: 1–3 days for live operations.")
+        form.addRow("Frozen Zone:", self.frozen_days)
+
         # ── Pull-Forward Settings ─────────────────────────────────────────────
         pf_label = QLabel("— Pull-Forward —")
         pf_label.setStyleSheet("color:#64748B; font-size:11px;")
@@ -1359,6 +1369,7 @@ class AppConfigWidget(QWidget):
         ConfigRepo.set("pull_forward_util_threshold", str(self.pf_util_thresh.value()))
         ConfigRepo.set("pull_forward_lookahead_days",  str(self.pf_lookahead.value()))
         ConfigRepo.set("pull_forward_max_early_days",  str(self.pf_max_early.value()))
+        ConfigRepo.set("frozen_days", str(self.frozen_days.value()))
         QMessageBox.information(self, "Saved", "Settings saved.")
 
 

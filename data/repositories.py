@@ -886,13 +886,12 @@ class PlanRepo:
 
     @staticmethod
     def delete_unlocked(date_from: str, date_to: str) -> int:
-        """Clear ALL unlocked plans (SKU + MATERIAL) up to date_to and
-        orphaned demand-group rows. Called at the start of auto_plan() so
-        that every run starts with a clean slate — locked plans are kept.
-        No lower-bound filter: stale plans from previous days (before date_from)
-        are also removed so they don't inflate planned_qty checks."""
-        clauses = ["is_locked=0", "plan_date <= ?"]
-        params = [date_to]
+        """Clear unlocked plans (SKU + MATERIAL) within [date_from, date_to]
+        and orphaned demand-group rows. Called at the start of auto_plan().
+        Locked plans are kept. date_from acts as a hard lower bound so that
+        plans before the planning window (e.g. frozen zone) are not touched."""
+        clauses = ["is_locked=0", "plan_date >= ?", "plan_date <= ?"]
+        params = [date_from, date_to]
         where = "WHERE " + " AND ".join(clauses)
         mat_where = "WHERE " + " AND ".join(
             clauses + ["material_group_id IS NOT NULL"])

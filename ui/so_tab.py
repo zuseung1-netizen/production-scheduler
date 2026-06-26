@@ -628,8 +628,16 @@ class SOTab(QWidget):
         item, ok = QInputDialog.getItem(self, "Rollback", "Select snapshot to restore:", items, 0, False)
         if ok and item:
             batch_id = snapshots[items.index(item)]["batch_id"]
+            from data.repositories import AllocationRepo
+            alloc_count = len(AllocationRepo.all_allocations())
+            alloc_warning = (
+                f"\n\n⚠ WARNING: {alloc_count} inventory allocation(s) will be permanently lost.\n"
+                f"Inventory-to-SO linkages are not included in the snapshot\n"
+                f"and cannot be restored after rollback."
+            ) if alloc_count > 0 else ""
             if QMessageBox.warning(self, "Confirm Rollback",
-                f"Restore SO data to snapshot {batch_id}?\nThis cannot be undone.",
+                f"Restore SO data to snapshot {batch_id}?\n"
+                f"This cannot be undone.{alloc_warning}",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             ) == QMessageBox.StandardButton.Yes:
                 SORepo.rollback(batch_id)

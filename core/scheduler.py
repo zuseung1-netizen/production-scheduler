@@ -140,9 +140,18 @@ class Scheduler:
     def auto_plan(self, date_from: str, date_to: str,
                   progress_cb=None) -> Dict:
         self._reload_masters()
-        PlanRepo.delete_unlocked(date_from, date_to)
+
+        # Frozen zone: plans within frozen_days of today are never touched
+        frozen_days = int(ConfigRepo.get("frozen_days", "0"))
+        if frozen_days > 0:
+            frozen_cutoff = (date.today() + timedelta(days=frozen_days)).isoformat()
+            effective_from = max(date_from, frozen_cutoff)
+        else:
+            effective_from = date_from
+
+        PlanRepo.delete_unlocked(effective_from, date_to)
         open_sos = self._sorted_open_sos()
-        slot_map = self._build_slot_map(date_from, date_to)
+        slot_map = self._build_slot_map(effective_from, date_to)
         report   = {"planned": 0, "skipped": 0, "late": [],
                     "routing_errors": [], "material_plans": 0}
 
@@ -155,14 +164,14 @@ class Scheduler:
         for idx, so in enumerate(campaign_sos):
             if progress_cb:
                 progress_cb(idx, total, so)
-            self._plan_so(so, slot_map, date_from, date_to, report)
+            self._plan_so(so, slot_map, effective_from, date_to, report)
 
         # 2. Plan derived Material demand
-        self._plan_all_materials(slot_map, date_from, date_to, report)
+        self._plan_all_materials(slot_map, effective_from, date_to, report)
 
         # 3. Weekly reorganize: group same-SKU plans within each ISO week
         if ConfigRepo.get("weekly_reorganize_enabled", "1") == "1":
-            reorg = self.weekly_reorganize(date_from, date_to)
+            reorg = self.weekly_reorganize(effective_from, date_to)
             report["reorg_moved"]   = reorg["moved"]
             report["reorg_frozen"]  = reorg.get("frozen", 0)
             report["reorg_skipped"] = reorg.get("skipped_groups", 0)
