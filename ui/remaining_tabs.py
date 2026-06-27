@@ -859,29 +859,29 @@ class CRPTab(QWidget):
             self._crp_loading = False
             return
 
-        dates  = sorted({k[0] for k in data.keys()})[:28]
+        dates  = sorted({k[0] for k in data.keys()})
         shifts = sorted({k[1] for k in data.keys()})
         self._crp_dates  = dates
         self._crp_shifts = shifts
 
-        headers = ["Shift"] + dates
+        # Transposed: rows = dates, columns = shifts
+        headers = ["Date"] + [f"Shift {s}" for s in shifts]
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
-        self.table.setRowCount(len(shifts))
+        self.table.setRowCount(len(dates))
 
-        editable = (QTableWidgetItem.ItemType.Type,)  # just to call flags below
-        for ri, shift in enumerate(shifts):
-            lbl = QTableWidgetItem(f"Shift {shift}")
+        for ri, d in enumerate(dates):
+            lbl = QTableWidgetItem(d[5:].replace("-", "/"))  # MM/DD
             lbl.setFlags(lbl.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.table.setItem(ri, 0, lbl)
-            for di, d in enumerate(dates):
+            for si, shift in enumerate(shifts):
                 hc   = data.get((d, shift), 0)
                 item = QTableWidgetItem(str(hc))
                 if hc == 0:
                     item.setBackground(QBrush(QColor("#ffe0e0")))
                 if not self._crp_edit_mode:
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                self.table.setItem(ri, 1 + di, item)
+                self.table.setItem(ri, 1 + si, item)
 
         self.table.resizeColumnsToContents()
         self._crp_loading = False
@@ -937,10 +937,10 @@ class CRPTab(QWidget):
             if hc < 0:
                 errors.append(f"Row {ri+1}, Col {ci}: HC cannot be negative (got {hc})")
                 continue
-            if ci - 1 >= len(self._crp_dates) or ri >= len(self._crp_shifts):
+            if ri >= len(self._crp_dates) or ci - 1 >= len(self._crp_shifts):
                 continue
-            date_str = self._crp_dates[ci - 1]
-            shift_no = self._crp_shifts[ri]
+            date_str = self._crp_dates[ri]
+            shift_no = self._crp_shifts[ci - 1]
             updates[(date_str, shift_no)] = hc
 
         if errors:
