@@ -1227,6 +1227,25 @@ class AppConfigWidget(QWidget):
             "to reduce changeovers. Plans never cross week boundaries.")
         form.addRow("Weekly Reorganize:", self.weekly_reorg_enabled)
 
+        self.campaign_pass_enabled = QCheckBox("Run campaign pass after auto-plan")
+        self.campaign_pass_enabled.setChecked(
+            ConfigRepo.get("campaign_pass_enabled", "1") == "1")
+        self.campaign_pass_enabled.setToolTip(
+            "Pull same-SKU/Room/Process plans from later dates into earlier dates\n"
+            "when capacity allows — fills gaps and reduces setup occurrences.")
+        form.addRow("Campaign Pass:", self.campaign_pass_enabled)
+
+        self.campaign_pass_window = QSpinBox()
+        self.campaign_pass_window.setRange(1, 30)
+        self.campaign_pass_window.setSuffix(" days")
+        self.campaign_pass_window.setValue(
+            int(ConfigRepo.get("campaign_pass_window_days", "3")))
+        self.campaign_pass_window.setToolTip(
+            "Plans within this many calendar days of each other (same SKU/Room/Process)\n"
+            "are treated as one campaign and pulled into the earliest available slot.\n"
+            "Default: 3 days.")
+        form.addRow("Campaign Pass Window:", self.campaign_pass_window)
+
         self.frozen_days = QSpinBox()
         self.frozen_days.setRange(0, 30)
         self.frozen_days.setSuffix(" days")
@@ -1366,6 +1385,9 @@ class AppConfigWidget(QWidget):
         ConfigRepo.set("max_consolidation_days",  str(self.campaign_window.value()))
         ConfigRepo.set("weekly_reorganize_enabled",
                        "1" if self.weekly_reorg_enabled.isChecked() else "0")
+        ConfigRepo.set("campaign_pass_enabled",
+                       "1" if self.campaign_pass_enabled.isChecked() else "0")
+        ConfigRepo.set("campaign_pass_window_days", str(self.campaign_pass_window.value()))
         ConfigRepo.set("pull_forward_util_threshold", str(self.pf_util_thresh.value()))
         ConfigRepo.set("pull_forward_lookahead_days",  str(self.pf_lookahead.value()))
         ConfigRepo.set("pull_forward_max_early_days",  str(self.pf_max_early.value()))

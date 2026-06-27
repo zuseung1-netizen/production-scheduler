@@ -206,6 +206,13 @@ class Scheduler:
         else:
             report["reorg_moved"] = 0
 
+        # 4. Campaign pass: pull fragmented same-SKU plans into earliest available slot
+        if ConfigRepo.get("campaign_pass_enabled", "1") == "1":
+            cp = self.campaign_pass(effective_from, date_to)
+            report["campaign_moved"] = cp["moved"]
+        else:
+            report["campaign_moved"] = 0
+
         return report
 
     def _apply_campaign_grouping(self, open_sos: List[Dict]) -> List[Dict]:
@@ -999,6 +1006,112 @@ class Scheduler:
                 moved += 1
 
         return {"moved": moved, "frozen": frozen, "skipped_groups": skipped}
+
+    # ── Campaign Pass ─────────────────────────────────────────────────────────
+    def campaign_pass(self, date_from: str, date_to: str) -> Dict:
+        """Post-pass: pull unlocked same-SKU/Room/Process plans from later dates
+        into earlier dates when capacity permits.
+
+        Within each cluster (plans whose dates span ≤ campaign_pass_window_days),
+        later plans are moved earlier if the target slot has sufficient remaining
+        capacity.  Locked and consolidated plans are never touched.
+
+        Returns {"moved": N}.
+        """
+        from collections import defaultdict as _dd
+
+        window = int(ConfigRepo.get("campaign_pass_window_days", "3"))
+        if window <= 0:
+            return {"moved": 0}
+
+        self._reload_masters()
+
+        # Capacity available per slot (locked plans already subtracted)
+        slot_full_cap: Dict[SlotKey, float] = self._build_slot_map(date_from, date_to)
+
+        # All unlocked, non-consolidated SKU plans in range
+        all_plans = [
+            p for p in PlanRepo.all(date_from, date_to, entity_type="SKU")
+            if not p["is_locked"] and not p.get("is_consolidated")
+        ]
+
+        # Current inner-unit usage per slot for unlocked plans
+        slot_used: Dict[SlotKey, float] = _dd(float)
+        for p in all_plans:
+            uom = self._entity_uom(p)
+            key: SlotKey = (p["plan_date"], p["room_code"],
+                            p["process_name"], p["shift_no"])
+            slot_used[key] += sku_to_inner(p["qty_planned"], uom)
+
+        # Group by (entity_code, room_code, process_name)
+        groups: Dict[Tuple, List[Dict]] = _dd(list)
+        for p in all_plans:
+            groups[(p["entity_code"], p["room_code"], p["process_name"])].append(p)
+
+        moved = 0
+
+        for (entity_code, room_code, process_name), plans in groups.items():
+            if len(plans) < 2:
+                continue
+
+            sku_obj = self.sku_map.get(entity_code, {})
+            uom = int(sku_obj.get("uom") or 1)
+
+            # Sort by date then shift (ascending)
+            plans.sort(key=lambda p: (p["plan_date"], p["shift_no"]))
+
+            # Cluster: plans whose date is within `window` days of the cluster's first date
+            clusters: List[List[Dict]] = []
+            current: List[Dict] = [plans[0]]
+            for p in plans[1:]:
+                d_start = date.fromisoformat(current[0]["plan_date"])
+                d_cur   = date.fromisoformat(p["plan_date"])
+                if (d_cur - d_start).days <= window:
+                    current.append(p)
+                else:
+                    if len(current) > 1:
+                        clusters.append(current[:])
+                    current = [p]
+            if len(current) > 1:
+                clusters.append(current)
+
+            for cluster in clusters:
+                # Try pulling each later plan into an earlier slot within the cluster
+                for pi in range(1, len(cluster)):
+                    later = cluster[pi]
+                    inner_qty: float = sku_to_inner(later["qty_planned"], uom)
+                    later_key: SlotKey = (
+                        later["plan_date"], room_code,
+                        process_name, later["shift_no"]
+                    )
+
+                    for earlier in cluster[:pi]:
+                        if earlier["plan_date"] >= later["plan_date"]:
+                            continue  # same or later date — skip
+                        e_key: SlotKey = (
+                            earlier["plan_date"], room_code,
+                            process_name, earlier["shift_no"]
+                        )
+                        remaining = (
+                            slot_full_cap.get(e_key, 0.0)
+                            - slot_used.get(e_key, 0.0)
+                        )
+                        if remaining >= inner_qty:
+                            # Pull later plan into this earlier slot
+                            slot_used[later_key] -= inner_qty
+                            slot_used[e_key]     += inner_qty
+                            PlanRepo.update(
+                                later["plan_id"],
+                                {"plan_date": earlier["plan_date"],
+                                 "shift_no":  earlier["shift_no"]},
+                                reason="campaign_pass",
+                            )
+                            later["plan_date"] = earlier["plan_date"]
+                            later["shift_no"]  = earlier["shift_no"]
+                            moved += 1
+                            break  # this plan is placed; move on to next
+
+        return {"moved": moved}
 
     def defragment(self, date_from: str, date_to: str) -> Dict:
         """Post-pass: reorder unlocked SKU plans within each (room, process) to

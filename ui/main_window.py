@@ -203,11 +203,23 @@ class NavSidebar(QWidget):
         brand_lay.addStretch()
         outer.addWidget(brand_w)
 
-        self._item_layout = QVBoxLayout()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setStyleSheet(
+            "QScrollArea { background: #eef2fa; border: none; }"
+            "QScrollBar:vertical { width: 4px; background: transparent; }"
+            "QScrollBar::handle:vertical { background: #c1cfe0; border-radius: 2px; }"
+        )
+        _scroll_content = QWidget()
+        _scroll_content.setObjectName("rail")
+        self._item_layout = QVBoxLayout(_scroll_content)
         self._item_layout.setContentsMargins(0, 6, 0, 6)
         self._item_layout.setSpacing(0)
-        outer.addLayout(self._item_layout)
-        outer.addStretch()
+        scroll.setWidget(_scroll_content)
+        outer.addWidget(scroll)
 
     def add_group(self, label: str):
         lbl = QLabel(label.upper())
