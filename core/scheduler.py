@@ -2352,15 +2352,28 @@ class Scheduler:
         return urgency
 
     def compute_hc_distribution_preview(self, date_from: str, date_to: str) -> Dict:
-        """Returns {(date_str, shift_no): {(room, proc): hc}} for UI preview."""
+        """Returns {(date_str, shift_no): {(room, proc): hc}} for UI preview.
+
+        Only rooms/processes with actual production plans in each slot receive HC.
+        """
         self._reload_masters()
         urgency = self._compute_urgency()
         result: Dict[Tuple[str,int], Dict[Tuple[str,str], int]] = {}
+
+        # Pre-load all plans in range once → {(date, shift): {(room, proc)}}
+        planned_combos: dict = {}
+        for p in PlanRepo.all(date_from, date_to):
+            key = (p["plan_date"], p["shift_no"])
+            planned_combos.setdefault(key, set()).add(
+                (p["room_code"], p["process_name"]))
+
         cur, d1 = _date(date_from), _date(date_to)
         while cur <= d1:
             ds = _ds(cur)
             for shift in self.shifts:
                 sno = shift["shift_no"]
+                has_plans = planned_combos.get((ds, sno), set())
+
                 active_rps: List[Tuple[str, List[Dict]]] = []
                 for room in self.rooms:
                     cal = CalendarRepo.get_slot(ds, sno, room)
@@ -2368,9 +2381,12 @@ class Scheduler:
                         continue
                     if crp_manager.is_held(ds, room, sno):
                         continue
-                    rps = self.room_procs.get(room, [])
+                    # Only include processes that have actual plans in this slot
+                    rps = [rp for rp in self.room_procs.get(room, [])
+                           if (room, rp["process_name"]) in has_plans]
                     if rps:
                         active_rps.append((room, rps))
+
                 hc_dist = self._compute_hc_distribution(
                     ds, sno, active_rps, urgency)
                 if hc_dist:
