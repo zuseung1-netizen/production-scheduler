@@ -905,8 +905,10 @@ class GanttCanvas(QWidget):
         self._check_rects   : Dict[int, QRect] = {}
         self._check_hit_rects: Dict[int, QRect] = {}
         self._cap_map     : Dict[Tuple, Tuple] = {}
-        # Per-cell utilization (Room mode): (room_code, date_str) -> (used, cap)
-        self._cell_util   : Dict[Tuple, Tuple] = {}
+        # Per-cell utilization: (room_code, date_str) -> (used, cap) aggregated across processes
+        self._cell_util      : Dict[Tuple, Tuple] = {}
+        # Per-cell utilization by process: (room_code, process_name, date_str) -> (used, cap)
+        self._cell_util_proc : Dict[Tuple, Tuple] = {}
         # headcount util: (date_str, shift_no) -> (alloc, crp_total)
         self._hc_map      : Dict[Tuple, Tuple] = {}
         # HC utilisation by date: date_str -> pct (0-100)
@@ -1281,11 +1283,14 @@ class GanttCanvas(QWidget):
                 cap = 1.0
             self._cap_map[key] = (used, max(cap, 1))
 
-        # Aggregate to (room, date) for per-cell utilization bars
-        self._cell_util = {}
+        # Aggregate to (room, date) and (room, process, date) for per-cell util bars
+        self._cell_util      = {}
+        self._cell_util_proc = {}
         for (ds, room, proc, sno), (used, cap) in self._cap_map.items():
             cu, cc = self._cell_util.get((room, ds), (0.0, 0.0))
             self._cell_util[(room, ds)] = (cu + used, cc + cap)
+            pu, pc = self._cell_util_proc.get((room, proc, ds), (0.0, 0.0))
+            self._cell_util_proc[(room, proc, ds)] = (pu + used, pc + cap)
 
     def _build_layout_and_heights(self):
         """Assign vertical slot index to each plan (for stacking) and compute
@@ -2094,16 +2099,22 @@ class GanttCanvas(QWidget):
         BAR_H = 8
         p.setFont(f_util)
         room_dim_idx = self.y_dims.index("Room")
+        use_proc_key = "Process" in self.y_dims
+        proc_dim_idx = self.y_dims.index("Process") if use_proc_key else -1
         for ri, rk in enumerate(self._rows):
             parts = rk.split("|")
             room = parts[room_dim_idx] if room_dim_idx < len(parts) else rk
+            proc = parts[proc_dim_idx] if use_proc_key and proc_dim_idx < len(parts) else None
             row_y = self._row_y_list[ri]
             row_h = self._row_heights[ri]
             # Bar sits in the CELL_UTIL_H strip at the bottom of the row
             bar_y = row_y + row_h - CELL_UTIL_H + (CELL_UTIL_H - BAR_H) // 2
             for col in range(self.horizon_days):
                 ds = (self.start_date + timedelta(days=col)).strftime("%Y-%m-%d")
-                used, cap = self._cell_util.get((room, ds), (0.0, 0.0))
+                if use_proc_key:
+                    used, cap = self._cell_util_proc.get((room, proc, ds), (0.0, 0.0))
+                else:
+                    used, cap = self._cell_util.get((room, ds), (0.0, 0.0))
                 if cap <= 0:
                     continue
                 ratio = used / cap
@@ -2309,13 +2320,20 @@ class GanttCanvas(QWidget):
                     if 0 <= col < self.horizon_days:
                         rk = self._rows[ri]
                         room_dim_idx = self.y_dims.index("Room")
+                        _use_proc = "Process" in self.y_dims
+                        _proc_idx = self.y_dims.index("Process") if _use_proc else -1
                         parts = rk.split("|")
                         room = parts[room_dim_idx] if room_dim_idx < len(parts) else rk
+                        proc = parts[_proc_idx] if _use_proc and _proc_idx < len(parts) else None
                         ds = (self.start_date + timedelta(days=col)).strftime("%Y-%m-%d")
-                        used, cap = self._cell_util.get((room, ds), (0.0, 0.0))
+                        if _use_proc:
+                            used, cap = self._cell_util_proc.get((room, proc, ds), (0.0, 0.0))
+                        else:
+                            used, cap = self._cell_util.get((room, ds), (0.0, 0.0))
                         if cap > 0:
                             pct = used / cap * 100
-                            tip = f"{room} | {ds}\n{used:,.0f} / {cap:,.0f}  ({pct:.0f}%)"
+                            label = f"{room} {proc}" if proc else room
+                            tip = f"{label} | {ds}\n{used:,.0f} / {cap:,.0f}  ({pct:.0f}%)"
                             QToolTip.showText(QCursor.pos(), tip, self)
                             return
 
