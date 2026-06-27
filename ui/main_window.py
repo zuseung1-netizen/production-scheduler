@@ -36,10 +36,9 @@ from ui.master_tab import MasterTab
 from ui.crp_tab import CRPTab
 from ui.actuals_tab import ActualsTab
 from ui.alerts_tab import AlertsTab
-from ui.dashboard_tab import DashboardTab
 from ui.remaining_tabs import (InventoryTab, ReleaseReportTab, ImpactReportTab,
-                               ScenarioTab, LaborUtilizationTab)
-from ui.dispatch_tab import DispatchListTab
+                               ScenarioTab, LaborUtilizationTab,
+                               FulfillmentStatusTab)
 from ui.plan_list_tab import PlanListTab
 from ui.help_tab import HelpTab
 
@@ -334,40 +333,36 @@ class DetachedWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
 
-        self.gantt_tab       = GanttTab(self)
-        self.so_tab          = SOTab(self)
-        self.io_tab          = InternalOrderTab(self)
-        self.master_tab      = MasterTab(self)
-        self.crp_tab         = CRPTab(self)
-        self.actuals_tab     = ActualsTab(self)
-        self.alerts_tab      = AlertsTab(self)
-        self.dashboard_tab   = DashboardTab(self)
-        self.inventory_tab   = InventoryTab(self)
-        self.release_tab     = ReleaseReportTab(self)
-        self.impact_tab      = ImpactReportTab(self)
-        self.scenario_tab    = ScenarioTab(self)
-        self.dispatch_tab    = DispatchListTab(self)
-        self.plan_list_tab   = PlanListTab(self)
-        self.labor_tab       = LaborUtilizationTab(self)
-        self.help_tab        = HelpTab(self)
+        self.gantt_tab        = GanttTab(self)
+        self.so_tab           = SOTab(self)
+        self.io_tab           = InternalOrderTab(self)
+        self.master_tab       = MasterTab(self)
+        self.crp_tab          = CRPTab(self)
+        self.actuals_tab      = ActualsTab(self)
+        self.alerts_tab       = AlertsTab(self)
+        self.inventory_tab    = InventoryTab(self)
+        self.fulfillment_tab  = FulfillmentStatusTab(self)
+        self.impact_tab       = ImpactReportTab(self)
+        self.scenario_tab     = ScenarioTab(self)
+        self.plan_list_tab    = PlanListTab(self)
+        self.labor_tab        = LaborUtilizationTab(self)
+        self.help_tab         = HelpTab(self)
 
         _tab_defs = [
-            (self.gantt_tab,     "📅  Plan Board"),
-            (self.so_tab,        "📋  Sales Orders"),
-            (self.io_tab,        "🏭  Internal Orders"),
-            (self.master_tab,    "🗂  Masters"),
-            (self.crp_tab,       "👥  CRP"),
-            (self.actuals_tab,   "✅  Actuals"),
-            (self.alerts_tab,    "⚠️  Alerts"),
-            (self.dashboard_tab, "📊  Dashboard"),
-            (self.inventory_tab, "📦  Inventory"),
-            (self.release_tab,   "🚀  Release Report"),
-            (self.dispatch_tab,  "📋  Dispatch List"),
-            (self.impact_tab,    "📈  Impact Report"),
-            (self.scenario_tab,  "🎯  Scenario Planner"),
-            (self.help_tab,      "❓  Help"),
-            (self.labor_tab,     "👷  Labor Utilization"),
-            (self.plan_list_tab, "☰   Plan List"),
+            (self.gantt_tab,       "📅  Plan Board"),
+            (self.so_tab,          "📋  Sales Orders"),
+            (self.io_tab,          "🏭  Internal Orders"),
+            (self.master_tab,      "🗂  Masters"),
+            (self.crp_tab,         "👥  CRP"),
+            (self.actuals_tab,     "✅  Actuals"),
+            (self.alerts_tab,      "⚠️  Alerts"),
+            (self.inventory_tab,   "📦  Inventory"),
+            (self.fulfillment_tab, "🎯  Fulfillment Status"),
+            (self.impact_tab,      "📈  Impact Report"),
+            (self.scenario_tab,    "🎯  Scenario Planner"),
+            (self.help_tab,        "❓  Help"),
+            (self.labor_tab,       "👷  Labor Utilization"),
+            (self.plan_list_tab,   "☰   Plan List"),
         ]
         for widget, title in _tab_defs:
             self.tabs.addTab(widget, title)
@@ -529,44 +524,40 @@ class MainWindow(QMainWindow):
         self.setStyleSheet("QMainWindow { background: #eef0f3; }")
 
         # ── Tab widgets ───────────────────────────────────────────────────────
-        self.gantt_tab       = GanttTab(self)
-        self.so_tab          = SOTab(self)
-        self.io_tab          = InternalOrderTab(self)
-        self.master_tab      = MasterTab(self)
-        self.crp_tab         = CRPTab(self)
-        self.actuals_tab     = ActualsTab(self)
-        self.alerts_tab      = AlertsTab(self)
-        self.dashboard_tab   = DashboardTab(self)
-        self.inventory_tab   = InventoryTab(self)
-        self.release_tab     = ReleaseReportTab(self)
-        self.impact_tab      = ImpactReportTab(self)
-        self.scenario_tab    = ScenarioTab(self)
-        self.dispatch_tab    = DispatchListTab(self)
-        self.plan_list_tab   = PlanListTab(self)
-        self.labor_tab       = LaborUtilizationTab(self)
-        self.help_tab        = HelpTab(self)
+        self.gantt_tab        = GanttTab(self)
+        self.so_tab           = SOTab(self)
+        self.io_tab           = InternalOrderTab(self)
+        self.master_tab       = MasterTab(self)
+        self.crp_tab          = CRPTab(self)
+        self.actuals_tab      = ActualsTab(self)
+        self.alerts_tab       = AlertsTab(self)
+        self.inventory_tab    = InventoryTab(self)
+        self.fulfillment_tab  = FulfillmentStatusTab(self)
+        self.impact_tab       = ImpactReportTab(self)
+        self.scenario_tab     = ScenarioTab(self)
+        self.plan_list_tab    = PlanListTab(self)
+        self.labor_tab        = LaborUtilizationTab(self)
+        self.help_tab         = HelpTab(self)
 
         # ── Stack widget (content area) ───────────────────────────────────────
         self._stack = QStackedWidget()
         self.tabs = _TabbedStack(self._stack)   # backward-compat proxy
 
         self._tab_defs = [
-            (self.gantt_tab,     "📅  Plan Board",       0),
-            (self.so_tab,        "📋  Sales Orders",        1),
-            (self.io_tab,        "🏭  Internal Orders",     2),
-            (self.master_tab,    "🗂  Masters",              3),
-            (self.crp_tab,       "👥  CRP",                  4),
-            (self.actuals_tab,   "✅  Actuals",              5),
-            (self.alerts_tab,    "⚠️  Alerts",               6),
-            (self.dashboard_tab, "📊  Dashboard",            7),
-            (self.inventory_tab, "📦  Inventory",            8),
-            (self.release_tab,   "🚀  Release Report",       9),
-            (self.dispatch_tab,  "📋  Dispatch List",       10),
-            (self.impact_tab,    "📈  Impact Report",       11),
-            (self.scenario_tab,  "🎯  Scenario Planner",    12),
-            (self.help_tab,      "❓  Help",                 13),
-            (self.labor_tab,     "👷  Labor Utilization",   14),
-            (self.plan_list_tab, "☰   Plan List",           15),
+            (self.gantt_tab,       "📅  Plan Board",          0),
+            (self.so_tab,          "📋  Sales Orders",         1),
+            (self.io_tab,          "🏭  Internal Orders",      2),
+            (self.master_tab,      "🗂  Masters",               3),
+            (self.crp_tab,         "👥  CRP",                   4),
+            (self.actuals_tab,     "✅  Actuals",               5),
+            (self.alerts_tab,      "⚠️  Alerts",                6),
+            (self.inventory_tab,   "📦  Inventory",             7),
+            (self.fulfillment_tab, "🎯  Fulfillment Status",    8),
+            (self.impact_tab,      "📈  Impact Report",         9),
+            (self.scenario_tab,    "🎯  Scenario Planner",     10),
+            (self.help_tab,        "❓  Help",                  11),
+            (self.labor_tab,       "👷  Labor Utilization",    12),
+            (self.plan_list_tab,   "☰   Plan List",            13),
         ]
         for widget, title, _ in self._tab_defs:
             self.tabs.addTab(widget, title)
@@ -574,25 +565,23 @@ class MainWindow(QMainWindow):
         # ── Sidebar ───────────────────────────────────────────────────────────
         self._sidebar = NavSidebar(self)
         self._sidebar.add_group("Plan")
-        self._sidebar.add_item(_IC_GANTT,     "Plan Board",      0)
-        self._sidebar.add_item(_IC_LIST,      "Plan List",         15)
-        self._sidebar.add_item(_IC_SO,        "Sales Orders",       1)
-        self._sidebar.add_item(_IC_SO,        "Internal Orders",    2)
-        self._sidebar.add_item(_IC_RELEASE,   "Release Report",     9)
-        self._sidebar.add_item(_IC_ALERTS,    "Dispatch List",     10)
+        self._sidebar.add_item(_IC_GANTT,     "Plan Board",           0)
+        self._sidebar.add_item(_IC_LIST,      "Plan List",            13)
+        self._sidebar.add_item(_IC_SO,        "Sales Orders",          1)
+        self._sidebar.add_item(_IC_SO,        "Internal Orders",       2)
+        self._sidebar.add_item(_IC_RELEASE,   "Fulfillment Status",    8)
         self._sidebar.add_group("Capacity")
-        self._sidebar.add_item(_IC_CRP,       "CRP",                4)
-        self._sidebar.add_item(_IC_LABOR,     "Labor Utilization", 14)
-        self._sidebar.add_item(_IC_INVENTORY, "Inventory",          8)
-        self._sidebar.add_item(_IC_DASHBOARD, "Scenario Planner",  12)
+        self._sidebar.add_item(_IC_CRP,       "CRP",                   4)
+        self._sidebar.add_item(_IC_LABOR,     "Labor Utilization",    12)
+        self._sidebar.add_item(_IC_INVENTORY, "Inventory",             7)
+        self._sidebar.add_item(_IC_DASHBOARD, "Scenario Planner",     10)
         self._sidebar.add_group("Track")
-        self._sidebar.add_item(_IC_ACTUALS,   "Actuals",            5)
-        self._sidebar.add_item(_IC_ALERTS,    "Alerts",             6)
-        self._sidebar.add_item(_IC_DASHBOARD, "Dashboard",          7)
-        self._sidebar.add_item(_IC_RELEASE,   "Impact Report",     11)
+        self._sidebar.add_item(_IC_ACTUALS,   "Actuals",               5)
+        self._sidebar.add_item(_IC_ALERTS,    "Alerts",                6)
+        self._sidebar.add_item(_IC_RELEASE,   "Impact Report",         9)
         self._sidebar.add_group("Setup")
-        self._sidebar.add_item(_IC_MASTERS,   "Masters",            3)
-        self._sidebar.add_item(_IC_HELP,      "Help",              13)
+        self._sidebar.add_item(_IC_MASTERS,   "Masters",               3)
+        self._sidebar.add_item(_IC_HELP,      "Help",                 11)
 
         self._sidebar.set_current(0)
         self._sidebar.tabRequested.connect(self._on_sidebar_nav)

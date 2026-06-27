@@ -3142,6 +3142,511 @@ class ReleaseReportTab(QWidget):
 
 
 # ════════════════════════════════════════════════════════════════════════════
+#  FULFILLMENT STATUS TAB  (merged Release Report + Dispatch List)
+# ════════════════════════════════════════════════════════════════════════════
+
+class FulfillmentStatusTab(QWidget):
+    """
+    Per-SO fulfillment view: release-date adherence + Critical Ratio priority.
+
+    CR = open shifts to due ÷ shifts needed (worst-case across all routing steps).
+    Status priority: CRITICAL → AT RISK → ON TIME → COMPLETE → NOT PLANNED
+    """
+
+    STATUS_CRITICAL = "CRITICAL"
+    STATUS_AT_RISK  = "AT RISK"
+    STATUS_ON_TIME  = "ON TIME"
+    STATUS_COMPLETE = "COMPLETE"
+    STATUS_NO_PLAN  = "NOT PLANNED"
+    STATUS_NO_ROUTE = "NO ROUTING"
+
+    CR_CRITICAL  = 1.0
+    CR_AT_RISK   = 1.5
+    AT_RISK_DAYS = 3
+
+    _COLS = [
+        "Rank", "SO", "Customer", "SKU", "Line",
+        "SO Qty", "Prod Needed", "Planned",
+        "Release Date", "Due Date", "Days to Due", "CR", "Status", "Note",
+    ]
+
+    _STATUS_COLORS = {
+        "CRITICAL":    ("#FFEBEE", "#B71C1C"),
+        "AT RISK":     ("#FFF8E1", "#E65100"),
+        "ON TIME":     ("#E8F5E9", "#1B5E20"),
+        "COMPLETE":    ("#F5F5F5", "#757575"),
+        "NOT PLANNED": ("#F5F5F5", "#9E9E9E"),
+        "NO ROUTING":  ("#F5F5F5", "#BDBDBD"),
+    }
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.main_window = parent
+        self._rows: List[Dict] = []
+        self._build_ui()
+        from PyQt6.QtCore import QTimer
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self.refresh)
+        self._timer.start(30_000)
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(6)
+
+        # ── Toolbar ──
+        bar = QHBoxLayout()
+        bar.setSpacing(8)
+
+        bar.addWidget(QLabel("Search:"))
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("SO / SKU / Customer…")
+        self._search.setFixedWidth(180)
+        self._search.textChanged.connect(self._apply_filter)
+        bar.addWidget(self._search)
+
+        bar.addWidget(QLabel("Status:"))
+        self._status_combo = QComboBox()
+        self._status_combo.addItems([
+            "ALL", self.STATUS_CRITICAL, self.STATUS_AT_RISK,
+            self.STATUS_ON_TIME, self.STATUS_COMPLETE,
+            self.STATUS_NO_PLAN, self.STATUS_NO_ROUTE,
+        ])
+        self._status_combo.currentTextChanged.connect(self._apply_filter)
+        bar.addWidget(self._status_combo)
+
+        bar.addWidget(QLabel("Due within (days):"))
+        self._due_spin = QSpinBox()
+        self._due_spin.setRange(0, 365)
+        self._due_spin.setValue(0)
+        self._due_spin.setSpecialValueText("All")
+        self._due_spin.valueChanged.connect(self._apply_filter)
+        bar.addWidget(self._due_spin)
+
+        bar.addStretch()
+
+        self._summary_lbl = QLabel()
+        self._summary_lbl.setStyleSheet("color:#555; font-size:11px;")
+        bar.addWidget(self._summary_lbl)
+
+        btn_refresh = QPushButton("🔄 Refresh")
+        btn_refresh.clicked.connect(self.refresh)
+        bar.addWidget(btn_refresh)
+
+        btn_export = QPushButton("📥 Export")
+        btn_export.clicked.connect(self._export)
+        bar.addWidget(btn_export)
+
+        layout.addLayout(bar)
+
+        # ── Legend ──
+        legend = QHBoxLayout()
+        legend.setSpacing(16)
+        for status, (_, fg) in self._STATUS_COLORS.items():
+            dot = QLabel(f"● {status}")
+            dot.setStyleSheet(f"color:{fg}; font-size:10px; font-weight:600;")
+            legend.addWidget(dot)
+        legend.addStretch()
+        note_lbl = QLabel("CR = Open shifts to due ÷ Shifts needed (worst-case process)")
+        note_lbl.setStyleSheet("color:#888; font-size:10px; font-style:italic;")
+        legend.addWidget(note_lbl)
+        layout.addLayout(legend)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("background:#dde3ed; border:none;")
+        sep.setFixedHeight(1)
+        layout.addWidget(sep)
+
+        # ── Table ──
+        self._table = QTableWidget()
+        self._table.setColumnCount(len(self._COLS))
+        self._table.setHorizontalHeaderLabels(self._COLS)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setAlternatingRowColors(False)
+        self._table.setSortingEnabled(True)
+        hdr = self._table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        hdr.setStretchLastSection(True)
+        for i, w in enumerate([45, 110, 110, 80, 45, 60, 80, 60, 100, 100, 75, 55, 80, 120]):
+            hdr.resizeSection(i, w)
+        self._table.verticalHeader().setDefaultSectionSize(26)
+        self._table.setStyleSheet(
+            "QTableWidget { border:none; font-size:11px; }"
+            "QHeaderView::section { background:#f0f2f7; font-weight:600;"
+            " padding:4px; border:none; border-bottom:1px solid #dde3ed; }")
+        layout.addWidget(self._table, stretch=1)
+
+        self.refresh()
+
+    # ── Data ─────────────────────────────────────────────────────────────────
+
+    def refresh(self):
+        self._rows = self._compute_rows()
+        self._apply_filter()
+
+    @staticmethod
+    def _shift_h(shift: Dict) -> float:
+        from datetime import datetime as _dt
+        fmt = "%H:%M"
+        t0 = _dt.strptime(shift["start_time"], fmt)
+        t1 = _dt.strptime(shift["end_time"], fmt)
+        h = (t1 - t0).seconds / 3600
+        return h if h > 0 else 24 + h
+
+    def _compute_rows(self) -> List[Dict]:
+        from data.repositories import AllocationRepo, CalendarRepo
+        from core.scheduler import calc_uph
+
+        today     = date.today()
+        today_str = today.strftime("%Y-%m-%d")
+
+        sos = SORepo.all()
+        if not sos:
+            return []
+
+        skus          = {s["sku_code"]: s for s in SKURepo.all()}
+        alloc_map     = AllocationRepo.allocation_summary_for_open_sos()
+        actual_map    = ActualRepo.actual_qty_bulk()
+        planned_map   = PlanRepo.planned_qty_bulk()
+        last_plan_map = PlanRepo.last_plan_info_bulk()
+
+        # Pre-load all routings (avoids N+1 per-SO DB calls)
+        routing_map: Dict = {}
+        for row in ProcessRoutingRepo.all():
+            routing_map.setdefault((row["entity_type"], row["entity_code"]), []).append(row)
+        for k in routing_map:
+            routing_map[k].sort(key=lambda r: r["process_seq"])
+
+        # CR infrastructure
+        all_rooms   = RoomRepo.all()
+        shifts      = ShiftRepo.all()
+        avg_shift_h = (sum(self._shift_h(s) for s in shifts) / len(shifts)
+                       if shifts else 12.0)
+        n_shifts    = len(shifts) if shifts else 2
+
+        process_rooms: Dict[str, list] = {}
+        for rp in all_rooms:
+            process_rooms.setdefault(rp["process_name"], []).append(rp)
+
+        proc_room_set: Dict[str, set] = {
+            p: {rp["room_code"] for rp in rps}
+            for p, rps in process_rooms.items()
+        }
+
+        max_due = max(
+            (so.get("committed_due_date") or so["due_date"] for so in sos),
+            default=today_str)
+
+        raw_slots  = CalendarRepo.get_open_slots(today_str, max_due)
+        open_set   = {(s["cal_date"], s["room_code"], s["shift_no"])
+                      for s in raw_slots if not s.get("is_hold", 0)}
+        calendared = {(s["cal_date"], s["shift_no"]) for s in raw_slots}
+
+        all_procs = list(process_rooms.keys())
+        proc_cum: Dict[str, Dict[str, int]] = {}
+        running = {p: 0 for p in all_procs}
+        d     = today
+        until = datetime.strptime(max_due, "%Y-%m-%d").date()
+        while d <= until:
+            ds   = d.strftime("%Y-%m-%d")
+            is_wd = d.weekday() < 5
+            for proc_name in all_procs:
+                added = 0
+                for sno_idx in range(1, n_shifts + 1):
+                    if (ds, sno_idx) in calendared:
+                        if any((ds, rc, sno_idx) in open_set
+                               for rc in proc_room_set[proc_name]):
+                            added += 1
+                    elif is_wd:
+                        added += 1
+                running[proc_name] += added
+            for proc_name in all_procs:
+                proc_cum.setdefault(proc_name, {})[ds] = running[proc_name]
+            d += timedelta(days=1)
+
+        rows: List[Dict] = []
+        for so in sos:
+            so_no = so["so_number"]
+            sku_c = so["sku_code"]
+            li    = so["line_item"]
+            key   = (so_no, sku_c, li)
+            sku   = skus.get(sku_c, {})
+            post_lead = int(sku.get("post_lead_days") or 0)
+            uom       = int(sku.get("uom") or 1)
+
+            allocated   = alloc_map.get(key, 0)
+            actual_qty  = actual_map.get(key, 0)
+            prod_needed = max(0, so["qty"] - allocated - actual_qty)
+            planned_qty = planned_map.get(key, 0)
+
+            # Release date (from last plan slot + post_lead_days)
+            last_info = last_plan_map.get(key)
+            if last_info:
+                from utils.workdays import add_workdays
+                last_dt     = datetime.strptime(last_info[0], "%Y-%m-%d").date()
+                release_dt  = add_workdays(last_dt, post_lead)
+                release_str = release_dt.strftime("%Y-%m-%d")
+            else:
+                release_dt  = None
+                release_str = "—"
+
+            eff_due_str = so.get("committed_due_date") or so["due_date"]
+            due_dt  = datetime.strptime(so["due_date"], "%Y-%m-%d").date()
+            eff_due = datetime.strptime(eff_due_str, "%Y-%m-%d").date()
+            days_to_due = (eff_due - today).days
+
+            # CR computation — worst-case across all routing steps
+            routing    = routing_map.get(("SKU", sku_c), [])
+            min_cr     = None
+            cr_display = "—"
+
+            if prod_needed == 0:
+                status = self.STATUS_COMPLETE
+            elif not routing:
+                status = self.STATUS_NO_ROUTE
+            else:
+                for step in routing:
+                    proc_name = step["process_name"]
+                    best_cap  = 0.0
+                    for rp in process_rooms.get(proc_name, []):
+                        hc = (int(rp.get("hc_fixed") or 1)
+                              if rp.get("process_type") == "AUTO"
+                              else int(rp.get("hc_max") or rp.get("hc_min") or 1))
+                        cap = calc_uph(rp, hc) * avg_shift_h
+                        if cap > best_cap:
+                            best_cap = cap
+
+                    rem_inner = prod_needed * uom
+                    if rem_inner == 0:
+                        step_cr: float | None = 999.0
+                    elif best_cap <= 0:
+                        step_cr = None
+                    else:
+                        shifts_needed = math.ceil(rem_inner / best_cap)
+                        open_shifts   = proc_cum.get(proc_name, {}).get(eff_due_str, 0)
+                        step_cr = (open_shifts / shifts_needed
+                                   if shifts_needed > 0 else 999.0)
+
+                    if step_cr is not None and (min_cr is None or step_cr < min_cr):
+                        min_cr = step_cr
+
+                if min_cr is None:
+                    status = self.STATUS_NO_ROUTE
+                else:
+                    cr_display = f"{min_cr:.2f}"
+                    if min_cr < self.CR_CRITICAL:
+                        status = self.STATUS_CRITICAL
+                    elif min_cr < self.CR_AT_RISK:
+                        status = self.STATUS_AT_RISK
+                    elif release_dt is None:
+                        status = self.STATUS_NO_PLAN
+                    elif release_dt > due_dt:
+                        status = self.STATUS_AT_RISK
+                    elif (due_dt - release_dt).days <= self.AT_RISK_DAYS:
+                        status = self.STATUS_AT_RISK
+                    else:
+                        status = self.STATUS_ON_TIME
+
+            note = ""
+            if so["status"] == "HOLD":
+                note = "⏸ HOLD"
+            elif so["status"] == "CLOSED":
+                note = "✔ CLOSED"
+            elif prod_needed == 0 and planned_qty == 0:
+                note = "Covered by inventory"
+
+            rows.append({
+                "rank":         "—",
+                "so_number":    so_no,
+                "customer":     so.get("customer_name", "") or "",
+                "sku_code":     sku_c,
+                "line_item":    li,
+                "so_qty":       so["qty"],
+                "prod_needed":  prod_needed,
+                "planned_qty":  planned_qty,
+                "release_date": release_str,
+                "due_date":     so["due_date"],
+                "days_to_due":  days_to_due,
+                "cr":           min_cr,
+                "cr_display":   cr_display,
+                "status":       status,
+                "note":         note,
+                "so_status":    so["status"],
+                "due_dt":       due_dt,
+            })
+
+        _order = {
+            self.STATUS_CRITICAL: 0, self.STATUS_AT_RISK:  1,
+            self.STATUS_ON_TIME:  2, self.STATUS_COMPLETE: 3,
+            self.STATUS_NO_PLAN:  4, self.STATUS_NO_ROUTE: 5,
+        }
+        rows.sort(key=lambda r: (
+            _order.get(r["status"], 9),
+            r["cr"] if r["cr"] is not None else 999.0,
+            r["days_to_due"],
+        ))
+        rank = 1
+        for r in rows:
+            if r["status"] in (self.STATUS_CRITICAL, self.STATUS_AT_RISK, self.STATUS_ON_TIME):
+                r["rank"] = rank
+                rank += 1
+
+        return rows
+
+    # ── Filter & render ───────────────────────────────────────────────────────
+
+    def _apply_filter(self):
+        search   = self._search.text().strip().lower()
+        status_f = self._status_combo.currentText()
+        due_days = self._due_spin.value()
+        today    = date.today()
+
+        filtered = self._rows
+        if search:
+            filtered = [r for r in filtered if search in (
+                r["so_number"] + r["sku_code"] + r["line_item"]
+                + r["customer"]).lower()]
+        if status_f != "ALL":
+            filtered = [r for r in filtered if r["status"] == status_f]
+        if due_days > 0:
+            cutoff = today + timedelta(days=due_days)
+            filtered = [r for r in filtered if r["due_dt"] <= cutoff]
+
+        self._render(filtered)
+        self._update_summary(filtered)
+
+    def _render(self, rows: List[Dict]):
+        bold = QFont(); bold.setBold(True)
+
+        hdr = self._table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self._table.setSortingEnabled(False)
+        self._table.setUpdatesEnabled(False)
+        self._table.setRowCount(len(rows))
+
+        for ri, r in enumerate(rows):
+            bg_hex, fg_hex = self._STATUS_COLORS.get(r["status"], ("#FFFFFF", "#000000"))
+
+            vals = [
+                str(r["rank"]),
+                r["so_number"], r["customer"], r["sku_code"], r["line_item"],
+                r["so_qty"], r["prod_needed"], r["planned_qty"],
+                r["release_date"], r["due_date"],
+                str(r["days_to_due"]),
+                r["cr_display"],
+                r["status"], r["note"],
+            ]
+            for ci, val in enumerate(vals):
+                item = QTableWidgetItem(str(val))
+                if ci == 12:  # Status
+                    item.setBackground(QBrush(QColor(bg_hex)))
+                    item.setForeground(QBrush(QColor(fg_hex)))
+                    item.setFont(bold)
+                elif ci == 11 and r["cr"] is not None:  # CR
+                    cr = r["cr"]
+                    if cr < self.CR_CRITICAL:
+                        item.setForeground(QBrush(QColor("#B71C1C")))
+                        item.setFont(bold)
+                    elif cr < self.CR_AT_RISK:
+                        item.setForeground(QBrush(QColor("#E65100")))
+                elif ci == 10:  # Days to Due
+                    try:
+                        d = int(r["days_to_due"])
+                        if d < 0:
+                            item.setBackground(QBrush(QColor("#FFCCCC")))
+                        elif d <= self.AT_RISK_DAYS:
+                            item.setBackground(QBrush(QColor("#FFF0CC")))
+                    except (ValueError, TypeError):
+                        pass
+                self._table.setItem(ri, ci, item)
+
+        self._table.setUpdatesEnabled(True)
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self._table.setSortingEnabled(True)
+
+    def _update_summary(self, rows: List[Dict]):
+        total    = len(rows)
+        critical = sum(1 for r in rows if r["status"] == self.STATUS_CRITICAL)
+        at_risk  = sum(1 for r in rows if r["status"] == self.STATUS_AT_RISK)
+        on_time  = sum(1 for r in rows if r["status"] == self.STATUS_ON_TIME)
+        complete = sum(1 for r in rows if r["status"] == self.STATUS_COMPLETE)
+        no_plan  = sum(1 for r in rows if r["status"] == self.STATUS_NO_PLAN)
+
+        parts = [f"Total: <b>{total}</b>"]
+        if critical:
+            parts.append(
+                f"<span style='color:#B71C1C'>🔴 CRITICAL: <b>{critical}</b></span>")
+        if at_risk:
+            parts.append(
+                f"<span style='color:#E65100'>🟡 AT RISK: <b>{at_risk}</b></span>")
+        if on_time:
+            parts.append(
+                f"<span style='color:#1B5E20'>🟢 ON TIME: <b>{on_time}</b></span>")
+        if complete:
+            parts.append(
+                f"<span style='color:#757575'>✅ COMPLETE: <b>{complete}</b></span>")
+        if no_plan:
+            parts.append(
+                f"<span style='color:#9E9E9E'>⚪ NOT PLANNED: <b>{no_plan}</b></span>")
+        self._summary_lbl.setText("  |  ".join(parts))
+
+    def _export(self):
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, PatternFill, Alignment
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Export Fulfillment Status",
+                "Fulfillment_Status.xlsx", "Excel (*.xlsx)")
+            if not path:
+                return
+
+            wb = Workbook(); ws = wb.active
+            ws.title = "Fulfillment Status"
+
+            HDR_FILL = PatternFill("solid", fgColor="2563EB")
+            HDR_FONT = Font(color="FFFFFF", bold=True)
+            STATUS_FILLS = {
+                self.STATUS_CRITICAL: PatternFill("solid", fgColor="FFEBEE"),
+                self.STATUS_AT_RISK:  PatternFill("solid", fgColor="FFF8E1"),
+                self.STATUS_ON_TIME:  PatternFill("solid", fgColor="E8F5E9"),
+                self.STATUS_COMPLETE: PatternFill("solid", fgColor="F5F5F5"),
+                self.STATUS_NO_PLAN:  PatternFill("solid", fgColor="F5F5F5"),
+            }
+
+            for ci, h in enumerate(self._COLS, 1):
+                c = ws.cell(row=1, column=ci, value=h)
+                c.fill = HDR_FILL
+                c.font = HDR_FONT
+                c.alignment = Alignment(horizontal="center")
+
+            for ri, r in enumerate(self._rows, 2):
+                vals = [
+                    r["rank"], r["so_number"], r["customer"],
+                    r["sku_code"], r["line_item"],
+                    r["so_qty"], r["prod_needed"], r["planned_qty"],
+                    r["release_date"], r["due_date"],
+                    r["days_to_due"], r["cr_display"],
+                    r["status"], r["note"],
+                ]
+                for ci, v in enumerate(vals, 1):
+                    cell = ws.cell(row=ri, column=ci, value=v)
+                    if r["status"] in STATUS_FILLS:
+                        cell.fill = STATUS_FILLS[r["status"]]
+
+            for col in ws.columns:
+                max_len = max(
+                    (len(str(c.value)) for c in col if c.value), default=8)
+                ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, 30)
+
+            wb.save(path)
+            QMessageBox.information(self, "Export", f"Saved to {path}")
+        except Exception as e:
+            QMessageBox.warning(self, "Export Error", str(e))
+
+
+# ════════════════════════════════════════════════════════════════════════════
 #  MB51 UPLOAD DIALOG
 # ════════════════════════════════════════════════════════════════════════════
 
