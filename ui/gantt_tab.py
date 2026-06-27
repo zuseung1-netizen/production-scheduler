@@ -365,6 +365,7 @@ class GanttHeaderWidget(QWidget):
         self._company_holidays: set = set()
         self._hc_util_data   : dict = {}
         self._hc_alloc_by_date: dict = {}
+        self._hc_map         : dict = {}
         # Cached per-column raw values for tooltip (built during paintEvent)
         self._col_cap_rendered: dict = {}  # col -> (used_inner, cap_inner)
 
@@ -381,6 +382,7 @@ class GanttHeaderWidget(QWidget):
         self._company_holidays   = canvas._company_holidays
         self._hc_util_data       = canvas._hc_util_by_date
         self._hc_alloc_by_date   = canvas._hc_alloc_by_date
+        self._hc_map             = canvas._hc_map
         self.update()
 
     def set_scroll_h(self, val: int):
@@ -564,8 +566,17 @@ class GanttHeaderWidget(QWidget):
         else:
             n = len(self._shifts)
             if n:
+                from PyQt6.QtGui import QFontMetrics as _FM
+                # Aggregate cap data per (date_str, shift_no) for shift view
+                col_cap_shift: dict = {}
+                for (ds, room, proc, sno), (used, cap) in self._cap_map.items():
+                    key = (ds, sno)
+                    cu, cc = col_cap_shift.get(key, (0.0, 0.0))
+                    col_cap_shift[key] = (cu + used, cc + cap)
+
                 for day in range(self.horizon_days):
                     d  = self.start_date + timedelta(days=day)
+                    ds_str = d.strftime("%Y-%m-%d")
                     x0 = yw + day * n * SHIFT_W
                     p.setFont(f_dd); p.setPen(QPen(HEADER_FG))
                     p.drawText(QRect(x0, 2, n * SHIFT_W, 22),
@@ -574,12 +585,78 @@ class GanttHeaderWidget(QWidget):
                     p.setFont(f_dow)
                     for si, shift in enumerate(self._shifts):
                         sx = x0 + si * SHIFT_W
+                        sno = shift["shift_no"]
                         p.setPen(QPen(QColor(255, 255, 255, 25)))
                         p.drawLine(sx, HEADER_H // 2, sx, HEADER_H - 2)
                         p.setPen(QPen(QColor(174, 191, 230)))
                         p.drawText(QRect(sx, 24, SHIFT_W, 14),
                                    Qt.AlignmentFlag.AlignCenter,
-                                   f"S{shift['shift_no']}")
+                                   f"S{sno}")
+
+                        # Cap bar — Row 1
+                        used, cap = col_cap_shift.get((ds_str, sno), (0.0, 0.0))
+                        ratio  = (used / cap) if cap > 0 else 0
+                        bar_h  = 8
+                        bar_y  = HEADER_H + (UTIL_ROW_H - bar_h) // 2
+                        cw_    = SHIFT_W - 4
+                        fill_w = int(cw_ * min(ratio, 1.0))
+                        color  = (UTIL_HIGH if ratio > 0.9 else
+                                  UTIL_MED  if ratio > 0.6 else
+                                  (UTIL_LOW if ratio > 0 else QColor(214, 218, 227)))
+                        p.setBrush(QBrush(QColor(50, 82, 138)))
+                        p.setPen(Qt.PenStyle.NoPen)
+                        p.drawRoundedRect(QRect(sx + 2, bar_y, cw_, bar_h), 2, 2)
+                        if fill_w > 0:
+                            p.setBrush(QBrush(color))
+                            p.setPen(Qt.PenStyle.NoPen)
+                            p.drawRoundedRect(QRect(sx + 2, bar_y, fill_w, bar_h), 2, 2)
+                        if cap > 0:
+                            tag_txt = f"{int(ratio * 100)}%"
+                            p.setFont(f_cap)
+                            tag_w   = _FM(f_cap).horizontalAdvance(tag_txt) + 6
+                            tag_h   = 10
+                            tag_x   = sx + SHIFT_W - tag_w - 2
+                            tag_y_pos = HEADER_H + (UTIL_ROW_H - tag_h) // 2
+                            bg_color  = QColor(194, 52, 47) if ratio > 0.9 else QColor(30, 58, 110, 200)
+                            p.setBrush(QBrush(bg_color)); p.setPen(Qt.PenStyle.NoPen)
+                            p.drawRoundedRect(QRect(tag_x, tag_y_pos, tag_w, tag_h), 2, 2)
+                            p.setPen(QPen(Qt.GlobalColor.white))
+                            p.drawText(QRect(tag_x, tag_y_pos, tag_w, tag_h),
+                                       Qt.AlignmentFlag.AlignCenter, tag_txt)
+
+                        # HC bar — Row 2
+                        hc_alloc, hc_total = self._hc_map.get((ds_str, sno), (0, 1))
+                        hc_ratio  = hc_alloc / max(hc_total, 1)
+                        hc_bar_y  = HEADER_H + UTIL_ROW_H + (UTIL_ROW_H - bar_h) // 2
+                        hc_fill_w = int(cw_ * min(hc_ratio, 1.0))
+                        p.setBrush(QBrush(QColor(50, 82, 138)))
+                        p.setPen(Qt.PenStyle.NoPen)
+                        p.drawRoundedRect(QRect(sx + 2, hc_bar_y, cw_, bar_h), 2, 2)
+                        hc_color = (UTIL_HIGH if hc_ratio > 0.9 else
+                                    UTIL_MED  if hc_ratio > 0.6 else
+                                    (UTIL_LOW if hc_ratio > 0 else QColor(214, 218, 227)))
+                        if hc_fill_w > 0:
+                            p.setBrush(QBrush(hc_color)); p.setPen(Qt.PenStyle.NoPen)
+                            p.drawRoundedRect(QRect(sx + 2, hc_bar_y, hc_fill_w, bar_h), 2, 2)
+                        if hc_alloc > 0 or (ds_str, sno) in self._hc_map:
+                            hc_tag_txt = f"{int(hc_ratio * 100)}%"
+                            p.setFont(f_cap)
+                            hc_tag_w   = _FM(f_cap).horizontalAdvance(hc_tag_txt) + 6
+                            hc_tag_h   = 10
+                            hc_tag_x   = sx + SHIFT_W - hc_tag_w - 2
+                            hc_tag_y   = HEADER_H + UTIL_ROW_H + (UTIL_ROW_H - hc_tag_h) // 2
+                            hc_bg      = QColor(194, 52, 47) if hc_ratio > 0.9 else QColor(30, 58, 110, 200)
+                            p.setBrush(QBrush(hc_bg)); p.setPen(Qt.PenStyle.NoPen)
+                            p.drawRoundedRect(QRect(hc_tag_x, hc_tag_y, hc_tag_w, hc_tag_h), 2, 2)
+                            p.setPen(QPen(Qt.GlobalColor.white))
+                            p.drawText(QRect(hc_tag_x, hc_tag_y, hc_tag_w, hc_tag_h),
+                                       Qt.AlignmentFlag.AlignCenter, hc_tag_txt)
+
+                        # Column dividers
+                        p.setPen(QPen(QColor(255, 255, 255, 35)))
+                        p.drawLine(sx, HEADER_H + UTIL_ROW_H, sx + SHIFT_W, HEADER_H + UTIL_ROW_H)
+                        p.setPen(QPen(QColor(255, 255, 255, 15)))
+                        p.drawLine(sx, HEADER_H, sx, HEADER_H + UTIL_H)
 
         p.restore()
 
@@ -1286,11 +1363,17 @@ class GanttCanvas(QWidget):
         # Aggregate to (room, date) and (room, process, date) for per-cell util bars
         self._cell_util      = {}
         self._cell_util_proc = {}
+        self._cell_util_shift      = {}   # (room, ds, sno) -> (used, cap)
+        self._cell_util_proc_shift = {}   # (room, proc, ds, sno) -> (used, cap)
         for (ds, room, proc, sno), (used, cap) in self._cap_map.items():
             cu, cc = self._cell_util.get((room, ds), (0.0, 0.0))
             self._cell_util[(room, ds)] = (cu + used, cc + cap)
             pu, pc = self._cell_util_proc.get((room, proc, ds), (0.0, 0.0))
             self._cell_util_proc[(room, proc, ds)] = (pu + used, pc + cap)
+            su, sc = self._cell_util_shift.get((room, ds, sno), (0.0, 0.0))
+            self._cell_util_shift[(room, ds, sno)] = (su + used, sc + cap)
+            psu, psc = self._cell_util_proc_shift.get((room, proc, ds, sno), (0.0, 0.0))
+            self._cell_util_proc_shift[(room, proc, ds, sno)] = (psu + used, psc + cap)
 
     def _build_layout_and_heights(self):
         """Assign vertical slot index to each plan (for stacking) and compute
@@ -2092,8 +2175,8 @@ class GanttCanvas(QWidget):
 
     def _draw_cell_util_bars(self, p: QPainter):
         """Draw per-cell capacity utilization bar at the bottom of each row.
-        Works whenever 'Room' is in y_dims (not just pure Room mode), day view only."""
-        if "Room" not in self.y_dims or self.shift_view:
+        Works whenever 'Room' is in y_dims (not just pure Room mode)."""
+        if "Room" not in self.y_dims:
             return
         from PyQt6.QtGui import QFontMetrics
         f_util = QFont("Segoe UI", 6, QFont.Weight.Bold)
@@ -2103,43 +2186,73 @@ class GanttCanvas(QWidget):
         room_dim_idx = self.y_dims.index("Room")
         use_proc_key = "Process" in self.y_dims
         proc_dim_idx = self.y_dims.index("Process") if use_proc_key else -1
+        n_shifts = len(self._shifts)
+
         for ri, rk in enumerate(self._rows):
             parts = rk.split("|")
             room = parts[room_dim_idx] if room_dim_idx < len(parts) else rk
             proc = parts[proc_dim_idx] if use_proc_key and proc_dim_idx < len(parts) else None
             row_y = self._row_y_list[ri]
             row_h = self._row_heights[ri]
-            # Bar sits in the CELL_UTIL_H strip at the bottom of the row
             bar_y = row_y + row_h - CELL_UTIL_H + (CELL_UTIL_H - BAR_H) // 2
-            for col in range(self.horizon_days):
-                ds = (self.start_date + timedelta(days=col)).strftime("%Y-%m-%d")
-                if use_proc_key:
-                    used, cap = self._cell_util_proc.get((room, proc, ds), (0.0, 0.0))
-                else:
-                    used, cap = self._cell_util.get((room, ds), (0.0, 0.0))
-                if cap <= 0:
-                    continue
-                ratio = used / cap
-                x   = col * DAY_W
-                cw  = DAY_W - 2
-                fill_w = int(cw * min(ratio, 1.0))
-                # Trough
-                p.setBrush(QBrush(QColor(50, 82, 138, 100)))
-                p.setPen(Qt.PenStyle.NoPen)
-                p.drawRoundedRect(QRect(x + 1, bar_y, cw, BAR_H), 2, 2)
-                # Fill
-                color = (UTIL_HIGH if ratio > 0.9 else
-                         UTIL_MED  if ratio > 0.6 else
-                         UTIL_LOW)
-                if fill_w > 0:
-                    p.setBrush(QBrush(color))
+
+            if self.shift_view and n_shifts:
+                for day in range(self.horizon_days):
+                    ds = (self.start_date + timedelta(days=day)).strftime("%Y-%m-%d")
+                    for si, shift in enumerate(self._shifts):
+                        sno = shift["shift_no"]
+                        if use_proc_key:
+                            used, cap = self._cell_util_proc_shift.get((room, proc, ds, sno), (0.0, 0.0))
+                        else:
+                            used, cap = self._cell_util_shift.get((room, ds, sno), (0.0, 0.0))
+                        if cap <= 0:
+                            continue
+                        ratio = used / cap
+                        col_idx = day * n_shifts + si
+                        x   = col_idx * SHIFT_W
+                        cw  = SHIFT_W - 2
+                        fill_w = int(cw * min(ratio, 1.0))
+                        p.setBrush(QBrush(QColor(50, 82, 138, 100)))
+                        p.setPen(Qt.PenStyle.NoPen)
+                        p.drawRoundedRect(QRect(x + 1, bar_y, cw, BAR_H), 2, 2)
+                        color = (UTIL_HIGH if ratio > 0.9 else
+                                 UTIL_MED  if ratio > 0.6 else
+                                 UTIL_LOW)
+                        if fill_w > 0:
+                            p.setBrush(QBrush(color))
+                            p.setPen(Qt.PenStyle.NoPen)
+                            p.drawRoundedRect(QRect(x + 1, bar_y, fill_w, BAR_H), 2, 2)
+                        pct_txt = f"{int(ratio * 100)}%"
+                        txt_w   = fm.horizontalAdvance(pct_txt)
+                        p.setPen(QPen(QColor(255, 255, 255, 220)))
+                        p.drawText(x + cw - txt_w - 1, bar_y + BAR_H - 1, pct_txt)
+            else:
+                for col in range(self.horizon_days):
+                    ds = (self.start_date + timedelta(days=col)).strftime("%Y-%m-%d")
+                    if use_proc_key:
+                        used, cap = self._cell_util_proc.get((room, proc, ds), (0.0, 0.0))
+                    else:
+                        used, cap = self._cell_util.get((room, ds), (0.0, 0.0))
+                    if cap <= 0:
+                        continue
+                    ratio = used / cap
+                    x   = col * DAY_W
+                    cw  = DAY_W - 2
+                    fill_w = int(cw * min(ratio, 1.0))
+                    p.setBrush(QBrush(QColor(50, 82, 138, 100)))
                     p.setPen(Qt.PenStyle.NoPen)
-                    p.drawRoundedRect(QRect(x + 1, bar_y, fill_w, BAR_H), 2, 2)
-                # % label right-aligned inside bar
-                pct_txt = f"{int(ratio * 100)}%"
-                txt_w   = fm.horizontalAdvance(pct_txt)
-                p.setPen(QPen(QColor(255, 255, 255, 220)))
-                p.drawText(x + cw - txt_w - 1, bar_y + BAR_H - 1, pct_txt)
+                    p.drawRoundedRect(QRect(x + 1, bar_y, cw, BAR_H), 2, 2)
+                    color = (UTIL_HIGH if ratio > 0.9 else
+                             UTIL_MED  if ratio > 0.6 else
+                             UTIL_LOW)
+                    if fill_w > 0:
+                        p.setBrush(QBrush(color))
+                        p.setPen(Qt.PenStyle.NoPen)
+                        p.drawRoundedRect(QRect(x + 1, bar_y, fill_w, BAR_H), 2, 2)
+                    pct_txt = f"{int(ratio * 100)}%"
+                    txt_w   = fm.horizontalAdvance(pct_txt)
+                    p.setPen(QPen(QColor(255, 255, 255, 220)))
+                    p.drawText(x + cw - txt_w - 1, bar_y + BAR_H - 1, pct_txt)
 
     def _draw_drag_ghost(self, p: QPainter):
         if self._drag_invalid:
@@ -2311,33 +2424,52 @@ class GanttCanvas(QWidget):
             else:
                 self.update()
         # ── Room util bar tooltip (bottom CELL_UTIL_H strip of each row) ─────
-        if not plan and "Room" in self.y_dims and not self.shift_view:
+        if not plan and "Room" in self.y_dims:
             ri = self._row_at_y(pos.y())
             if 0 <= ri < len(self._row_y_list):
                 row_y = self._row_y_list[ri]
                 row_h = self._row_heights[ri]
                 util_top = row_y + row_h - CELL_UTIL_H
                 if pos.y() >= util_top:
-                    col = pos.x() // DAY_W
-                    if 0 <= col < self.horizon_days:
-                        rk = self._rows[ri]
-                        room_dim_idx = self.y_dims.index("Room")
-                        _use_proc = "Process" in self.y_dims
-                        _proc_idx = self.y_dims.index("Process") if _use_proc else -1
-                        parts = rk.split("|")
-                        room = parts[room_dim_idx] if room_dim_idx < len(parts) else rk
-                        proc = parts[_proc_idx] if _use_proc and _proc_idx < len(parts) else None
-                        ds = (self.start_date + timedelta(days=col)).strftime("%Y-%m-%d")
-                        if _use_proc:
-                            used, cap = self._cell_util_proc.get((room, proc, ds), (0.0, 0.0))
-                        else:
-                            used, cap = self._cell_util.get((room, ds), (0.0, 0.0))
-                        if cap > 0:
-                            pct = used / cap * 100
-                            label = f"{room} {proc}" if proc else room
-                            tip = f"{label} | {ds}\n{used:,.0f} / {cap:,.0f}  ({pct:.0f}%)"
-                            QToolTip.showText(QCursor.pos(), tip, self)
-                            return
+                    rk = self._rows[ri]
+                    room_dim_idx = self.y_dims.index("Room")
+                    _use_proc = "Process" in self.y_dims
+                    _proc_idx = self.y_dims.index("Process") if _use_proc else -1
+                    parts = rk.split("|")
+                    room = parts[room_dim_idx] if room_dim_idx < len(parts) else rk
+                    proc = parts[_proc_idx] if _use_proc and _proc_idx < len(parts) else None
+                    if self.shift_view and self._shifts:
+                        n_sh = len(self._shifts)
+                        col_idx = pos.x() // SHIFT_W
+                        day = col_idx // n_sh
+                        si  = col_idx % n_sh
+                        if 0 <= day < self.horizon_days and si < n_sh:
+                            ds  = (self.start_date + timedelta(days=day)).strftime("%Y-%m-%d")
+                            sno = self._shifts[si]["shift_no"]
+                            if _use_proc:
+                                used, cap = self._cell_util_proc_shift.get((room, proc, ds, sno), (0.0, 0.0))
+                            else:
+                                used, cap = self._cell_util_shift.get((room, ds, sno), (0.0, 0.0))
+                            if cap > 0:
+                                pct = used / cap * 100
+                                label = f"{room} {proc}" if proc else room
+                                tip = f"{label} | {ds} S{sno}\n{used:,.0f} / {cap:,.0f}  ({pct:.0f}%)"
+                                QToolTip.showText(QCursor.pos(), tip, self)
+                                return
+                    else:
+                        col = pos.x() // DAY_W
+                        if 0 <= col < self.horizon_days:
+                            ds = (self.start_date + timedelta(days=col)).strftime("%Y-%m-%d")
+                            if _use_proc:
+                                used, cap = self._cell_util_proc.get((room, proc, ds), (0.0, 0.0))
+                            else:
+                                used, cap = self._cell_util.get((room, ds), (0.0, 0.0))
+                            if cap > 0:
+                                pct = used / cap * 100
+                                label = f"{room} {proc}" if proc else room
+                                tip = f"{label} | {ds}\n{used:,.0f} / {cap:,.0f}  ({pct:.0f}%)"
+                                QToolTip.showText(QCursor.pos(), tip, self)
+                                return
 
         if plan:
             self.setCursor(Qt.CursorShape.OpenHandCursor)
