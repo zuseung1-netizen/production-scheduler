@@ -314,9 +314,9 @@ class _TabbedStack:
 
 class DetachedWindow(QMainWindow):
     """
-    A secondary window with the full tab structure, backed by the same DB.
-    Opens independently — main window keeps all its tabs intact.
-    Auto-refreshes the active tab every 10 s.
+    Secondary window — same sidebar + stack layout as the main window.
+    Opens independently; main window keeps all its tabs intact.
+    Auto-refreshes the active view every 10 s.
     """
 
     def __init__(self, start_tab_index: int, main_window: "MainWindow"):
@@ -330,9 +330,6 @@ class DetachedWindow(QMainWindow):
         self._start_refresh_timer()
 
     def _build_ui(self, start_tab_index: int):
-        self.tabs = QTabWidget()
-        self.tabs.setDocumentMode(True)
-
         self.gantt_tab        = GanttTab(self)
         self.so_tab           = SOTab(self)
         self.io_tab           = InternalOrderTab(self)
@@ -348,33 +345,76 @@ class DetachedWindow(QMainWindow):
         self.labor_tab        = LaborUtilizationTab(self)
         self.help_tab         = HelpTab(self)
 
+        # Stack — same order as MainWindow._tab_defs
+        self._stack = QStackedWidget()
+        self.tabs   = _TabbedStack(self._stack)   # backward-compat proxy
+
         _tab_defs = [
-            (self.gantt_tab,       "📅  Plan Board"),
-            (self.so_tab,          "📋  Sales Orders"),
-            (self.io_tab,          "🏭  Internal Orders"),
-            (self.master_tab,      "🗂  Masters"),
-            (self.crp_tab,         "👥  CRP"),
-            (self.actuals_tab,     "✅  Actuals"),
-            (self.alerts_tab,      "⚠️  Alerts"),
-            (self.inventory_tab,   "📦  Inventory"),
-            (self.fulfillment_tab, "🎯  Fulfillment Status"),
-            (self.impact_tab,      "📈  Impact Report"),
-            (self.scenario_tab,    "🎯  Scenario Planner"),
-            (self.help_tab,        "❓  Help"),
-            (self.labor_tab,       "👷  Labor Utilization"),
-            (self.plan_list_tab,   "☰   Plan List"),
+            (self.gantt_tab,       "📅  Plan Board",          0),
+            (self.so_tab,          "📋  Sales Orders",         1),
+            (self.io_tab,          "🏭  Internal Orders",      2),
+            (self.master_tab,      "🗂  Masters",               3),
+            (self.crp_tab,         "👥  CRP",                   4),
+            (self.actuals_tab,     "✅  Actuals",               5),
+            (self.alerts_tab,      "⚠️  Alerts",                6),
+            (self.inventory_tab,   "📦  Inventory",             7),
+            (self.fulfillment_tab, "🎯  Fulfillment Status",    8),
+            (self.impact_tab,      "📈  Impact Report",         9),
+            (self.scenario_tab,    "🎯  Scenario Planner",     10),
+            (self.help_tab,        "❓  Help",                  11),
+            (self.labor_tab,       "👷  Labor Utilization",    12),
+            (self.plan_list_tab,   "☰   Plan List",            13),
         ]
-        for widget, title in _tab_defs:
+        for widget, title, _ in _tab_defs:
             self.tabs.addTab(widget, title)
 
-        self.tabs.setCurrentIndex(
-            max(0, min(start_tab_index, self.tabs.count() - 1)))
-        self.tabs.currentChanged.connect(self._on_tab_changed)
-        self.setCentralWidget(self.tabs)
+        # Sidebar — mirrors MainWindow
+        self._sidebar = NavSidebar(self)
+        self._sidebar.add_group("Plan")
+        self._sidebar.add_item(_IC_GANTT,     "Plan Board",           0)
+        self._sidebar.add_item(_IC_LIST,      "Plan List",            13)
+        self._sidebar.add_item(_IC_SO,        "Sales Orders",          1)
+        self._sidebar.add_item(_IC_SO,        "Internal Orders",       2)
+        self._sidebar.add_item(_IC_RELEASE,   "Fulfillment Status",    8)
+        self._sidebar.add_group("Capacity")
+        self._sidebar.add_item(_IC_CRP,       "CRP",                   4)
+        self._sidebar.add_item(_IC_LABOR,     "Labor Utilization",    12)
+        self._sidebar.add_item(_IC_INVENTORY, "Inventory",             7)
+        self._sidebar.add_item(_IC_DASHBOARD, "Scenario Planner",     10)
+        self._sidebar.add_group("Track")
+        self._sidebar.add_item(_IC_ACTUALS,   "Actuals",               5)
+        self._sidebar.add_item(_IC_ALERTS,    "Alerts",                6)
+        self._sidebar.add_item(_IC_RELEASE,   "Impact Report",         9)
+        self._sidebar.add_group("Setup")
+        self._sidebar.add_item(_IC_MASTERS,   "Masters",               3)
+        self._sidebar.add_item(_IC_HELP,      "Help",                  11)
+
+        idx = max(0, min(start_tab_index, self.tabs.count() - 1))
+        self._sidebar.set_current(idx)
+        self._stack.setCurrentIndex(idx)
+        self._sidebar.tabRequested.connect(self._on_sidebar_nav)
+        self._stack.currentChanged.connect(self._on_tab_changed)
+
+        body = QWidget()
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+        body_layout.addWidget(self._sidebar)
+        body_layout.addWidget(self._stack, stretch=1)
+        self.setCentralWidget(body)
+
+    def _on_sidebar_nav(self, idx: int):
+        self._sidebar.set_current(idx)
+        self._stack.setCurrentIndex(idx)
 
     def _build_toolbar(self):
         tb = self.addToolBar("Toolbar")
         tb.setMovable(False)
+        tb.setStyleSheet(
+            "QToolBar { background:#f7f8fc; border-bottom:1px solid #e2e4ea; spacing:4px; }"
+            "QToolButton { padding:4px 10px; font-size:11px; border-radius:4px; }"
+            "QToolButton:hover { background:#edeef3; }"
+        )
 
         act_replan = QAction("🔄  Re-Plan", self)
         act_replan.triggered.connect(self.gantt_tab.run_auto_plan)
@@ -413,11 +453,11 @@ class DetachedWindow(QMainWindow):
         self._timer.start(10_000)
 
     def _auto_refresh(self):
-        tab = self.tabs.currentWidget()
-        if hasattr(tab, "refresh"):
+        w = self._stack.currentWidget()
+        if hasattr(w, "refresh"):
             try:
-                tab.refresh()
-            except Exception as e:
+                w.refresh()
+            except Exception:
                 import traceback; traceback.print_exc()
 
     def _on_tab_changed(self, idx: int):
@@ -425,9 +465,9 @@ class DetachedWindow(QMainWindow):
         self._status.showMessage("Loading…")
         QApplication.processEvents()
         try:
-            tab = self.tabs.widget(idx)
-            if hasattr(tab, "refresh"):
-                tab.refresh()
+            w = self._stack.currentWidget()
+            if hasattr(w, "refresh"):
+                w.refresh()
         finally:
             QApplication.restoreOverrideCursor()
             self._status.clearMessage()
@@ -443,7 +483,7 @@ class DetachedWindow(QMainWindow):
 
     def _check_conflicts(self):
         self._check_conflicts_silent()
-        self._on_sidebar_nav(5)
+        self._on_sidebar_nav(6)
         self.alerts_tab.refresh()
 
     def _check_conflicts_silent(self):
