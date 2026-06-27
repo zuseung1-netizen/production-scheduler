@@ -2242,6 +2242,29 @@ class Scheduler:
         crp_total = crp_manager.get_total_hc(date_str, shift_no)
         return (total_alloc, crp_total)
 
+    def get_shift_hc_filtered(self, date_str: str, shift_no: int,
+                               planned_combos: set) -> tuple:
+        """Returns (allocated_hc, crp_total_hc) for a shift, counting only
+        (room, process) pairs present in planned_combos (rooms with actual plans).
+        Used for Gantt HC bar and Labor Utilization to stay in sync.
+        """
+        active_rps: List[Tuple[str, List[Dict]]] = []
+        for room in self.rooms:
+            cal = CalendarRepo.get_slot(date_str, shift_no, room)
+            if cal and (not cal["is_open"] or cal["is_hold"]):
+                continue
+            if crp_manager.is_held(date_str, room, shift_no):
+                continue
+            rps = [rp for rp in self.room_procs.get(room, [])
+                   if (room, rp["process_name"]) in planned_combos]
+            if rps:
+                active_rps.append((room, rps))
+        hc_dist = self._compute_hc_distribution(
+            date_str, shift_no, active_rps, self._last_urgency)
+        total_alloc = sum(hc_dist.values())
+        crp_total = crp_manager.get_total_hc(date_str, shift_no)
+        return (total_alloc, crp_total)
+
     def get_slot_hc(self, date_str: str, room_code: str,
                     process_name: str, shift_no: int) -> int:
         """Return distributed HC for a specific room/process/shift slot."""

@@ -1374,18 +1374,20 @@ class GanttCanvas(QWidget):
 
     def _build_hc_map(self):
         """Build headcount utilisation map: (date_str, shift_no) -> (alloc, crp_total).
-        Denominator is CRP total HC, so ratio = people actually placed / people available.
+        Only (room, process) pairs with actual plans are counted, matching
+        the Labor Utilization tab logic so both show consistent numbers.
         """
         self._hc_map = {}
-        seen: Set[Tuple] = set()
+        # Build planned (room, proc) set per (date, shift) — avoids per-slot DB calls
+        planned_combos: dict = {}
         for p in self._plans:
             key = (p["plan_date"], p["shift_no"])
-            if key in seen:
-                continue
-            seen.add(key)
-            alloc, total = scheduler.get_shift_hc_total(
-                p["plan_date"], p["shift_no"])
-            self._hc_map[key] = (alloc, max(total, 1))
+            planned_combos.setdefault(key, set()).add(
+                (p["room_code"], p["process_name"]))
+
+        for (ds, sno), combos in planned_combos.items():
+            alloc, total = scheduler.get_shift_hc_filtered(ds, sno, combos)
+            self._hc_map[(ds, sno)] = (alloc, max(total, 1))
 
     def _build_closed_map(self):
         """Build two lookups for Y_MODE_ROOM:
