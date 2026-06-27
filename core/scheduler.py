@@ -207,8 +207,9 @@ class Scheduler:
             report["reorg_moved"] = 0
 
         # 4. Campaign pass: pull fragmented same-SKU plans into earliest available slot
+        #    Pass slot_map (already built above) to skip redundant CRP re-read.
         if ConfigRepo.get("campaign_pass_enabled", "1") == "1":
-            cp = self.campaign_pass(effective_from, date_to)
+            cp = self.campaign_pass(effective_from, date_to, slot_full_cap=slot_map)
             report["campaign_moved"] = cp["moved"]
         else:
             report["campaign_moved"] = 0
@@ -1008,13 +1009,20 @@ class Scheduler:
         return {"moved": moved, "frozen": frozen, "skipped_groups": skipped}
 
     # ── Campaign Pass ─────────────────────────────────────────────────────────
-    def campaign_pass(self, date_from: str, date_to: str) -> Dict:
+    def campaign_pass(self, date_from: str, date_to: str,
+                      slot_full_cap: Dict[SlotKey, float] = None) -> Dict:
         """Post-pass: pull unlocked same-SKU/Room/Process plans from later dates
         into earlier dates when capacity permits.
 
-        Within each cluster (plans whose dates span ≤ campaign_pass_window_days),
-        later plans are moved earlier if the target slot has sufficient remaining
-        capacity.  Locked and consolidated plans are never touched.
+        Improvements over v1:
+        ① Sliding-window clustering — compares against the *previous* plan's date
+          so chains like 7/01→7/04→7/07 (window=3) form one cluster, not two.
+        ② slot_full_cap can be passed in from auto_plan to avoid rebuilding
+          the CRP-based capacity map (no redundant Excel re-read).
+        ③ FFD ordering — movable plans sorted by qty descending before placement
+          so large blocks claim space first and small blocks fill the gaps.
+        ④ Bulk DB write — all moves committed in a single transaction with
+          plan_history records (PlanRepo.bulk_campaign_update).
 
         Returns {"moved": N}.
         """
@@ -1024,10 +1032,10 @@ class Scheduler:
         if window <= 0:
             return {"moved": 0}
 
-        self._reload_masters()
-
-        # Capacity available per slot (locked plans already subtracted)
-        slot_full_cap: Dict[SlotKey, float] = self._build_slot_map(date_from, date_to)
+        # ② Reuse slot_full_cap from caller when available; build only if standalone
+        if slot_full_cap is None:
+            self._reload_masters()
+            slot_full_cap = self._build_slot_map(date_from, date_to)
 
         # All unlocked, non-consolidated SKU plans in range
         all_plans = [
@@ -1048,7 +1056,7 @@ class Scheduler:
         for p in all_plans:
             groups[(p["entity_code"], p["room_code"], p["process_name"])].append(p)
 
-        moved = 0
+        pending: List[Tuple[int, str, int]] = []   # (plan_id, new_date, new_shift)
 
         for (entity_code, room_code, process_name), plans in groups.items():
             if len(plans) < 2:
@@ -1057,16 +1065,15 @@ class Scheduler:
             sku_obj = self.sku_map.get(entity_code, {})
             uom = int(sku_obj.get("uom") or 1)
 
-            # Sort by date then shift (ascending)
             plans.sort(key=lambda p: (p["plan_date"], p["shift_no"]))
 
-            # Cluster: plans whose date is within `window` days of the cluster's first date
+            # ① Sliding-window clustering: compare against previous plan, not cluster[0]
             clusters: List[List[Dict]] = []
             current: List[Dict] = [plans[0]]
             for p in plans[1:]:
-                d_start = date.fromisoformat(current[0]["plan_date"])
-                d_cur   = date.fromisoformat(p["plan_date"])
-                if (d_cur - d_start).days <= window:
+                d_prev = date.fromisoformat(current[-1]["plan_date"])
+                d_cur  = date.fromisoformat(p["plan_date"])
+                if (d_cur - d_prev).days <= window:
                     current.append(p)
                 else:
                     if len(current) > 1:
@@ -1076,41 +1083,40 @@ class Scheduler:
                 clusters.append(current)
 
             for cluster in clusters:
-                # Try pulling each later plan into an earlier slot within the cluster
-                for pi in range(1, len(cluster)):
-                    later = cluster[pi]
-                    inner_qty: float = sku_to_inner(later["qty_planned"], uom)
-                    later_key: SlotKey = (
-                        later["plan_date"], room_code,
-                        process_name, later["shift_no"]
-                    )
+                # Sorted target slots (earliest first) — recomputed per cluster
+                # because plans may have moved within the session
+                target_slots = sorted(
+                    {(p["plan_date"], p["shift_no"]): p for p in cluster}.values(),
+                    key=lambda p: (p["plan_date"], p["shift_no"])
+                )
 
-                    for earlier in cluster[:pi]:
-                        if earlier["plan_date"] >= later["plan_date"]:
-                            continue  # same or later date — skip
-                        e_key: SlotKey = (
-                            earlier["plan_date"], room_code,
-                            process_name, earlier["shift_no"]
-                        )
-                        remaining = (
-                            slot_full_cap.get(e_key, 0.0)
-                            - slot_used.get(e_key, 0.0)
-                        )
+                # ③ FFD: movable plans sorted by qty descending
+                movable = sorted(cluster[1:],
+                                 key=lambda p: p["qty_planned"], reverse=True)
+
+                for later in movable:
+                    inner_qty: float = sku_to_inner(later["qty_planned"], uom)
+                    later_key: SlotKey = (later["plan_date"], room_code,
+                                          process_name, later["shift_no"])
+
+                    for tgt in target_slots:
+                        if tgt["plan_date"] >= later["plan_date"]:
+                            continue  # only pull earlier
+                        e_key: SlotKey = (tgt["plan_date"], room_code,
+                                          process_name, tgt["shift_no"])
+                        remaining = (slot_full_cap.get(e_key, 0.0)
+                                     - slot_used.get(e_key, 0.0))
                         if remaining >= inner_qty:
-                            # Pull later plan into this earlier slot
                             slot_used[later_key] -= inner_qty
                             slot_used[e_key]     += inner_qty
-                            PlanRepo.update(
-                                later["plan_id"],
-                                {"plan_date": earlier["plan_date"],
-                                 "shift_no":  earlier["shift_no"]},
-                                reason="campaign_pass",
-                            )
-                            later["plan_date"] = earlier["plan_date"]
-                            later["shift_no"]  = earlier["shift_no"]
-                            moved += 1
-                            break  # this plan is placed; move on to next
+                            pending.append(
+                                (later["plan_id"], tgt["plan_date"], tgt["shift_no"]))
+                            later["plan_date"] = tgt["plan_date"]
+                            later["shift_no"]  = tgt["shift_no"]
+                            break
 
+        # ④ Bulk write: single transaction, history preserved
+        moved = PlanRepo.bulk_campaign_update(pending)
         return {"moved": moved}
 
     def defragment(self, date_from: str, date_to: str) -> Dict:

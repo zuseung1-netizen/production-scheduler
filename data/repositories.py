@@ -842,6 +842,43 @@ class PlanRepo:
                     (order, pid))
 
     @staticmethod
+    def bulk_campaign_update(updates: List[Tuple[int, str, int]],
+                             reason: str = "campaign_pass") -> int:
+        """Move multiple plans to new dates in a single transaction with history.
+        updates: [(plan_id, new_date, new_shift_no), ...]
+        Returns number of rows updated.
+        """
+        if not updates:
+            return 0
+        now = _now()
+        count = 0
+        with get_connection() as conn:
+            for plan_id, new_date, new_shift in updates:
+                row = conn.execute(
+                    "SELECT * FROM production_plan WHERE plan_id=?",
+                    (plan_id,)).fetchone()
+                if not row:
+                    continue
+                old = dict(row)
+                conn.execute(
+                    "UPDATE production_plan "
+                    "SET plan_date=?, shift_no=?, updated_at=? "
+                    "WHERE plan_id=?",
+                    (new_date, new_shift, now, plan_id))
+                new_snap = {**old, "plan_date": new_date,
+                            "shift_no": new_shift, "updated_at": now}
+                conn.execute("""
+                    INSERT INTO plan_history
+                        (plan_id, action, old_value, new_value, reason, changed_at)
+                    VALUES (?, 'MODIFIED', ?, ?, ?, ?)
+                """, (plan_id,
+                      json.dumps(old, ensure_ascii=False, default=str),
+                      json.dumps(new_snap, ensure_ascii=False, default=str),
+                      reason, now))
+                count += 1
+        return count
+
+    @staticmethod
     def delete(plan_id: int, reason: str = None):
         old = PlanRepo.get(plan_id)
         with get_connection() as conn:
