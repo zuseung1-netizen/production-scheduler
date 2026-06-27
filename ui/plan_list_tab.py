@@ -677,10 +677,10 @@ class PlanListTab(QWidget):
         tbl.setItem(ri, 6, it6)
 
         # Col 7: Actions — keep as setCellWidget (needs real button click handlers)
-        tbl.setCellWidget(ri, 7, self._action_widget(p["plan_id"], is_lk))
+        tbl.setCellWidget(ri, 7, self._action_widget(p["plan_id"], is_lk, tbl))
 
-    def _action_widget(self, plan_id: int, is_lk: bool) -> QWidget:
-        w   = QWidget()
+    def _action_widget(self, plan_id: int, is_lk: bool, parent: QWidget = None) -> QWidget:
+        w   = QWidget(parent)
         lay = QHBoxLayout(w)
         lay.setContentsMargins(4, 0, 4, 0)
         lay.setSpacing(2)
