@@ -27,6 +27,7 @@ from data.repositories import (
     ActualRepo, LotSampleRepo, ConfigRepo, MaterialDemandRepo, AllocationRepo, _now
 )
 from data.crp_excel import crp_manager
+from utils.workdays import sub_workdays
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
@@ -328,7 +329,7 @@ class Scheduler:
                     sku = sku_repo_all.get(plan["sku_code"], {})
                     post_lead = int(sku.get("post_lead_days") or 0)
                     due = _date(so["due_date"])
-                    min_date = due - timedelta(days=post_lead + max_early_days)
+                    min_date = sub_workdays(due, post_lead) - timedelta(days=max_early_days)
                     earliest = max(earliest, min_date)
             else:
                 earliest = date.today()
@@ -789,7 +790,7 @@ class Scheduler:
             k = (so["so_number"], so["sku_code"], so["line_item"])
             sku = self.sku_map.get(so["sku_code"], {})
             lead = int(sku.get("post_lead_days") or 0)
-            dl = (date.fromisoformat(so["due_date"]) - timedelta(days=lead)).isoformat()
+            dl = sub_workdays(date.fromisoformat(so["due_date"]), lead).isoformat()
             hard_deadline[k] = dl
 
         def _deadline(p: Dict) -> str:
@@ -1037,7 +1038,7 @@ class Scheduler:
             k = (so["so_number"], so["sku_code"], so["line_item"])
             sku = self.sku_map.get(so["sku_code"], {})
             lead = int(sku.get("post_lead_days") or 0)
-            dl = (date.fromisoformat(so["due_date"]) - timedelta(days=lead)).isoformat()
+            dl = sub_workdays(date.fromisoformat(so["due_date"]), lead).isoformat()
             hard_deadline[k] = dl
 
         def _deadline(p: Dict) -> str:
@@ -1399,7 +1400,7 @@ class Scheduler:
     def _latest_finish(self, so: Dict) -> date:
         due = _date(so["due_date"])
         sku = self.sku_map.get(so["sku_code"], {})
-        return due - timedelta(days=int(sku.get("post_lead_days") or 0))
+        return sub_workdays(due, int(sku.get("post_lead_days") or 0))
 
     def force_plan_so(self, so_number: str, sku_code: str, line_item: str,
                       date_from: str, date_to: str) -> Dict:
@@ -1802,7 +1803,7 @@ class Scheduler:
             earliest_due = min(_date(d["due_date"]) for d in group)
             post_lead    = int(mat.get("post_lead_days") or 0)
             # Latest finish = earliest_due - post_lead_days
-            mat_latest   = earliest_due - timedelta(days=post_lead)
+            mat_latest   = sub_workdays(earliest_due, post_lead)
             # Earliest start = mat_latest - max_pull_days
             mat_earliest = mat_latest - timedelta(days=self.max_pull_days)
             mat_earliest = max(mat_earliest, _date(date_from))
@@ -2472,7 +2473,7 @@ class Scheduler:
             if not sku:
                 continue
             post_lead = int(sku.get("post_lead_days") or 0)
-            cutoff = _ds(_date(so["due_date"]) - timedelta(days=post_lead))
+            cutoff = _ds(sub_workdays(_date(so["due_date"]), post_lead))
 
             fps = final_plans.get(key, [])
             last_final = max((p["plan_date"] for p in fps), default=None)
@@ -2607,7 +2608,7 @@ class Scheduler:
             if not sku:
                 continue
             post_lead = int(sku.get("post_lead_days") or 0)
-            cutoff = _ds(_date(so["due_date"]) - timedelta(days=post_lead))
+            cutoff = _ds(sub_workdays(_date(so["due_date"]), post_lead))
             key = (so["so_number"], so["sku_code"], so["line_item"])
             last_final = final_by_so.get(key)
             if not last_final:

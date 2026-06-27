@@ -1,5 +1,5 @@
 """
-Production Planner — entry point.
+PlanBoard — entry point.
 Run:  python main.py
 Build exe: pyinstaller --onefile --windowed main.py
 """
@@ -68,6 +68,9 @@ from PyQt6.QtWidgets import QApplication, QMessageBox
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QPalette, QColor
 
+QApplication.setHighDpiScaleFactorRoundingPolicy(
+    Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+
 from ui.main_window import MainWindow
 from ui.app_style import APP_QSS
 
@@ -113,7 +116,7 @@ def main():
     _write_pid()
     try:
         app = QApplication.instance() or QApplication(sys.argv)
-        app.setApplicationName("Production Planner")
+        app.setApplicationName("PlanBoard")
         app.setOrganizationName("YourCompany")
         app.setStyle("Fusion")
         font = QFont("Segoe UI", 9)

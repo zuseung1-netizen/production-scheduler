@@ -1,0 +1,5 @@
+hwnd=460048
+Maximized rect=(-9, -9, 1929, 1029)
+Detail maximized saved
+Clicking Summary at (1689, 119)
+Summary ON shot saved

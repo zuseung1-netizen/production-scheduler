@@ -1,7 +1,7 @@
 """
 Main application window.
 Tab layout:
-  0 - Gantt Planner
+  0 - Plan Board
   1 - SO Management
   2 - Master Management (SKU / Room / Shift / Config)
   3 - CRP
@@ -194,7 +194,7 @@ class NavSidebar(QWidget):
         icon_lbl.setStyleSheet("background:transparent; border:none;")
         brand_lay.addWidget(icon_lbl)
 
-        text_lbl = QLabel("Production Planner")
+        text_lbl = QLabel("PlanBoard")
         text_lbl.setStyleSheet(
             "color:#ffffff; font-size:13.5px; font-weight:700;"
             " background:transparent; border:none;"
@@ -310,7 +310,7 @@ class DetachedWindow(QMainWindow):
 
     def __init__(self, start_tab_index: int, main_window: "MainWindow"):
         super().__init__()
-        self.setWindowTitle("Production Planner — Secondary Window")
+        self.setWindowTitle("PlanBoard — Secondary Window")
         self.setMinimumSize(1400, 800)
         self._main_window = main_window
         self._build_ui(start_tab_index)
@@ -340,7 +340,7 @@ class DetachedWindow(QMainWindow):
         self.help_tab        = HelpTab(self)
 
         _tab_defs = [
-            (self.gantt_tab,     "📅  Gantt Planner"),
+            (self.gantt_tab,     "📅  Plan Board"),
             (self.so_tab,        "📋  Sales Orders"),
             (self.io_tab,        "🏭  Internal Orders"),
             (self.master_tab,    "🗂  Masters"),
@@ -495,7 +495,7 @@ class RightClickTabBar(QTabBar):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Production Planner")
+        self.setWindowTitle("PlanBoard")
         self.setMinimumSize(1400, 800)
         self._detached_windows: set = set()
         self._init_db()
@@ -539,7 +539,7 @@ class MainWindow(QMainWindow):
         self.tabs = _TabbedStack(self._stack)   # backward-compat proxy
 
         self._tab_defs = [
-            (self.gantt_tab,     "📅  Gantt Planner",       0),
+            (self.gantt_tab,     "📅  Plan Board",       0),
             (self.so_tab,        "📋  Sales Orders",        1),
             (self.io_tab,        "🏭  Internal Orders",     2),
             (self.master_tab,    "🗂  Masters",              3),
@@ -562,7 +562,7 @@ class MainWindow(QMainWindow):
         # ── Sidebar ───────────────────────────────────────────────────────────
         self._sidebar = NavSidebar(self)
         self._sidebar.add_group("Plan")
-        self._sidebar.add_item(_IC_GANTT,     "Gantt Planner",      0)
+        self._sidebar.add_item(_IC_GANTT,     "Plan Board",      0)
         self._sidebar.add_item(_IC_LIST,      "Plan List",         15)
         self._sidebar.add_item(_IC_SO,        "Sales Orders",       1)
         self._sidebar.add_item(_IC_SO,        "Internal Orders",    2)

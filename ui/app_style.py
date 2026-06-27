@@ -1,5 +1,5 @@
 """
-Global QSS stylesheet for Production Planner.
+Global QSS stylesheet for PlanBoard.
 Applied at QApplication level so every widget inherits it.
 Widget-level setStyleSheet() calls override this where needed.
 """

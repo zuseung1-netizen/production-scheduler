@@ -839,6 +839,7 @@ class CRPTab(QWidget):
         self.path_label.setText(path or "(not set)")
         no_path = not path or not __import__("os").path.exists(path)
         self.crp_guide.setVisible(no_path)
+        crp_manager.refresh()
         self._load_table()
 
     def _refresh(self):
@@ -2908,7 +2909,8 @@ class ReleaseReportTab(QWidget):
                 last_date_str = last_info[0]
                 last_shift    = last_info[1]
                 last_dt       = dtt.strptime(last_date_str, "%Y-%m-%d").date()
-                release_dt    = last_dt + timedelta(days=post_lead)
+                from utils.workdays import add_workdays as _awdays
+                release_dt    = _awdays(last_dt, post_lead)
                 release_str   = release_dt.strftime("%Y-%m-%d")
             else:
                 last_date_str = "—"

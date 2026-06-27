@@ -1,0 +1,6 @@
+UNHANDLED EXCEPTION:
+Traceback (most recent call last):
+  File "C:\production scheduler\ui\gantt_tab.py", line 3808, in _on_sum_toggle
+    self.canvas.toggle_summarize(checked)
+    ^^^^^^^^^^^
+AttributeError: 'GanttTab' object has no attribute 'canvas'

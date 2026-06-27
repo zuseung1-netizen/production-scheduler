@@ -1,0 +1,11 @@
+WIN: Production Planner
+WIN: ⠐ Fill SO template with sample orders
+WIN: 받은편지함 (336) - zuseung1@gmail.com - Gmail - Chrome
+WIN: Production Scheduler - 파일 탐색기
+WIN: requirements.txt - 메모장
+WIN: 설정
+WIN: 설정
+WIN: Windows 입력 환경
+WIN: Program Manager
+Found: ['Production Planner', 'Production Scheduler - 파일 탐색기']
+Saved

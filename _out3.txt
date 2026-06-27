@@ -1,0 +1,5 @@
+hwnd=3409074
+rect=(-9, -9, 1929, 1029)
+Toolbar strip saved
+Try click (1709,56)
+App still focused after click at (1709,56)

@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea,
-    QLabel, QPushButton, QComboBox, QToolTip, QInputDialog,
+    QLabel, QPushButton, QToolButton, QComboBox, QToolTip, QInputDialog,
     QMessageBox, QMenu, QDialog, QDialogButtonBox, QTextEdit,
     QApplication, QDateEdit, QFormLayout, QSpinBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QFrame,
@@ -669,6 +669,7 @@ class GanttYLabelWidget(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
 
     def sync_from(self, canvas: 'GanttCanvas'):
+        self._canvas       = canvas
         self._rows         = canvas._rows
         self._row_heights  = canvas._row_heights
         self._row_y_list   = canvas._row_y_list
@@ -696,10 +697,19 @@ class GanttYLabelWidget(QWidget):
         return ""
 
     def paintEvent(self, event):
+        # Always pull fresh layout from canvas so card-height toggles stay in sync.
+        if hasattr(self, '_canvas'):
+            c = self._canvas
+            self._rows         = c._rows
+            self._row_heights  = c._row_heights
+            self._row_y_list   = c._row_y_list
+            self._total_body_h = c._total_body_h
+            self._y_dims       = c.y_dims[:]
         if not self._rows:
             return
         p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
 
         yw    = self._y_label_w
         ndims = len(self._y_dims)
@@ -814,6 +824,7 @@ class GanttCanvas(QWidget):
     planSelected        = pyqtSignal(dict)
     selectionChanged    = pyqtSignal(list)
     summaryCardClicked  = pyqtSignal(dict)
+    layoutChanged       = pyqtSignal()
 
     # Legacy mode constants kept for any external references
     Y_MODE_ROOM = "room"
@@ -1045,6 +1056,7 @@ class GanttCanvas(QWidget):
         self._update_size()
         self._pixmap_dirty = True
         self.update()
+        self.layoutChanged.emit()
 
     @property
     def _card_h(self) -> int:
@@ -1318,10 +1330,10 @@ class GanttCanvas(QWidget):
         self._row_y_list  = []
         self._row_heights = []
         y = self._body_top()
-        _room_mode = (self.y_dims == ["Room"])
+        _has_room = "Room" in self.y_dims
         for rk in self._rows:
             h = max(1, row_max.get(rk, 1)) * self._card_h
-            if _room_mode:
+            if _has_room:
                 h += CELL_UTIL_H  # reserve bottom strip for per-cell util bar
             self._row_y_list.append(y)
             self._row_heights.append(h)
@@ -1507,11 +1519,15 @@ class GanttCanvas(QWidget):
         sz = self.size()
         if sz.isEmpty():
             return
-        pm = QPixmap(sz)
+        dpr = self.devicePixelRatio()
+        pw, ph = int(sz.width() * dpr), int(sz.height() * dpr)
+        pm = QPixmap(pw, ph)
         pm.fill(Qt.GlobalColor.transparent)
         p = QPainter(pm)
         try:
-            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.scale(dpr, dpr)  # logical coords → physical pixels
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
             self._draw_grid(p)
             self._draw_today_line(p)
             self._draw_plans(p)
@@ -1541,20 +1557,23 @@ class GanttCanvas(QWidget):
 
     def paintEvent(self, event):
         p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         try:
             if self._use_pixmap_cache():
                 # ── Pixmap-cached path (most common case) ─────────────────────
                 # Re-render the static pixmap only when data/state changed.
+                dpr = self.devicePixelRatio()
+                sz  = self.size()
                 need_render = (
                     self._pixmap_dirty or
                     self._static_pixmap is None or
-                    self._static_pixmap.size() != self.size()
+                    self._static_pixmap.size() != QSize(int(sz.width() * dpr), int(sz.height() * dpr))
                 )
                 if need_render:
                     self._render_to_pixmap()
-                # Blit the cached pixmap — only the dirty rect for efficiency.
-                src = event.rect()
-                p.drawPixmap(src, self._static_pixmap, src)
+                # Blit the cached pixmap scaled to widget logical size → physical 1:1.
+                p.drawPixmap(self.rect(), self._static_pixmap)
                 # Dynamic overlays drawn on top (never invalidate the pixmap).
                 self._draw_hover_overlay(p)
                 if self._stack_drag:
@@ -1978,8 +1997,8 @@ class GanttCanvas(QWidget):
                 prod_deadline = None
                 if due and so:
                     _lead = int((self._skus.get(so["sku_code"]) or {}).get("post_lead_days") or 0)
-                    prod_deadline = (datetime.strptime(due, "%Y-%m-%d").date()
-                                     - timedelta(days=_lead))
+                    from utils.workdays import sub_workdays as _swdays
+                    prod_deadline = _swdays(datetime.strptime(due, "%Y-%m-%d").date(), _lead)
 
                 if prod_deadline:
                     days_to = (prod_deadline - date.today()).days
@@ -2065,15 +2084,19 @@ class GanttCanvas(QWidget):
                 p.drawRoundedRect(r.adjusted(-1, -1, 1, 1), 5, 5)
 
     def _draw_cell_util_bars(self, p: QPainter):
-        """Draw per-cell capacity utilization bar at the bottom of each row (Room mode, day view only)."""
-        if self.y_dims != ["Room"] or self.shift_view:
+        """Draw per-cell capacity utilization bar at the bottom of each row.
+        Works whenever 'Room' is in y_dims (not just pure Room mode), day view only."""
+        if "Room" not in self.y_dims or self.shift_view:
             return
         from PyQt6.QtGui import QFontMetrics
         f_util = QFont("Segoe UI", 6, QFont.Weight.Bold)
         fm = QFontMetrics(f_util)
         BAR_H = 8
         p.setFont(f_util)
-        for ri, room in enumerate(self._rows):
+        room_dim_idx = self.y_dims.index("Room")
+        for ri, rk in enumerate(self._rows):
+            parts = rk.split("|")
+            room = parts[room_dim_idx] if room_dim_idx < len(parts) else rk
             row_y = self._row_y_list[ri]
             row_h = self._row_heights[ri]
             # Bar sits in the CELL_UTIL_H strip at the bottom of the row
@@ -2274,6 +2297,28 @@ class GanttCanvas(QWidget):
                     self.update(r)
             else:
                 self.update()
+        # ── Room util bar tooltip (bottom CELL_UTIL_H strip of each row) ─────
+        if not plan and "Room" in self.y_dims and not self.shift_view:
+            ri = self._row_at_y(pos.y())
+            if 0 <= ri < len(self._row_y_list):
+                row_y = self._row_y_list[ri]
+                row_h = self._row_heights[ri]
+                util_top = row_y + row_h - CELL_UTIL_H
+                if pos.y() >= util_top:
+                    col = pos.x() // DAY_W
+                    if 0 <= col < self.horizon_days:
+                        rk = self._rows[ri]
+                        room_dim_idx = self.y_dims.index("Room")
+                        parts = rk.split("|")
+                        room = parts[room_dim_idx] if room_dim_idx < len(parts) else rk
+                        ds = (self.start_date + timedelta(days=col)).strftime("%Y-%m-%d")
+                        used, cap = self._cell_util.get((room, ds), (0.0, 0.0))
+                        if cap > 0:
+                            pct = used / cap * 100
+                            tip = f"{room} | {ds}\n{used:,.0f} / {cap:,.0f}  ({pct:.0f}%)"
+                            QToolTip.showText(QCursor.pos(), tip, self)
+                            return
+
         if plan:
             self.setCursor(Qt.CursorShape.OpenHandCursor)
             is_mat = plan.get("entity_type") == "MATERIAL"
@@ -2300,8 +2345,8 @@ class GanttCanvas(QWidget):
                 customer = so.get("customer_name") or ""
                 _raw_due = so.get("due_date", "")
                 _lead    = int((self._skus.get(plan["sku_code"]) or {}).get("post_lead_days") or 0)
-                _prd_dl  = (datetime.strptime(_raw_due, "%Y-%m-%d").date()
-                            - timedelta(days=_lead)).strftime("%Y-%m-%d") if _raw_due else ""
+                from utils.workdays import sub_workdays as _swdays
+                _prd_dl  = _swdays(datetime.strptime(_raw_due, "%Y-%m-%d").date(), _lead).strftime("%Y-%m-%d") if _raw_due else ""
                 tip = (f"SO: {plan['so_number']}  SKU: {plan['sku_code']}  "
                        f"Line: {plan['line_item']}\n"
                        f"Customer: {customer}\n"
@@ -2952,9 +2997,10 @@ class SoPlanRow(QWidget):
         info_col.setSpacing(1)
         so_num = plan.get("so_number", "—")
         status = (so_rec or {}).get("status", "")
-        dot_color = "#22c55e" if status == "OPEN" else "#f59e0b"
+        dot_color = "#16a34a" if status == "OPEN" else "#d97706"
         lbl_so = QLabel(f"● {so_num}")
-        lbl_so.setStyleSheet(f"font-size:10px; font-weight:700; color:{dot_color};")
+        lbl_so.setStyleSheet(
+            f"QLabel {{ font-size:10px; font-weight:700; color:{dot_color}; }}")
         cust = (so_rec or {}).get("customer_name", "") or ""
         lbl_cust = QLabel(cust if cust else "—")
         lbl_cust.setStyleSheet("font-size:8px; color:#94a3b8;")
@@ -2979,11 +3025,11 @@ class SoPlanRow(QWidget):
             else:
                 dl_bg, dl_fg = "#dbeafe", "#2563eb"
             lbl_dl = QLabel(dl_str)
-            lbl_dl.setFixedWidth(40)
+            lbl_dl.setFixedSize(34, 18)
             lbl_dl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl_dl.setStyleSheet(
-                f"font-size:9px; font-weight:700; color:{dl_fg};"
-                f"background:{dl_bg}; border-radius:4px; padding:1px 2px;")
+                f"QLabel {{ font-size:9px; font-weight:700; color:{dl_fg};"
+                f"background:{dl_bg}; border-radius:3px; padding:0px; }}")
             lbl_dl.setToolTip(f"Production Deadline: {prod_deadline}  ({days_to:+d} days)")
             lay.addWidget(lbl_dl)
         else:
@@ -3129,42 +3175,46 @@ class FloatingSummaryPanel(QWidget):
         self._hdr = _DraggableHeader(self)
         self._hdr.setFixedHeight(76)
         self._hdr.setStyleSheet(
-            "background:#ffffff; border-radius:10px 10px 0 0;"
-            "border-bottom:1px solid #DDE3ED;")
+            "background:transparent; border-bottom:1px solid #DDE3ED;")
 
         h_lay = QHBoxLayout(self._hdr)
-        h_lay.setContentsMargins(14, 10, 10, 10)
-        h_lay.setSpacing(6)
+        h_lay.setContentsMargins(14, 8, 8, 8)
+        h_lay.setSpacing(4)
 
         title_col = QVBoxLayout()
         title_col.setSpacing(3)
+        title_col.setContentsMargins(0, 0, 0, 0)
 
         self._lbl_room = QLabel("")
         self._lbl_room.setStyleSheet(
-            "QLabel { color:#334155; font-size:9px; font-weight:600; letter-spacing:0.4px; }")
+            "QLabel { color:#64748b; font-size:9px; font-weight:600;"
+            " letter-spacing:0.4px; background:transparent; border:none; }")
 
         self._lbl_sku = QLabel("")
         self._lbl_sku.setStyleSheet(
-            "QLabel { color:#1e293b; font-size:15px; font-weight:700; }")
+            "QLabel { color:#1e293b; font-size:15px; font-weight:700;"
+            " background:transparent; border:none; }")
 
         self._lbl_meta = QLabel("")
         self._lbl_meta.setStyleSheet(
-            "QLabel { color:#334155; font-size:9px; font-weight:500; }")
+            "QLabel { color:#64748b; font-size:9px; font-weight:500;"
+            " background:transparent; border:none; }")
 
         title_col.addWidget(self._lbl_room)
         title_col.addWidget(self._lbl_sku)
         title_col.addWidget(self._lbl_meta)
         h_lay.addLayout(title_col, stretch=1)
 
-        btn_close = QPushButton("✕")
-        btn_close.setFixedSize(28, 28)
+        btn_close = QToolButton()
+        btn_close.setText("✕")
+        btn_close.setFixedSize(26, 26)
         btn_close.setStyleSheet(
-            "QPushButton { background:transparent; border:none; color:#94a3b8;"
-            " border-radius:6px; font-size:13px; font-weight:700; }"
-            "QPushButton:hover { background:#FEE2E2; color:#DC2626; border:none; }"
-            "QPushButton:pressed { background:#FECACA; color:#DC2626; border:none; }")
+            "QToolButton { background:#f1f5f9; border:none; color:#334155;"
+            " border-radius:6px; font-size:13px; font-weight:700; padding:0; }"
+            "QToolButton:hover { background:#FEE2E2; color:#DC2626; border:none; }"
+            "QToolButton:pressed { background:#FECACA; color:#DC2626; border:none; }")
         btn_close.clicked.connect(self.close_panel)
-        h_lay.addWidget(btn_close, alignment=Qt.AlignmentFlag.AlignTop)
+        h_lay.addWidget(btn_close, alignment=Qt.AlignmentFlag.AlignVCenter)
 
         lay.addWidget(self._hdr)
 
@@ -3253,7 +3303,15 @@ class FloatingSummaryPanel(QWidget):
         self._current_plan = merged_plan
         self._lbl_room.setText(
             f"{merged_plan.get('room_code', '')}  ·  {merged_plan.get('process_name', '')}".upper())
-        self._lbl_sku.setText(merged_plan.get("sku_code", ""))
+        sku_code = merged_plan.get("sku_code", "")
+        sku_rec = SKURepo.get(sku_code)
+        sku_name = (sku_rec or {}).get("sku_name", "") or ""
+        if sku_name:
+            self._lbl_sku.setText(
+                f'<span style="font-size:15px;font-weight:700;color:#1e293b;">{sku_code}</span>'
+                f'&nbsp;&nbsp;<span style="font-size:10px;font-weight:400;color:#64748b;">{sku_name}</span>')
+        else:
+            self._lbl_sku.setText(sku_code)
         n = merged_plan.get("_merged_count", 1)
         qty = merged_plan.get("qty_planned", 0)
         plan_lbl = "plan" if n == 1 else "plans"
@@ -3279,9 +3337,9 @@ class FloatingSummaryPanel(QWidget):
             _due_str = (so_rec or {}).get("due_date")
             if _due_str:
                 _lead = int((self._canvas._skus.get(plan.get("sku_code", "")) or {}).get("post_lead_days") or 0)
+                from utils.workdays import sub_workdays as _swdays
                 try:
-                    _prod_dl = (datetime.strptime(_due_str, "%Y-%m-%d").date()
-                                - timedelta(days=_lead))
+                    _prod_dl = _swdays(datetime.strptime(_due_str, "%Y-%m-%d").date(), _lead)
                 except ValueError:
                     pass
             row = SoPlanRow(plan, so_rec, prod_deadline=_prod_dl, parent=self._list_w)
@@ -3415,6 +3473,7 @@ class GanttTab(QWidget):
         self.canvas.planSelected.connect(self._on_plan_selected)
         self.canvas.selectionChanged.connect(self._on_selection_changed)
         self.canvas.summaryCardClicked.connect(self._on_summary_card_clicked)
+        self.canvas.layoutChanged.connect(self.gantt_y_label.update)
         self.scroll.setWidget(self.canvas)
         self._on_dim_changed()
 
@@ -3460,17 +3519,6 @@ class GanttTab(QWidget):
         lay = QHBoxLayout(w)
         lay.setContentsMargins(16, 0, 12, 0)
         lay.setSpacing(10)
-
-        # Title + breadcrumb stack
-        tcol = QVBoxLayout()
-        tcol.setSpacing(1)
-        t1 = QLabel("Gantt Planner")
-        t1.setStyleSheet("font-size:14px; font-weight:700; color:#16213d;")
-        t2 = QLabel("Plan / Gantt")
-        t2.setStyleSheet("font-size:10px; color:#9aa1b3;")
-        tcol.addWidget(t1)
-        tcol.addWidget(t2)
-        lay.addLayout(tcol)
 
         # Search box
         sf = QFrame()
