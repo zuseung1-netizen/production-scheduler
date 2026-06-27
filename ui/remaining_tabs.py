@@ -853,9 +853,11 @@ class CRPTab(QWidget):
         self._crp_changed_cells.clear()
         data = crp_manager.get_all()  # {(date_str, shift_no): total_hc}
         if not data:
+            self._crp_dates = []
+            self._crp_shifts = []
             self.table.setRowCount(0)
             self.table.setColumnCount(2)
-            self.table.setHorizontalHeaderLabels(["Shift", "HC"])
+            self.table.setHorizontalHeaderLabels(["Date", "HC"])
             self._crp_loading = False
             return
 
