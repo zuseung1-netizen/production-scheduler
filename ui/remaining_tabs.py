@@ -4972,7 +4972,18 @@ class LaborUtilizationTab(QWidget):
 
         dist = scheduler.compute_hc_distribution_preview(d_from, d_to)
 
-        if not dist:
+        # ── Column keys: ALL CRP dates in range (HC > 0), not just plan dates ──
+        # This ensures dates without plans but with CRP data still appear.
+        shifts_all = ShiftRepo.all()
+        shift_order = {s["shift_no"]: i for i, s in
+                       enumerate(sorted(shifts_all, key=lambda x: x["shift_no"]))}
+        avl_hc = scheduler.get_available_hc_by_date(d_from, d_to)
+        col_keys = sorted(
+            [(ds, sno) for ds, shifts in avl_hc.items()
+             for sno, hc in shifts.items() if hc > 0],
+            key=lambda k: (k[0], shift_order.get(k[1], k[1])))
+
+        if not col_keys:
             self._table.setRowCount(0)
             self._table.setColumnCount(0)
             self._status_lbl.setText(
@@ -4980,13 +4991,6 @@ class LaborUtilizationTab(QWidget):
                 "Check CRP file path (App Config → CRP File Path).")
             self._loaded = True
             return
-
-        # ── Column keys: sorted (date_str, shift_no) ─────────────────────────
-        shifts_all = ShiftRepo.all()
-        shift_order = {s["shift_no"]: i for i, s in
-                       enumerate(sorted(shifts_all, key=lambda x: x["shift_no"]))}
-        col_keys = sorted(dist.keys(),
-                          key=lambda k: (k[0], shift_order.get(k[1], k[1])))
 
         # ── Row keys: (room, process) in master-defined order ─────────────────
         rooms = RoomRepo.rooms()
