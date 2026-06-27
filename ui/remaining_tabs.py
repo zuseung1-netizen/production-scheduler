@@ -4950,12 +4950,11 @@ class LaborUtilizationTab(QWidget):
     # ── Public API ────────────────────────────────────────────────────────────
 
     def refresh(self):
-        if not self._loaded:
-            self._load_table()
+        self._load_table()
 
     def invalidate(self):
-        """Call after auto-plan to force reload on next tab visit."""
-        self._loaded = False
+        """Kept for call-site compatibility; refresh() always reloads now."""
+        pass
 
     # ── Data loading ──────────────────────────────────────────────────────────
 
