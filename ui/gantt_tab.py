@@ -624,21 +624,22 @@ class GanttHeaderWidget(QWidget):
                             p.drawText(QRect(tag_x, tag_y_pos, tag_w, tag_h),
                                        Qt.AlignmentFlag.AlignCenter, tag_txt)
 
-                        # HC bar — Row 2
-                        hc_alloc, hc_total = self._hc_map.get((ds_str, sno), (0, 1))
-                        hc_ratio  = hc_alloc / max(hc_total, 1)
-                        hc_bar_y  = HEADER_H + UTIL_ROW_H + (UTIL_ROW_H - bar_h) // 2
-                        hc_fill_w = int(cw_ * min(hc_ratio, 1.0))
-                        p.setBrush(QBrush(QColor(50, 82, 138)))
-                        p.setPen(Qt.PenStyle.NoPen)
-                        p.drawRoundedRect(QRect(sx + 2, hc_bar_y, cw_, bar_h), 2, 2)
-                        hc_color = (UTIL_HIGH if hc_ratio > 0.9 else
-                                    UTIL_MED  if hc_ratio > 0.6 else
-                                    (UTIL_LOW if hc_ratio > 0 else QColor(214, 218, 227)))
-                        if hc_fill_w > 0:
-                            p.setBrush(QBrush(hc_color)); p.setPen(Qt.PenStyle.NoPen)
-                            p.drawRoundedRect(QRect(sx + 2, hc_bar_y, hc_fill_w, bar_h), 2, 2)
-                        if hc_alloc > 0 or (ds_str, sno) in self._hc_map:
+                        # HC bar — Row 2 (only when CRP has data for this slot)
+                        hc_data = self._hc_map.get((ds_str, sno))
+                        if hc_data is not None:
+                            hc_alloc, hc_total = hc_data
+                            hc_ratio  = hc_alloc / max(hc_total, 1)
+                            hc_bar_y  = HEADER_H + UTIL_ROW_H + (UTIL_ROW_H - bar_h) // 2
+                            hc_fill_w = int(cw_ * min(hc_ratio, 1.0))
+                            p.setBrush(QBrush(QColor(50, 82, 138)))
+                            p.setPen(Qt.PenStyle.NoPen)
+                            p.drawRoundedRect(QRect(sx + 2, hc_bar_y, cw_, bar_h), 2, 2)
+                            hc_color = (UTIL_HIGH if hc_ratio > 0.9 else
+                                        UTIL_MED  if hc_ratio > 0.6 else
+                                        (UTIL_LOW if hc_ratio > 0 else QColor(214, 218, 227)))
+                            if hc_fill_w > 0:
+                                p.setBrush(QBrush(hc_color)); p.setPen(Qt.PenStyle.NoPen)
+                                p.drawRoundedRect(QRect(sx + 2, hc_bar_y, hc_fill_w, bar_h), 2, 2)
                             hc_tag_txt = f"{int(hc_ratio * 100)}%"
                             p.setFont(f_cap)
                             hc_tag_w   = _FM(f_cap).horizontalAdvance(hc_tag_txt) + 6
@@ -1470,7 +1471,8 @@ class GanttCanvas(QWidget):
 
         for (ds, sno), combos in planned_combos.items():
             alloc, total = scheduler.get_shift_hc_filtered(ds, sno, combos)
-            self._hc_map[(ds, sno)] = (alloc, max(total, 1))
+            if total > 0:   # only store when CRP has actual HC data for this slot
+                self._hc_map[(ds, sno)] = (alloc, total)
 
     def _build_closed_map(self):
         """Build two lookups for Y_MODE_ROOM:
