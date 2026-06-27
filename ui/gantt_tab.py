@@ -3045,6 +3045,16 @@ class GanttCanvas(QWidget):
         self.selectionChanged.emit([])
         self.update()
 
+    def wheelEvent(self, event):
+        if event.modifiers() & Qt.KeyboardModifier.AltModifier:
+            pt = getattr(self, "parent_tab", None)
+            if pt is not None:
+                hbar = pt.scroll.horizontalScrollBar()
+                hbar.setValue(hbar.value() - event.angleDelta().y())
+                event.accept()
+                return
+        super().wheelEvent(event)
+
 
 # ─── Priority Conflict Dialog ─────────────────────────────────────────────────
 
@@ -3634,9 +3644,6 @@ class GanttTab(QWidget):
         self.scroll.verticalScrollBar().valueChanged.connect(
             self.gantt_y_label.set_scroll_v)
 
-        # Alt+scroll → horizontal scroll
-        self.scroll.installEventFilter(self)
-        self.canvas.installEventFilter(self)
 
         body.addWidget(self.scroll, stretch=1)
 
@@ -4936,18 +4943,6 @@ class GanttTab(QWidget):
     def _on_shift_toggle(self, checked: bool):
         self.canvas.shift_view = checked
         self.refresh()
-
-    def eventFilter(self, obj, event):
-        from PyQt6.QtCore import QEvent
-        from PyQt6.QtGui import QWheelEvent
-        if event.type() == QEvent.Type.Wheel:
-            modifiers = event.modifiers()
-            if modifiers & Qt.KeyboardModifier.AltModifier:
-                delta = event.angleDelta().y()
-                hbar = self.scroll.horizontalScrollBar()
-                hbar.setValue(hbar.value() - delta)
-                return True
-        return super().eventFilter(obj, event)
 
 
 # ════════════════════════════════════════════════════════════════════════════
