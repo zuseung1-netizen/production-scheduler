@@ -3046,11 +3046,18 @@ class GanttCanvas(QWidget):
         self.update()
 
     def wheelEvent(self, event):
-        if event.modifiers() & Qt.KeyboardModifier.AltModifier:
+        # QApplication.keyboardModifiers() queries actual hardware state — more
+        # reliable than event.modifiers() for Alt on Windows (WM_MOUSEWHEEL
+        # does not carry MK_ALT, so event.modifiers() can miss it).
+        mods = QApplication.keyboardModifiers()
+        if mods & Qt.KeyboardModifier.AltModifier:
             pt = getattr(self, "parent_tab", None)
             if pt is not None:
                 hbar = pt.scroll.horizontalScrollBar()
-                hbar.setValue(hbar.value() - event.angleDelta().y())
+                step = max(event.angleDelta().y(), event.angleDelta().x())
+                if step == 0:
+                    step = event.angleDelta().y()
+                hbar.setValue(hbar.value() - step)
                 event.accept()
                 return
         super().wheelEvent(event)
