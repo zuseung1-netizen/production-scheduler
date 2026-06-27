@@ -3167,7 +3167,8 @@ class FulfillmentStatusTab(QWidget):
     _COLS = [
         "Rank", "SO", "Customer", "SKU", "Line",
         "SO Qty", "Prod Needed", "Planned",
-        "Release Date", "Due Date", "Days to Due", "CR", "Status", "Note",
+        "Prod. Complete", "Release Date", "Req. Due", "Committed",
+        "Days to Due", "CR", "Status", "Note",
     ]
 
     _STATUS_COLORS = {
@@ -3269,7 +3270,7 @@ class FulfillmentStatusTab(QWidget):
         hdr = self._table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         hdr.setStretchLastSection(True)
-        for i, w in enumerate([45, 110, 110, 80, 45, 60, 80, 60, 100, 100, 75, 55, 80, 120]):
+        for i, w in enumerate([45, 110, 110, 80, 45, 60, 80, 60, 90, 90, 90, 90, 65, 50, 75, 110]):
             hdr.resizeSection(i, w)
         self._table.verticalHeader().setDefaultSectionSize(26)
         self._table.setStyleSheet(
@@ -3381,19 +3382,23 @@ class FulfillmentStatusTab(QWidget):
             prod_needed = max(0, so["qty"] - allocated - actual_qty)
             planned_qty = planned_map.get(key, 0)
 
-            # Release date (from last plan slot + post_lead_days)
+            # Production complete date = last plan slot; release adds post_lead
             last_info = last_plan_map.get(key)
             if last_info:
                 from utils.workdays import add_workdays
-                last_dt     = datetime.strptime(last_info[0], "%Y-%m-%d").date()
-                release_dt  = add_workdays(last_dt, post_lead)
-                release_str = release_dt.strftime("%Y-%m-%d")
+                last_dt         = datetime.strptime(last_info[0], "%Y-%m-%d").date()
+                prod_complete   = last_info[0]          # YYYY-MM-DD string
+                release_dt      = add_workdays(last_dt, post_lead)
+                release_str     = release_dt.strftime("%Y-%m-%d")
             else:
-                release_dt  = None
-                release_str = "—"
+                prod_complete   = "—"
+                release_dt      = None
+                release_str     = "—"
 
-            eff_due_str = so.get("committed_due_date") or so["due_date"]
-            due_dt  = datetime.strptime(so["due_date"], "%Y-%m-%d").date()
+            req_due_str       = so["due_date"]
+            committed_due_str = so.get("committed_due_date") or ""
+            eff_due_str       = committed_due_str or req_due_str
+            due_dt  = datetime.strptime(req_due_str, "%Y-%m-%d").date()
             eff_due = datetime.strptime(eff_due_str, "%Y-%m-%d").date()
             days_to_due = (eff_due - today).days
 
@@ -3458,23 +3463,25 @@ class FulfillmentStatusTab(QWidget):
                 note = "Covered by inventory"
 
             rows.append({
-                "rank":         "—",
-                "so_number":    so_no,
-                "customer":     so.get("customer_name", "") or "",
-                "sku_code":     sku_c,
-                "line_item":    li,
-                "so_qty":       so["qty"],
-                "prod_needed":  prod_needed,
-                "planned_qty":  planned_qty,
-                "release_date": release_str,
-                "due_date":     so["due_date"],
-                "days_to_due":  days_to_due,
-                "cr":           min_cr,
-                "cr_display":   cr_display,
-                "status":       status,
-                "note":         note,
-                "so_status":    so["status"],
-                "due_dt":       due_dt,
+                "rank":           "—",
+                "so_number":      so_no,
+                "customer":       so.get("customer_name", "") or "",
+                "sku_code":       sku_c,
+                "line_item":      li,
+                "so_qty":         so["qty"],
+                "prod_needed":    prod_needed,
+                "planned_qty":    planned_qty,
+                "prod_complete":  prod_complete,
+                "release_date":   release_str,
+                "req_due":        req_due_str,
+                "committed_due":  committed_due_str or "—",
+                "days_to_due":    days_to_due,
+                "cr":             min_cr,
+                "cr_display":     cr_display,
+                "status":         status,
+                "note":           note,
+                "so_status":      so["status"],
+                "due_dt":         due_dt,
             })
 
         _order = {
@@ -3533,25 +3540,26 @@ class FulfillmentStatusTab(QWidget):
                 str(r["rank"]),
                 r["so_number"], r["customer"], r["sku_code"], r["line_item"],
                 r["so_qty"], r["prod_needed"], r["planned_qty"],
-                r["release_date"], r["due_date"],
+                r["prod_complete"], r["release_date"],
+                r["req_due"], r["committed_due"],
                 str(r["days_to_due"]),
                 r["cr_display"],
                 r["status"], r["note"],
             ]
             for ci, val in enumerate(vals):
                 item = QTableWidgetItem(str(val))
-                if ci == 12:  # Status
+                if ci == 14:  # Status
                     item.setBackground(QBrush(QColor(bg_hex)))
                     item.setForeground(QBrush(QColor(fg_hex)))
                     item.setFont(bold)
-                elif ci == 11 and r["cr"] is not None:  # CR
+                elif ci == 13 and r["cr"] is not None:  # CR
                     cr = r["cr"]
                     if cr < self.CR_CRITICAL:
                         item.setForeground(QBrush(QColor("#B71C1C")))
                         item.setFont(bold)
                     elif cr < self.CR_AT_RISK:
                         item.setForeground(QBrush(QColor("#E65100")))
-                elif ci == 10:  # Days to Due
+                elif ci == 12:  # Days to Due
                     try:
                         d = int(r["days_to_due"])
                         if d < 0:
@@ -3626,7 +3634,8 @@ class FulfillmentStatusTab(QWidget):
                     r["rank"], r["so_number"], r["customer"],
                     r["sku_code"], r["line_item"],
                     r["so_qty"], r["prod_needed"], r["planned_qty"],
-                    r["release_date"], r["due_date"],
+                    r["prod_complete"], r["release_date"],
+                    r["req_due"], r["committed_due"],
                     r["days_to_due"], r["cr_display"],
                     r["status"], r["note"],
                 ]
