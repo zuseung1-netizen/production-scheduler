@@ -488,7 +488,6 @@ class PlanListTab(QWidget):
 
         # Content
         content = QWidget()
-        content.setVisible(not collapsed)
         content.setStyleSheet(
             "QWidget{border:1px solid #DDE3ED;border-top:none;"
             "border-radius:0 0 6px 6px;background:white;}")
@@ -500,6 +499,7 @@ class PlanListTab(QWidget):
             c_lay.addWidget(self._make_shift_section(sno, shifts.get(sno, {}),
                                                      shift_map[sno]))
         lay.addWidget(content)
+        content.setVisible(not collapsed)  # must be after addWidget to avoid top-level flash
 
         def _toggle(_):
             if ds in self._collapsed_dates:
