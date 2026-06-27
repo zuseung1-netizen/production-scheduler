@@ -148,12 +148,13 @@ class SOTab(QWidget):
         hist_grp = QGroupBox("SO Change History")
         hist_layout = QVBoxLayout(hist_grp)
         self.hist_table = QTableWidget()
-        self.hist_table.setColumnCount(7)
+        self.hist_table.setColumnCount(6)
         self.hist_table.setHorizontalHeaderLabels(
-            ["Batch", "SO", "SKU", "Line", "Change", "Old", "New"])
+            ["Uploaded At", "SO", "SKU", "Line", "Type", "Changes"])
         self.hist_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Interactive)
         self.hist_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.hist_table.setWordWrap(True)
         hist_layout.addWidget(self.hist_table)
         splitter.addWidget(hist_grp)
         splitter.setSizes([600, 200])
@@ -265,19 +266,95 @@ class SOTab(QWidget):
         self._loading = False
 
     def _load_history(self):
+        import json
+
+        DISPLAY_FIELDS = [
+            ("qty",                "Qty"),
+            ("due_date",           "Due"),
+            ("priority",           "Priority"),
+            ("status",             "Status"),
+            ("note",               "Note"),
+            ("customer_name",      "Customer"),
+            ("start_no_earlier",   "Start From"),
+            ("committed_due_date", "Committed Due"),
+        ]
+
+        TYPE_COLOR = {
+            "NEW":      QColor("#16A34A"),
+            "MODIFIED": QColor("#D97706"),
+            "CLOSED":   QColor("#DC2626"),
+        }
+
         rows = SORepo.history()
         hdr = self.hist_table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         self.hist_table.setUpdatesEnabled(False)
         self.hist_table.setRowCount(len(rows))
+
         for ri, r in enumerate(rows):
+            # Batch ID → human timestamp  "20260623_183612" → "2026-06-23 18:36:12"
+            batch = r["upload_batch"] or ""
+            try:
+                ts = (f"{batch[:4]}-{batch[4:6]}-{batch[6:8]} "
+                      f"{batch[9:11]}:{batch[11:13]}:{batch[13:15]}")
+            except Exception:
+                ts = batch
+
+            change_type = r["change_type"] or ""
+
+            try:
+                old = json.loads(r["old_value"]) if r["old_value"] else {}
+            except Exception:
+                old = {}
+            try:
+                new = json.loads(r["new_value"]) if r["new_value"] else {}
+            except Exception:
+                new = {}
+
+            # Build readable changes string
+            if change_type == "MODIFIED":
+                diffs = []
+                for field, label in DISPLAY_FIELDS:
+                    oval = old.get(field)
+                    nval = new.get(field)
+                    if oval != nval:
+                        os_ = str(oval) if oval is not None else "—"
+                        ns_ = str(nval) if nval is not None else "—"
+                        diffs.append(f"{label}: {os_}  →  {ns_}")
+                changes = "\n".join(diffs) if diffs else "(metadata only)"
+            elif change_type == "NEW":
+                src = new or old
+                parts = []
+                for field, label in DISPLAY_FIELDS:
+                    val = src.get(field)
+                    if val is not None:
+                        parts.append(f"{label}: {val}")
+                changes = "    ".join(parts)
+            elif change_type == "CLOSED":
+                changes = f"Status: {old.get('status', '?')}  →  CLOSED"
+            else:
+                changes = r["new_value"] or ""
+
             for ci, val in enumerate([
-                r["upload_batch"], r["so_number"], r["sku_code"],
-                r["line_item"], r["change_type"], r["old_value"], r["new_value"]
+                ts, r["so_number"], r["sku_code"], r["line_item"], change_type, changes
             ]):
-                self.hist_table.setItem(ri, ci, QTableWidgetItem(str(val or "")))
+                item = QTableWidgetItem(str(val or ""))
+                if ci == 5:  # Changes column — left-align, allow wrap
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                self.hist_table.setItem(ri, ci, item)
+
+            # Color-code Type cell
+            type_item = self.hist_table.item(ri, 4)
+            color = TYPE_COLOR.get(change_type)
+            if color:
+                type_item.setForeground(QBrush(color))
+                f = type_item.font()
+                f.setBold(True)
+                type_item.setFont(f)
+
         self.hist_table.setUpdatesEnabled(True)
         self.hist_table.resizeColumnsToContents()
+        self.hist_table.resizeRowsToContents()
         hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
 
     def _context_menu(self, pos):
