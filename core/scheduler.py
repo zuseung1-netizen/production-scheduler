@@ -1124,31 +1124,44 @@ class Scheduler:
         """Post-pass: defer low-urgency unlocked plans one shift later to free
         early slots, then forward-fill those slots with more urgent / unplanned SOs.
 
-        Phase 1 (Defer): For each unlocked SKU plan (earliest first), move it
-        to the next shift when:
-          (a) the SO's due date is ≥ defer_buffer_days away,
-          (b) the next slot has sufficient free capacity, and
-          (c) no changeover conflict at the next slot.
+        Phase 1 (Defer): For each unlocked, single-step SKU plan (earliest first),
+        move it to the next shift when all of:
+          (a) latest_finish (due_date minus post_lead_days) is ≥ defer_buffer_days away
+          (b) no partial actuals recorded for this SO (production not yet started)
+          (c) the next slot has sufficient free capacity
+          (d) no changeover conflict at the next slot
+          (e) the next slot falls within date_to
+        All qualifying defers are written in one bulk transaction (atomic).
 
         Phase 2 (Fill): Forward-fill under-planned OPEN SOs (most urgent first)
         into the freed slots.
 
         Config keys:
           defer_and_fill_enabled  (int 0/1, default 1)
-          defer_buffer_days       (int, default 7) — minimum due-date buffer required
+          defer_buffer_days       (int, default 7) — min buffer from latest_finish to today
         """
-        if not int(ConfigRepo.get("defer_and_fill_enabled", "1")):
+        try:
+            enabled = int(ConfigRepo.get("defer_and_fill_enabled", "1"))
+        except (ValueError, TypeError):
+            enabled = 1
+        if not enabled:
             return {"deferred": 0, "filled": 0}
 
-        defer_buffer = int(ConfigRepo.get("defer_buffer_days", "7"))
+        try:
+            defer_buffer = int(ConfigRepo.get("defer_buffer_days", "7"))
+        except (ValueError, TypeError):
+            defer_buffer = 7
+
         today = date.today()
 
         self._reload_masters()
         slot_map = self._build_slot_map(date_from, date_to)
 
-        # Subtract unlocked plans so slot_map reflects free capacity
-        all_plans = PlanRepo.all(date_from, date_to, entity_type="SKU")
-        for p in all_plans:
+        # Subtract unlocked SKU plans so slot_map reflects actual free capacity.
+        # Also subtract unlocked MATERIAL plans to avoid overbooking shared rooms.
+        all_sku_plans = PlanRepo.all(date_from, date_to, entity_type="SKU")
+        all_mat_plans = PlanRepo.all(date_from, date_to, entity_type="MATERIAL")
+        for p in list(all_sku_plans) + list(all_mat_plans):
             if p["is_locked"]:
                 continue
             uom = self._entity_uom(p)
@@ -1158,26 +1171,50 @@ class Scheduler:
                 slot_map[key] = max(0.0,
                     slot_map[key] - sku_to_inner(p["qty_planned"], uom))
 
-        # SO due-date cache (only OPEN SOs)
+        # Cache: SKU → routing step count (only single-step SKUs are safe to defer
+        # without risking process-order violations in multi-step chains)
+        from data.repositories import ProcessRoutingRepo as _PRR, ActualRepo as _ActualRepo
+        sku_step_counts: Dict[str, int] = {}
+        for step in _PRR.all():
+            if step["entity_type"] == "SKU":
+                c = sku_step_counts.get(step["entity_code"], 0)
+                sku_step_counts[step["entity_code"]] = c + 1
+
+        # Cache: partial actuals per (so, sku, line_item) — skip if any actual exists
+        actual_map = _ActualRepo.actual_qty_bulk()  # {(so, sku, li): qty}
+
+        # SO cache for latest_finish calculation
         so_cache: Dict[Tuple, Dict] = {}
         for so in SORepo.all(status="OPEN"):
             k = (so["so_number"], so["sku_code"], so["line_item"])
             so_cache[k] = so
 
-        # ── Phase 1: Defer ────────────────────────────────────────────────────
-        deferred = 0
-        unlocked = [p for p in all_plans if not p["is_locked"]]
-        # earliest-first so we try to free the most-congested early slots
+        # ── Phase 1: Collect defers ───────────────────────────────────────────
+        pending_defers: List[Tuple[int, str, int]] = []  # (plan_id, new_date, new_shift)
+        # Track in-memory slot moves before the bulk DB write
+        slot_memo: List[Tuple[SlotKey, SlotKey, float]] = []
+
+        unlocked = [p for p in all_sku_plans if not p["is_locked"]]
         unlocked.sort(key=lambda p: (p["plan_date"], p["shift_no"]))
 
         for plan in unlocked:
+            # Only defer single-step SKUs (multi-step chains risk process order violation)
+            if sku_step_counts.get(plan["sku_code"], 0) > 1:
+                continue
+
             so_key = (plan["so_number"], plan["sku_code"], plan["line_item"])
             so = so_cache.get(so_key)
             if not so or not so.get("due_date"):
                 continue
 
-            # Skip if SO is urgent (not enough buffer)
-            buffer_days = (_date(so["due_date"]) - today).days
+            # Skip if production has already started (partial actuals exist)
+            if actual_map.get(so_key, 0) > 0:
+                continue
+
+            # Buffer check against latest_finish (due_date - post_lead_days),
+            # not raw due_date, to preserve shipping/QC lead time.
+            latest_finish = self._latest_finish(so)
+            buffer_days = (latest_finish - today).days
             if buffer_days < defer_buffer:
                 continue
 
@@ -1190,9 +1227,8 @@ class Scheduler:
             nkey: SlotKey = (nds, plan["room_code"], plan["process_name"], nsno)
             avail = slot_map.get(nkey, 0.0)
             if avail < inner_qty:
-                continue  # next slot doesn't fit the plan
+                continue
 
-            # Changeover guard at next slot
             co_shifts = self._changeover_shifts.get(
                 (plan["room_code"], plan["process_name"]), 0)
             entity_code = plan.get("entity_code") or plan["sku_code"]
@@ -1201,32 +1237,43 @@ class Scheduler:
                     nds, nsno, co_shifts, entity_code):
                 continue
 
-            # Execute: free old slot, consume new slot, update DB
+            # Record in-memory slot change (applied after all checks pass)
             old_key: SlotKey = (plan["plan_date"], plan["room_code"],
                                 plan["process_name"], plan["shift_no"])
+            slot_memo.append((old_key, nkey, inner_qty))
+            pending_defers.append((plan["plan_id"], nds, nsno))
+
+            # Update slot_map eagerly so subsequent iterations see correct capacity
             slot_map[old_key] = slot_map.get(old_key, 0.0) + inner_qty
             slot_map[nkey] = max(0.0, avail - inner_qty)
 
-            PlanRepo.update(plan["plan_id"],
-                            {"plan_date": nds, "shift_no": nsno},
-                            reason="defer_and_fill")
+            # Update _placed_sku: remove old slot entry, record new one
+            self._placed_sku.pop(
+                (plan["room_code"], plan["process_name"],
+                 plan["plan_date"], plan["shift_no"]), None)
             self._record_placed(plan["room_code"], plan["process_name"],
                                 nds, nsno, entity_code)
-            deferred += 1
 
-        # ── Phase 2: Fill ─────────────────────────────────────────────────────
+        # Bulk-write all defers in a single transaction (atomicity)
+        deferred = PlanRepo.bulk_campaign_update(pending_defers,
+                                                  reason="defer_and_fill")
+
+        # ── Phase 2: Fill freed slots with urgent / unplanned SOs ─────────────
+        # Bulk-fetch planned/needed quantities to avoid N+1 queries
+        final_planned_map = PlanRepo.last_plan_info_bulk()   # reuse for existence check
+        from data.repositories import AllocationRepo as _AR
+        all_sos = self._sorted_open_sos()
         report_fill: Dict = {"planned": 0, "late": [], "skipped": 0,
                              "routing_errors": []}
-        from data.repositories import AllocationRepo as _AR
-        for so in self._sorted_open_sos():
+        for so in all_sos:
             prod_needed = _AR.production_needed(
                 so["so_number"], so["sku_code"], so["line_item"])
             planned_qty = PlanRepo.final_planned_qty(
                 so["so_number"], so["sku_code"], so["line_item"])
             if prod_needed - planned_qty <= 0:
                 continue
-            # Forward-fill: use earliest available slots first so freed early
-            # capacity is consumed before late capacity.
+            # Forward-fill: earliest available slot first so freed early slots
+            # are consumed before distant late-horizon slots.
             self._plan_so(so, slot_map, date_from, date_to,
                           report_fill, forward_fill=True)
 
