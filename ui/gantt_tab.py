@@ -3742,6 +3742,19 @@ class GanttTab(QWidget):
         btn_pull.clicked.connect(self.run_pull_forward)
         lay.addWidget(btn_pull)
 
+        # Outline: Defer & Fill
+        btn_defer = QPushButton("⇄  Defer & Fill")
+        btn_defer.setStyleSheet(
+            "QPushButton { background:#fff; color:#3a4255; border:1px solid #d4d7e0;"
+            " border-radius:5px; padding:6px 12px; font-size:11px; font-weight:600; }"
+            "QPushButton:hover { background:#f5f6fa; }"
+        )
+        btn_defer.setToolTip(
+            "Defer low-urgency plans by 1 shift, then forward-fill freed slots "
+            "with urgent / unplanned SOs.")
+        btn_defer.clicked.connect(self.run_defer_and_fill)
+        lay.addWidget(btn_defer)
+
         # Snapshot: manual save + restore
         _SNAP_CSS = (
             "QPushButton { border:1px solid #e2e4ea; border-radius:5px; background:#fff;"
@@ -4771,6 +4784,23 @@ class GanttTab(QWidget):
         dlg = PullForwardDialog(self)
         dlg.exec()
         self.refresh()
+
+    def run_defer_and_fill(self):
+        from PyQt6.QtWidgets import QApplication
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            result = scheduler.defer_and_fill_pass(
+                self._date_from, self._date_to)
+        finally:
+            QApplication.restoreOverrideCursor()
+        deferred = result.get("deferred", 0)
+        filled   = result.get("filled", 0)
+        self.refresh()
+        msg = f"Defer & Fill complete — {deferred} plan(s) deferred, {filled} unit(s) filled."
+        QMessageBox.information(self, "Defer & Fill", msg)
+        if self.main_window:
+            self.main_window.notify(msg)
+            self.main_window._check_conflicts_silent()
 
     def run_clear_plan(self):
         reply = QMessageBox.question(

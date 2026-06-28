@@ -1119,6 +1119,119 @@ class Scheduler:
         moved = PlanRepo.bulk_campaign_update(pending)
         return {"moved": moved}
 
+    # ── Defer-and-Fill Pass ───────────────────────────────────────────────────
+    def defer_and_fill_pass(self, date_from: str, date_to: str) -> Dict:
+        """Post-pass: defer low-urgency unlocked plans one shift later to free
+        early slots, then forward-fill those slots with more urgent / unplanned SOs.
+
+        Phase 1 (Defer): For each unlocked SKU plan (earliest first), move it
+        to the next shift when:
+          (a) the SO's due date is ≥ defer_buffer_days away,
+          (b) the next slot has sufficient free capacity, and
+          (c) no changeover conflict at the next slot.
+
+        Phase 2 (Fill): Forward-fill under-planned OPEN SOs (most urgent first)
+        into the freed slots.
+
+        Config keys:
+          defer_and_fill_enabled  (int 0/1, default 1)
+          defer_buffer_days       (int, default 7) — minimum due-date buffer required
+        """
+        if not int(ConfigRepo.get("defer_and_fill_enabled", "1")):
+            return {"deferred": 0, "filled": 0}
+
+        defer_buffer = int(ConfigRepo.get("defer_buffer_days", "7"))
+        today = date.today()
+
+        self._reload_masters()
+        slot_map = self._build_slot_map(date_from, date_to)
+
+        # Subtract unlocked plans so slot_map reflects free capacity
+        all_plans = PlanRepo.all(date_from, date_to, entity_type="SKU")
+        for p in all_plans:
+            if p["is_locked"]:
+                continue
+            uom = self._entity_uom(p)
+            key: SlotKey = (p["plan_date"], p["room_code"],
+                            p["process_name"], p["shift_no"])
+            if key in slot_map:
+                slot_map[key] = max(0.0,
+                    slot_map[key] - sku_to_inner(p["qty_planned"], uom))
+
+        # SO due-date cache (only OPEN SOs)
+        so_cache: Dict[Tuple, Dict] = {}
+        for so in SORepo.all(status="OPEN"):
+            k = (so["so_number"], so["sku_code"], so["line_item"])
+            so_cache[k] = so
+
+        # ── Phase 1: Defer ────────────────────────────────────────────────────
+        deferred = 0
+        unlocked = [p for p in all_plans if not p["is_locked"]]
+        # earliest-first so we try to free the most-congested early slots
+        unlocked.sort(key=lambda p: (p["plan_date"], p["shift_no"]))
+
+        for plan in unlocked:
+            so_key = (plan["so_number"], plan["sku_code"], plan["line_item"])
+            so = so_cache.get(so_key)
+            if not so or not so.get("due_date"):
+                continue
+
+            # Skip if SO is urgent (not enough buffer)
+            buffer_days = (_date(so["due_date"]) - today).days
+            if buffer_days < defer_buffer:
+                continue
+
+            nds, nsno = self._next_slot(plan["plan_date"], plan["shift_no"])
+            if nds > date_to:
+                continue
+
+            uom = self._entity_uom(plan)
+            inner_qty = sku_to_inner(plan["qty_planned"], uom)
+            nkey: SlotKey = (nds, plan["room_code"], plan["process_name"], nsno)
+            avail = slot_map.get(nkey, 0.0)
+            if avail < inner_qty:
+                continue  # next slot doesn't fit the plan
+
+            # Changeover guard at next slot
+            co_shifts = self._changeover_shifts.get(
+                (plan["room_code"], plan["process_name"]), 0)
+            entity_code = plan.get("entity_code") or plan["sku_code"]
+            if co_shifts and self._has_changeover_conflict(
+                    plan["room_code"], plan["process_name"],
+                    nds, nsno, co_shifts, entity_code):
+                continue
+
+            # Execute: free old slot, consume new slot, update DB
+            old_key: SlotKey = (plan["plan_date"], plan["room_code"],
+                                plan["process_name"], plan["shift_no"])
+            slot_map[old_key] = slot_map.get(old_key, 0.0) + inner_qty
+            slot_map[nkey] = max(0.0, avail - inner_qty)
+
+            PlanRepo.update(plan["plan_id"],
+                            {"plan_date": nds, "shift_no": nsno},
+                            reason="defer_and_fill")
+            self._record_placed(plan["room_code"], plan["process_name"],
+                                nds, nsno, entity_code)
+            deferred += 1
+
+        # ── Phase 2: Fill ─────────────────────────────────────────────────────
+        report_fill: Dict = {"planned": 0, "late": [], "skipped": 0,
+                             "routing_errors": []}
+        from data.repositories import AllocationRepo as _AR
+        for so in self._sorted_open_sos():
+            prod_needed = _AR.production_needed(
+                so["so_number"], so["sku_code"], so["line_item"])
+            planned_qty = PlanRepo.final_planned_qty(
+                so["so_number"], so["sku_code"], so["line_item"])
+            if prod_needed - planned_qty <= 0:
+                continue
+            # Forward-fill: use earliest available slots first so freed early
+            # capacity is consumed before late capacity.
+            self._plan_so(so, slot_map, date_from, date_to,
+                          report_fill, forward_fill=True)
+
+        return {"deferred": deferred, "filled": report_fill["planned"]}
+
     def defragment(self, date_from: str, date_to: str) -> Dict:
         """Post-pass: reorder unlocked SKU plans within each (room, process) to
         pack same-SKU blocks consecutively, minimising changeovers.
@@ -1543,7 +1656,8 @@ class Scheduler:
     def _plan_so(self, so: Dict, slot_map: Dict[SlotKey, float],
                  date_from: str, date_to: str, report: Dict,
                  force: bool = False,
-                 campaign_extra_rem: int = 0):
+                 campaign_extra_rem: int = 0,
+                 forward_fill: bool = False):
         sku_code = so["sku_code"]
         sku      = self.sku_map.get(sku_code)
         if not sku:
@@ -1627,7 +1741,7 @@ class Scheduler:
             rtp = step.get("room_type_priority") or ""
             candidates = self._candidates(
                 slot_map, step["process_name"], eligible, d0, upper_d, upper_s,
-                sku_code, rtp)
+                sku_code, rtp, forward=forward_fill)
 
             # Final step has no slots in constrained window → fall back to full
             # date range so production is always scheduled, even if it will be late.
@@ -1645,7 +1759,7 @@ class Scheduler:
                 deadline_d = upper_d  # already at full range; no further overflow
                 candidates = self._candidates(
                     slot_map, step["process_name"], eligible, d0, upper_d, upper_s,
-                    sku_code, rtp)
+                    sku_code, rtp, forward=forward_fill)
 
             allocated: List[Tuple] = []
             step_rem = qty_to_plan
