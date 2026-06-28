@@ -1235,6 +1235,24 @@ class AppConfigWidget(QWidget):
             "when capacity allows — fills gaps and reduces setup occurrences.")
         form.addRow("Campaign Pass:", self.campaign_pass_enabled)
 
+        self.defer_and_fill_enabled = QCheckBox("Run defer & fill after auto-plan")
+        self.defer_and_fill_enabled.setChecked(
+            ConfigRepo.get("defer_and_fill_enabled", "1") == "1")
+        self.defer_and_fill_enabled.setToolTip(
+            "Defer low-urgency plans 1 shift later, then forward-fill freed slots\n"
+            "with urgent / unplanned SOs to maximize early-slot utilization.")
+        form.addRow("Defer && Fill:", self.defer_and_fill_enabled)
+
+        self.defer_buffer_days = QSpinBox()
+        self.defer_buffer_days.setRange(1, 60)
+        self.defer_buffer_days.setSuffix(" days")
+        self.defer_buffer_days.setValue(
+            int(ConfigRepo.get("defer_buffer_days", "7")))
+        self.defer_buffer_days.setToolTip(
+            "Minimum remaining days (from latest_finish = due_date - post_lead_days)\n"
+            "before a plan is eligible to be deferred. Default: 7 days.")
+        form.addRow("Defer Buffer:", self.defer_buffer_days)
+
         self.campaign_pass_window = QSpinBox()
         self.campaign_pass_window.setRange(1, 30)
         self.campaign_pass_window.setSuffix(" days")
@@ -1388,6 +1406,9 @@ class AppConfigWidget(QWidget):
         ConfigRepo.set("campaign_pass_enabled",
                        "1" if self.campaign_pass_enabled.isChecked() else "0")
         ConfigRepo.set("campaign_pass_window_days", str(self.campaign_pass_window.value()))
+        ConfigRepo.set("defer_and_fill_enabled",
+                       "1" if self.defer_and_fill_enabled.isChecked() else "0")
+        ConfigRepo.set("defer_buffer_days", str(self.defer_buffer_days.value()))
         ConfigRepo.set("pull_forward_util_threshold", str(self.pf_util_thresh.value()))
         ConfigRepo.set("pull_forward_lookahead_days",  str(self.pf_lookahead.value()))
         ConfigRepo.set("pull_forward_max_early_days",  str(self.pf_max_early.value()))

@@ -83,6 +83,9 @@ class Scheduler:
         self._changeover_shifts: Dict[Tuple[str, str], int] = {}
         # Tracks which entity_code is placed in each (room, proc, date, shift) slot
         self._placed_sku: Dict[Tuple[str, str, str, int], str] = {}
+        # plan_ids already deferred this session — reset on auto_plan() to prevent
+        # repeated manual defer from cascading plans further each click
+        self._deferred_plan_ids: set = set()
         self._reload_masters()
 
     def _reload_masters(self):
@@ -213,6 +216,18 @@ class Scheduler:
             report["campaign_moved"] = cp["moved"]
         else:
             report["campaign_moved"] = 0
+
+        # 5. Defer & Fill: move low-urgency plans 1 shift later, forward-fill
+        #    freed slots with urgent / unplanned SOs.
+        #    Reset _deferred_plan_ids so each auto_plan starts fresh.
+        self._deferred_plan_ids.clear()
+        if ConfigRepo.get("defer_and_fill_enabled", "1") == "1":
+            df = self.defer_and_fill_pass(effective_from, date_to)
+            report["defer_deferred"] = df["deferred"]
+            report["defer_filled"]   = df["filled"]
+        else:
+            report["defer_deferred"] = 0
+            report["defer_filled"]   = 0
 
         return report
 
@@ -1198,6 +1213,11 @@ class Scheduler:
         unlocked.sort(key=lambda p: (p["plan_date"], p["shift_no"]))
 
         for plan in unlocked:
+            # SCM-C2: skip plans already deferred this session (prevents repeated
+            # manual clicks from cascading plans further shift-by-shift)
+            if plan["plan_id"] in self._deferred_plan_ids:
+                continue
+
             # Only defer single-step SKUs (multi-step chains risk process order violation)
             if sku_step_counts.get(plan["sku_code"], 0) > 1:
                 continue
@@ -1258,9 +1278,12 @@ class Scheduler:
         deferred = PlanRepo.bulk_campaign_update(pending_defers,
                                                   reason="defer_and_fill")
 
+        # Record deferred plan_ids so repeated manual button clicks don't
+        # cascade plans further shift-by-shift (SCM-C2 fix)
+        for pid, _, _ in pending_defers:
+            self._deferred_plan_ids.add(pid)
+
         # ── Phase 2: Fill freed slots with urgent / unplanned SOs ─────────────
-        # Bulk-fetch planned/needed quantities to avoid N+1 queries
-        final_planned_map = PlanRepo.last_plan_info_bulk()   # reuse for existence check
         from data.repositories import AllocationRepo as _AR
         all_sos = self._sorted_open_sos()
         report_fill: Dict = {"planned": 0, "late": [], "skipped": 0,
@@ -1276,6 +1299,12 @@ class Scheduler:
             # are consumed before distant late-horizon slots.
             self._plan_so(so, slot_map, date_from, date_to,
                           report_fill, forward_fill=True)
+
+        # SCM-H2: re-run campaign_pass to restore same-SKU consecutive blocks
+        # that Phase 1 may have fragmented.  Uses the current slot_map so no
+        # extra CRP reload is needed.
+        if deferred > 0 and ConfigRepo.get("campaign_pass_enabled", "1") == "1":
+            self.campaign_pass(date_from, date_to, slot_full_cap=slot_map)
 
         return {"deferred": deferred, "filled": report_fill["planned"]}
 
