@@ -1028,7 +1028,7 @@ class Scheduler:
         """
         from collections import defaultdict as _dd
 
-        window = int(ConfigRepo.get("campaign_pass_window_days", "3"))
+        window = int(ConfigRepo.get("campaign_pass_window_days", "7"))
         if window <= 0:
             return {"moved": 0}
 
@@ -1651,9 +1651,11 @@ class Scheduler:
             # we restrict to a single room (best by cap) to prevent overproduction/scrap.
             _closing_placed: Dict[Tuple[str, int], str] = {}  # (ds, sno) -> room chosen
 
-            for ds, sno, room_code, rp in candidates:
-                if step_rem <= 0:
-                    break
+            # Index-based loop so SKU-sticky can promote the chronologically
+            # adjacent same-room slot to the next position after each placement.
+            _ci = 0
+            while _ci < len(candidates) and step_rem > 0:
+                ds, sno, room_code, rp = candidates[_ci]
 
                 # Closing-mode: restrict to a single best room only on the very
                 # last shift of the campaign.  "Last shift" = total remaining qty
@@ -1677,16 +1679,19 @@ class Scheduler:
 
                 if _closing_mode and _shift_key in _closing_placed:
                     if _closing_placed[_shift_key] != room_code:
+                        _ci += 1
                         continue  # skip non-chosen rooms in this closing shift
 
                 co = self._changeover_shifts.get((room_code, proc_name), 0)
                 if co > 0 and self._has_changeover_conflict(
                         room_code, proc_name, ds, sno, co, sku_code):
+                    _ci += 1
                     continue
                 key: SlotKey = (ds, room_code, proc_name, sno)
                 avail_inner = slot_map.get(key, 0.0)
                 avail_sku   = inner_to_sku(avail_inner, uom)
                 if avail_sku <= 0:
+                    _ci += 1
                     continue
                 qty_this = min(step_rem, avail_sku)
 
@@ -1715,6 +1720,20 @@ class Scheduler:
                 allocated.append((ds, sno, room_code, qty_this))
                 step_rem -= qty_this
                 report["planned"] += 1
+
+                # SKU-sticky: promote the prev-shift same-room candidate so
+                # the next iteration fills contiguous blocks in the same room
+                # before spreading to other rooms or earlier dates.
+                if step_rem > 0 and _ci + 1 < len(candidates):
+                    prev_ds, prev_sno = self._prev_slot(ds, sno)
+                    for _j in range(_ci + 1, len(candidates)):
+                        c = candidates[_j]
+                        if c[0] == prev_ds and c[1] == prev_sno and c[2] == room_code:
+                            candidates.pop(_j)
+                            candidates.insert(_ci + 1, c)
+                            break
+
+                _ci += 1
 
             # ── Forward overflow (final step only) ─────────────────────────────
             # When backward fill in [d0, deadline_d] is exhausted but capacity
@@ -2129,7 +2148,7 @@ class Scheduler:
                 adj = (1 if sku_code and self._is_same_sku_adjacent(
                            room, process_name, ds, sno, sku_code) else 0)
                 rt  = _rt_rank(rp.get("room_type", ""))
-                return (date_sign * _date(ds).toordinal(), sno_sign * sno, rt, -adj, -calc_uph(rp, hc))
+                return (date_sign * _date(ds).toordinal(), sno_sign * sno, -adj, rt, -calc_uph(rp, hc))
             raw.sort(key=uph_key)
         else:
             def cap_key(item):
@@ -2138,7 +2157,7 @@ class Scheduler:
                 adj = (1 if sku_code and self._is_same_sku_adjacent(
                            room, process_name, ds, sno, sku_code) else 0)
                 rt  = _rt_rank(rp.get("room_type", ""))
-                return (date_sign * _date(ds).toordinal(), sno_sign * sno, rt, -adj, -c)
+                return (date_sign * _date(ds).toordinal(), sno_sign * sno, -adj, rt, -c)
             raw.sort(key=cap_key)
         return raw
 
@@ -2161,6 +2180,16 @@ class Scheduler:
         if idx + 1 < len(sns):
             return ds, sns[idx + 1]
         return str(_date(ds) + timedelta(days=1)), sns[0]
+
+    def _prev_slot(self, ds: str, sno: int) -> Tuple[str, int]:
+        """Return (date_str, shift_no) of the shift immediately before (ds, sno)."""
+        sns = sorted(s["shift_no"] for s in self.shifts)
+        if not sns or sno not in sns:
+            return ds, sno
+        idx = sns.index(sno)
+        if idx > 0:
+            return ds, sns[idx - 1]
+        return _ds(_date(ds) - timedelta(days=1)), sns[-1]
 
     def _has_changeover_conflict(self, room_code: str, process_name: str,
                                   ds: str, sno: int,
