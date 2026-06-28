@@ -1258,6 +1258,7 @@ class GanttCanvas(QWidget):
         self._update_size()
         self._pixmap_dirty = True
         self.update()
+        self.layoutChanged.emit()   # sync Y-axis sidebar immediately
 
     def set_search_filter(self, text: str):
         self._search_filter = text
