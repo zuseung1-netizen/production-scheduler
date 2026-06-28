@@ -1573,6 +1573,11 @@ class Scheduler:
         if remaining <= 0:
             return
 
+        # FIX-2: minimum fill ratio — skip slots where available cap is a tiny
+        # fraction of remaining qty (avoids collecting residual crumbs across
+        # many slots).  Config key "min_slot_fill_ratio", default 0.1.
+        min_fill_ratio = float(ConfigRepo.get("min_slot_fill_ratio", "0.1"))
+
         if force:
             # Ignore window constraints — plan from today to date_to
             d0 = _date(date_from)
@@ -1663,7 +1668,9 @@ class Scheduler:
                 # room's capacity for this one shift.
                 _shift_key = (ds, sno)
                 if _shift_key not in _closing_placed:
-                    _total_campaign_rem = step_rem + campaign_extra_rem
+                    # FIX-1: use this SO's remaining qty only (not future SOs)
+                    # so closing_mode fires whenever the SO fits in one slot.
+                    _total_campaign_rem = step_rem
                     _best_single_cap = max(
                         (inner_to_sku(slot_map.get((_ds, _r, proc_name, _sno), 0.0), uom)
                          for _ds, _sno, _r, _ in candidates
@@ -1691,6 +1698,13 @@ class Scheduler:
                 avail_inner = slot_map.get(key, 0.0)
                 avail_sku   = inner_to_sku(avail_inner, uom)
                 if avail_sku <= 0:
+                    _ci += 1
+                    continue
+                # FIX-2: skip slots that hold only a tiny residual fraction of
+                # remaining qty — prevents collecting crumbs across many slots.
+                if (min_fill_ratio > 0
+                        and avail_sku < step_rem * min_fill_ratio
+                        and step_rem > avail_sku):
                     _ci += 1
                     continue
                 qty_this = min(step_rem, avail_sku)
@@ -1754,7 +1768,7 @@ class Scheduler:
                             break
                         _shift_key = (ds, sno)
                         if _shift_key not in _closing_placed_ov:
-                            _total_campaign_rem_ov = step_rem + campaign_extra_rem
+                            _total_campaign_rem_ov = step_rem  # FIX-1: SO-only
                             _best_ov_cap = max(
                                 (inner_to_sku(slot_map.get((_ds, _r, proc_name, _sno), 0.0), uom)
                                  for _ds, _sno, _r, _ in overflow_cands
@@ -1778,6 +1792,11 @@ class Scheduler:
                         avail_inner_ov = slot_map.get(key_ov, 0.0)
                         avail_sku_ov   = inner_to_sku(avail_inner_ov, uom)
                         if avail_sku_ov <= 0:
+                            continue
+                        # FIX-2: same crumb-skip in overflow section
+                        if (min_fill_ratio > 0
+                                and avail_sku_ov < step_rem * min_fill_ratio
+                                and step_rem > avail_sku_ov):
                             continue
                         qty_ov = min(step_rem, avail_sku_ov)
                         if _ov_closing and _shift_key not in _closing_placed_ov:
