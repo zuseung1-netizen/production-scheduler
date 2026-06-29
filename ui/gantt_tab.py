@@ -4102,27 +4102,33 @@ class GanttTab(QWidget):
                         " border-radius:4px; padding:3px 8px; font-size:10px; font-weight:600; }"
                         "QPushButton:hover { background:#f5f6fa; }")
 
+        _so_init = ConfigRepo.get("gantt_show_so_num", "1") == "1"
         self._btn_show_so = QPushButton("SO #")
         self._btn_show_so.setCheckable(True)
-        self._btn_show_so.setChecked(True)
+        self._btn_show_so.setChecked(_so_init)
         self._btn_show_so.setFixedHeight(26)
         self._btn_show_so.setToolTip("Show/hide SO number line in Gantt cards.\nOff = shorter cards.")
-        self._btn_show_so.setStyleSheet(_lbl_css_on)
+        self._btn_show_so.setStyleSheet(_lbl_css_on if _so_init else _lbl_css_off)
+        self.canvas.toggle_so_num(_so_init)
         def _on_so_toggle(checked):
             self._btn_show_so.setStyleSheet(_lbl_css_on if checked else _lbl_css_off)
             self.canvas.toggle_so_num(checked)
+            ConfigRepo.set("gantt_show_so_num", "1" if checked else "0")
         self._btn_show_so.toggled.connect(_on_so_toggle)
         r1.addWidget(self._btn_show_so)
 
+        _cust_init = ConfigRepo.get("gantt_show_customer", "1") == "1"
         self._btn_show_cust = QPushButton("Customer")
         self._btn_show_cust.setCheckable(True)
-        self._btn_show_cust.setChecked(True)
+        self._btn_show_cust.setChecked(_cust_init)
         self._btn_show_cust.setFixedHeight(26)
         self._btn_show_cust.setToolTip("Show/hide customer name line in Gantt cards.\nOff = shorter cards.")
-        self._btn_show_cust.setStyleSheet(_lbl_css_on)
+        self._btn_show_cust.setStyleSheet(_lbl_css_on if _cust_init else _lbl_css_off)
+        self.canvas.toggle_customer(_cust_init)
         def _on_cust_toggle(checked):
             self._btn_show_cust.setStyleSheet(_lbl_css_on if checked else _lbl_css_off)
             self.canvas.toggle_customer(checked)
+            ConfigRepo.set("gantt_show_customer", "1" if checked else "0")
         self._btn_show_cust.toggled.connect(_on_cust_toggle)
         r1.addWidget(self._btn_show_cust)
 
