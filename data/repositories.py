@@ -796,8 +796,6 @@ class PlanRepo:
         data.setdefault("memo", None)
         data.setdefault("is_closing_shift", 0)
         data.setdefault("stack_order", 0)
-        data.setdefault("plan_level", "SCHEDULE")
-        data.setdefault("room_type", None)
         with get_connection() as conn:
             cur = conn.execute("""
                 INSERT INTO production_plan
@@ -806,14 +804,14 @@ class PlanRepo:
                      plan_date,shift_no,qty_planned,qty_produced,
                      is_locked,is_consolidated,consolidation_group,
                      material_group_id,block_type,memo,is_closing_shift,
-                     stack_order,plan_level,room_type,created_at,updated_at)
+                     stack_order,created_at,updated_at)
                 VALUES
                     (:entity_type,:entity_code,:so_number,:sku_code,:line_item,
                      :process_name,:process_seq,:is_final_seq,:room_code,
                      :plan_date,:shift_no,:qty_planned,:qty_produced,
                      :is_locked,:is_consolidated,:consolidation_group,
                      :material_group_id,:block_type,:memo,:is_closing_shift,
-                     :stack_order,:plan_level,:room_type,:created_at,:updated_at)
+                     :stack_order,:created_at,:updated_at)
             """, data)
             return cur.lastrowid
 
@@ -925,12 +923,11 @@ class PlanRepo:
 
     @staticmethod
     def delete_unlocked(date_from: str, date_to: str) -> int:
-        """Clear unlocked SCHEDULE plans (SKU + MATERIAL) within [date_from, date_to]
+        """Clear unlocked plans (SKU + MATERIAL) within [date_from, date_to]
         and orphaned demand-group rows. Called at the start of auto_plan().
-        Locked plans and MPS plans are kept. date_from acts as a hard lower bound so
-        that plans before the planning window (e.g. frozen zone) are not touched."""
-        clauses = ["is_locked=0", "plan_date >= ?", "plan_date <= ?",
-                   "(plan_level='SCHEDULE' OR plan_level IS NULL)"]
+        Locked plans are kept. date_from acts as a hard lower bound so that
+        plans before the planning window (e.g. frozen zone) are not touched."""
+        clauses = ["is_locked=0", "plan_date >= ?", "plan_date <= ?"]
         params = [date_from, date_to]
         where = "WHERE " + " AND ".join(clauses)
         mat_where = "WHERE " + " AND ".join(
@@ -949,63 +946,6 @@ class PlanRepo:
                     f"DELETE FROM material_demand_group "
                     f"WHERE group_id IN ({placeholders})", group_ids)
         return n
-
-    @staticmethod
-    def delete_unlocked_mps(date_from: str, date_to: str) -> int:
-        """Clear unlocked MPS plans within [date_from, date_to].
-        Called before mps_auto_plan() to reset the rough plan."""
-        params = [date_from, date_to]
-        with get_connection() as conn:
-            n = conn.execute(
-                "SELECT COUNT(*) AS t FROM production_plan "
-                "WHERE plan_level='MPS' AND is_locked=0 "
-                "AND plan_date >= ? AND plan_date <= ?",
-                params).fetchone()["t"]
-            conn.execute(
-                "DELETE FROM production_plan "
-                "WHERE plan_level='MPS' AND is_locked=0 "
-                "AND plan_date >= ? AND plan_date <= ?",
-                params)
-        return n
-
-    @staticmethod
-    def mps_plans(date_from: str = None, date_to: str = None) -> List[Dict]:
-        """Return all MPS-level plans, optionally filtered by date range."""
-        with get_connection() as conn:
-            clauses, params = ["plan_level='MPS'"], []
-            if date_from and date_to:
-                clauses.append("plan_date BETWEEN ? AND ?")
-                params += [date_from, date_to]
-            where = "WHERE " + " AND ".join(clauses)
-            rows = conn.execute(
-                f"SELECT * FROM production_plan {where} "
-                f"ORDER BY plan_date,entity_code,process_name",
-                params).fetchall()
-        return _rows_to_dicts(rows)
-
-    @staticmethod
-    def promote_to_schedule(plan_id: int, room_code: str, shift_no: int,
-                             reason: str = "mps_promote") -> bool:
-        """Promote an MPS plan to a SCHEDULE plan by assigning room + shift.
-        Returns True if the plan was updated, False if not found or already SCHEDULE."""
-        old = PlanRepo.get(plan_id)
-        if not old or old.get("plan_level") != "MPS":
-            return False
-        fields = {
-            "plan_level": "SCHEDULE",
-            "room_code": room_code,
-            "shift_no": shift_no,
-            "updated_at": _now(),
-        }
-        set_clause = ", ".join(f"{k}=:{k}" for k in fields)
-        fields["plan_id"] = plan_id
-        with get_connection() as conn:
-            conn.execute(
-                f"UPDATE production_plan SET {set_clause} WHERE plan_id=:plan_id",
-                fields)
-        _log_plan_history(plan_id, "MODIFIED", old,
-                          {**old, **fields}, reason)
-        return True
 
     @staticmethod
     def delete_unlocked_for_so(so_number: str, sku_code: str, line_item: str,
@@ -1090,15 +1030,12 @@ class PlanRepo:
 
     @staticmethod
     def planned_qty_bulk() -> dict:
-        """Single query → {(so_number, sku_code, line_item): planned_qty}.
-        Excludes MPS-level plans — only SCHEDULE plans count toward planned_qty
-        so that auto_schedule() is not blocked by rough MPS placeholders."""
+        """Single query → {(so_number, sku_code, line_item): planned_qty}."""
         with get_connection() as conn:
             rows = conn.execute(
                 "SELECT so_number, sku_code, line_item, "
                 "COALESCE(SUM(qty_planned),0) AS t "
                 "FROM production_plan "
-                "WHERE plan_level='SCHEDULE' OR plan_level IS NULL "
                 "GROUP BY so_number, sku_code, line_item"
             ).fetchall()
         return {(r["so_number"], r["sku_code"], r["line_item"]): int(r["t"]) for r in rows}
