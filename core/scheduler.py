@@ -1176,6 +1176,8 @@ class Scheduler:
         # Also subtract unlocked MATERIAL plans to avoid overbooking shared rooms.
         all_sku_plans = PlanRepo.all(date_from, date_to, entity_type="SKU")
         all_mat_plans = PlanRepo.all(date_from, date_to, entity_type="MATERIAL")
+        # Track which process is occupying each (date, room, shift) for blocking
+        _occupied: Dict[Tuple[str, str, int], str] = {}  # (date, room, shift) → process_name
         for p in list(all_sku_plans) + list(all_mat_plans):
             if p["is_locked"]:
                 continue
@@ -1185,6 +1187,11 @@ class Scheduler:
             if key in slot_map:
                 slot_map[key] = max(0.0,
                     slot_map[key] - sku_to_inner(p["qty_planned"], uom))
+            _occupied.setdefault(
+                (p["plan_date"], p["room_code"], p["shift_no"]), p["process_name"])
+        # Block other processes in the same room+shift (one-process-per-room-per-shift)
+        for (ds, room, sno), proc in _occupied.items():
+            self._block_room_shift(slot_map, ds, room, proc, sno)
 
         # Cache: SKU → routing step count (only single-step SKUs are safe to defer
         # without risking process-order violations in multi-step chains)
