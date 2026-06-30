@@ -159,6 +159,11 @@ def _dim_key(dim: str, plan: dict) -> str:
         return (f"[MAT]{plan.get('entity_code','')}"
                 if et == "MATERIAL" else (plan.get("sku_code") or "—"))
     if dim == "Room":
+        # MPS plans have room_code='__MPS__': give them virtual rows keyed by room_type+process
+        if plan.get("plan_level") == "MPS":
+            rt   = plan.get("room_type") or "?"
+            proc = plan.get("process_name") or "?"
+            return f"__MPS__:{rt}:{proc}"
         return plan.get("room_code") or "—"
     if dim == "Process":
         return plan.get("process_name") or "—"
@@ -168,6 +173,11 @@ def _dim_key(dim: str, plan: dict) -> str:
 
 def _dim_label(dim: str, key_val: str) -> str:
     """Human-readable label from the stored key value."""
+    if dim == "Room" and key_val.startswith("__MPS__:"):
+        parts = key_val.split(":", 2)
+        rt   = parts[1] if len(parts) > 1 else "?"
+        proc = parts[2] if len(parts) > 2 else "?"
+        return f"[MPS] {rt} · {proc}"
     if dim == "Seq":
         return str(int(key_val)) if key_val.isdigit() else key_val
     return key_val
@@ -1335,7 +1345,10 @@ class GanttCanvas(QWidget):
                 return key
             self._rows = sorted(keys, key=_row_sort_key)
         else:
-            self._rows = sorted(keys)
+            # MPS virtual rows (start with '__MPS__:') are sorted BEFORE real room rows
+            def _mps_sort_key(rk: str) -> tuple:
+                return (0, rk) if rk.startswith("__MPS__:") else (1, rk)
+            self._rows = sorted(keys, key=_mps_sort_key)
         # O(1) lookup dict
         self._row_index = {r: i for i, r in enumerate(self._rows)}
 
@@ -1977,12 +1990,19 @@ class GanttCanvas(QWidget):
                 p.drawRoundedRect(rect, CARD_RADIUS, CARD_RADIUS)
 
             # ── Card border ───────────────────────────────────────────────────
-            if plan["is_locked"]:
+            if plan.get("plan_level") == "MPS":
+                # MPS rough plan: dashed purple border + semi-transparent overlay
+                p.setPen(QPen(QColor(120, 80, 200, 200), 1.5, Qt.PenStyle.DashLine))
+                p.setBrush(QBrush(QColor(120, 80, 200, 18)))
+                p.drawRoundedRect(rect, CARD_RADIUS, CARD_RADIUS)
+            elif plan["is_locked"]:
                 p.setPen(QPen(QColor(170, 178, 200), 1.5, Qt.PenStyle.DashLine))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRoundedRect(rect, CARD_RADIUS, CARD_RADIUS)
             else:
                 p.setPen(QPen(CARD_BORDER_CLR, 1))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRoundedRect(rect, CARD_RADIUS, CARD_RADIUS)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRoundedRect(rect, CARD_RADIUS, CARD_RADIUS)
 
             # Hover highlight is now drawn as a dynamic overlay in _draw_hover_overlay()
             # to avoid invalidating the static pixmap on every mouse move.
@@ -2865,6 +2885,13 @@ class GanttCanvas(QWidget):
             grp       = plan.get("consolidation_group")
             is_merged = len(plan.get("_merged_ids", [])) > 1
             member_ids = plan.get("_merged_ids", [pid])
+            is_mps    = plan.get("plan_level") == "MPS"
+
+            # MPS plan: offer promotion to Schedule
+            if is_mps:
+                menu.addAction("🗓 Promote to Schedule…",
+                               lambda: self._promote_mps_plan(plan))
+                menu.addSeparator()
 
             lock_lbl = "🔓 Unlock" if locked else "🔒 Lock"
             if is_merged:
@@ -2872,8 +2899,9 @@ class GanttCanvas(QWidget):
             menu.addAction(lock_lbl,
                            lambda: self._toggle_lock_merged(member_ids, locked))
             if not is_merged:
-                menu.addAction("✂ Split",     lambda: self._split_plan(plan))
-                menu.addAction("⬅ Pull Out", lambda: self._pull_out(plan))
+                if not is_mps:
+                    menu.addAction("✂ Split",     lambda: self._split_plan(plan))
+                    menu.addAction("⬅ Pull Out", lambda: self._pull_out(plan))
                 if grp:
                     menu.addAction(f"🔗 Break Consolidation ({grp})",
                                    lambda: self._break_consol(grp))
@@ -3020,6 +3048,61 @@ class GanttCanvas(QWidget):
                     "plan_data": plan_data,
                 })
             if self.parent_tab: self.parent_tab.refresh()
+
+    def _promote_mps_plan(self, plan: Dict):
+        """Promote an MPS plan to a detailed SCHEDULE plan by choosing Room + Shift."""
+        from PyQt6.QtWidgets import QDialog, QFormLayout, QComboBox, QDialogButtonBox
+        # Gather eligible rooms (same room_type as the MPS plan)
+        rt = plan.get("room_type") or ""
+        proc = plan.get("process_name") or ""
+        all_rooms = RoomRepo.all()
+        eligible = [r for r in all_rooms
+                    if r["room_type"] == rt and r["process_name"] == proc]
+        if not eligible:
+            QMessageBox.warning(self, "Promote",
+                f"No rooms found for type '{rt}' / process '{proc}'.")
+            return
+        shifts = ShiftRepo.all()
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Promote MPS Plan to Schedule")
+        dlg.setMinimumWidth(320)
+        fl = QFormLayout(dlg)
+        fl.setSpacing(10)
+        fl.addRow(QLabel(f"<b>{plan['sku_code']}</b>  {plan['qty_planned']} units "
+                         f"@ {plan['plan_date']}"))
+        fl.addRow(QLabel(f"Process: <b>{proc}</b>  |  RoomType: <b>{rt}</b>"))
+
+        room_cb = QComboBox()
+        for r in eligible:
+            room_cb.addItem(r["room_code"], r["room_code"])
+        fl.addRow("Room:", room_cb)
+
+        shift_cb = QComboBox()
+        for sh in shifts:
+            shift_cb.addItem(f"Shift {sh['shift_no']}  ({sh['start_time']}–{sh['end_time']})",
+                             sh["shift_no"])
+        fl.addRow("Shift:", shift_cb)
+
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        fl.addRow(bb)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        room_code = room_cb.currentData()
+        shift_no  = shift_cb.currentData()
+        ok = PlanRepo.promote_to_schedule(plan["plan_id"], room_code, shift_no,
+                                           reason="manual_promote")
+        if ok:
+            if self.parent_tab:
+                self.parent_tab.refresh()
+                self.parent_tab.main_window and self.parent_tab.main_window.notify(
+                    f"Plan #{plan['plan_id']} promoted to Schedule → {room_code} Shift {shift_no}")
+        else:
+            QMessageBox.warning(self, "Promote", "Could not promote plan (already SCHEDULE?).")
 
     def _add_plan(self, plan_date: str, shift_no: int, room_code: str):
         dlg = AddPlanDialog(plan_date, shift_no, room_code, self)
@@ -3608,6 +3691,7 @@ class GanttTab(QWidget):
         self.main_window = parent
         self._undo_stack: List[Dict] = []
         self._btn_undo: Optional[QPushButton] = None
+        self._view_mode: str = "schedule"   # "mps" | "schedule"
         self._build_ui()
 
     def _build_ui(self):
@@ -3722,15 +3806,52 @@ class GanttTab(QWidget):
 
         lay.addStretch()
 
-        # Primary: Execute Plan
-        btn_plan = QPushButton("▶  Execute Plan")
-        btn_plan.setStyleSheet(
+        # MPS / Schedule view toggle
+        _toggle_css = (
+            "QPushButton {{ background:{bg}; color:{fg}; border:1px solid {brd};"
+            " border-radius:5px; padding:5px 10px; font-size:11px; font-weight:600; }}"
+            "QPushButton:checked {{ background:{chk}; color:#fff; border-color:{chk}; }}"
+            "QPushButton:hover {{ background:{hov}; }}"
+        )
+        self._btn_mps_view = QPushButton("📐 MPS")
+        self._btn_mps_view.setCheckable(True)
+        self._btn_mps_view.setFixedHeight(30)
+        self._btn_mps_view.setToolTip(
+            "MPS view — rough plan at RoomType×Day level (no Room/Shift assigned)")
+        self._btn_mps_view.setStyleSheet(
+            _toggle_css.format(bg="#fff", fg="#3a4255", brd="#d4d7e0",
+                               chk="#7c3aed", hov="#f5f3ff"))
+        self._btn_sched_view = QPushButton("🗓 Schedule")
+        self._btn_sched_view.setCheckable(True)
+        self._btn_sched_view.setChecked(True)
+        self._btn_sched_view.setFixedHeight(30)
+        self._btn_sched_view.setToolTip(
+            "Schedule view — detailed plan at Room×Shift level (existing mode)")
+        self._btn_sched_view.setStyleSheet(
+            _toggle_css.format(bg="#fff", fg="#3a4255", brd="#d4d7e0",
+                               chk="#2563eb", hov="#eff6ff"))
+        self._btn_mps_view.clicked.connect(lambda: self._set_plan_view("mps"))
+        self._btn_sched_view.clicked.connect(lambda: self._set_plan_view("schedule"))
+        lay.addWidget(self._btn_mps_view)
+        lay.addWidget(self._btn_sched_view)
+
+        # Separator
+        _vsep = QFrame()
+        _vsep.setFrameShape(QFrame.Shape.VLine)
+        _vsep.setFixedHeight(24)
+        _vsep.setStyleSheet("background:#e2e4ea; border:none;")
+        _vsep.setFixedWidth(1)
+        lay.addWidget(_vsep)
+
+        # Primary: Execute Plan / MPS Plan (context-aware)
+        self._btn_exec_plan = QPushButton("▶  Execute Plan")
+        self._btn_exec_plan.setStyleSheet(
             "QPushButton { background:#2f5fd6; color:#fff; border:none; border-radius:5px;"
             " padding:6px 12px; font-size:11px; font-weight:600; }"
             "QPushButton:hover { background:#2451c2; }"
         )
-        btn_plan.clicked.connect(self.run_auto_plan)
-        lay.addWidget(btn_plan)
+        self._btn_exec_plan.clicked.connect(self._on_exec_plan_clicked)
+        lay.addWidget(self._btn_exec_plan)
 
         # Outline: Pull Forward
         btn_pull = QPushButton("←  Pull Forward")
@@ -4785,6 +4906,95 @@ class GanttTab(QWidget):
         # Keep reference so GC doesn't collect it
         self._plan_worker = worker
         worker.start()
+
+    # ── View mode toggle ──────────────────────────────────────────────────────
+
+    def _set_plan_view(self, mode: str):
+        self._view_mode = mode
+        is_mps = (mode == "mps")
+        self._btn_mps_view.setChecked(is_mps)
+        self._btn_sched_view.setChecked(not is_mps)
+        if is_mps:
+            self._btn_exec_plan.setText("📐  MPS Auto-Plan")
+        else:
+            self._btn_exec_plan.setText("▶  Execute Plan")
+        self.refresh()
+
+    def _on_exec_plan_clicked(self):
+        if self._view_mode == "mps":
+            self.run_mps_auto_plan()
+        else:
+            self.run_auto_plan()
+
+    def run_mps_auto_plan(self):
+        """Run MPS rough auto-plan (RoomType×Day, no Room/Shift assigned)."""
+        try:
+            if getattr(self, '_plan_worker', None) and self._plan_worker.isRunning():
+                return
+        except RuntimeError:
+            self._plan_worker = None
+
+        d0, d1 = self._date_range()
+        from PyQt6.QtWidgets import QApplication
+        btn = self._btn_exec_plan
+        btn.setEnabled(False)
+        btn.setText("⏳  Planning…")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+
+        class _Worker(QThread):
+            done  = pyqtSignal(dict)
+            error = pyqtSignal(str)
+            def __init__(self, d0, d1):
+                super().__init__()
+                self._d0, self._d1 = d0, d1
+            def run(self):
+                try:
+                    self.done.emit(scheduler.mps_auto_plan(self._d0, self._d1))
+                except Exception as exc:
+                    import traceback
+                    self.error.emit(traceback.format_exc())
+
+        worker = _Worker(d0, d1)
+
+        def _on_done(report):
+            self._plan_worker = None
+            QApplication.restoreOverrideCursor()
+            btn.setEnabled(True)
+            btn.setText("📐  MPS Auto-Plan")
+            self.refresh()
+            msg = (f"MPS plan: {report['planned']} slots placed, "
+                   f"{len(report['late'])} SOs cannot fit in window.")
+            if self.main_window:
+                self.main_window.notify(msg)
+
+        def _on_error(err):
+            self._plan_worker = None
+            QApplication.restoreOverrideCursor()
+            btn.setEnabled(True)
+            btn.setText("📐  MPS Auto-Plan")
+            QMessageBox.warning(self, "MPS Plan Error", err)
+
+        worker.done.connect(_on_done)
+        worker.error.connect(_on_error)
+        worker.finished.connect(worker.deleteLater)
+        self._plan_worker = worker
+        worker.start()
+
+    def run_auto_schedule(self, date_from: str = None, date_to: str = None):
+        """Run detailed auto-schedule for the visible window."""
+        d0 = date_from or self._date_from
+        d1 = date_to or self._date_to
+        from PyQt6.QtWidgets import QApplication
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            report = scheduler.auto_schedule(d0, d1)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.refresh()
+        msg = (f"Auto-Schedule: {report['planned']} slots, "
+               f"{len(report['late'])} late.")
+        if self.main_window:
+            self.main_window.notify(msg)
 
     def run_pull_forward(self):
         dlg = PullForwardDialog(self)
