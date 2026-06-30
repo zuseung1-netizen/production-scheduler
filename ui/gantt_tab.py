@@ -3721,6 +3721,11 @@ class GanttTab(QWidget):
 
         self.canvas = GanttCanvas(self)
         self.canvas.parent_tab = self
+        # Apply viewbar toggle states that depend on canvas (set after canvas creation)
+        _so_saved = ConfigRepo.get("gantt_show_so_num", "1") == "1"
+        _cust_saved = ConfigRepo.get("gantt_show_customer", "1") == "1"
+        self.canvas.toggle_so_num(_so_saved)
+        self.canvas.toggle_customer(_cust_saved)
         self.canvas.planMoved.connect(self._on_plan_moved)
         self.canvas.planSelected.connect(self._on_plan_selected)
         self.canvas.selectionChanged.connect(self._on_selection_changed)
@@ -4230,7 +4235,8 @@ class GanttTab(QWidget):
         self._btn_show_so.setFixedHeight(26)
         self._btn_show_so.setToolTip("Show/hide SO number line in Gantt cards.\nOff = shorter cards.")
         self._btn_show_so.setStyleSheet(_lbl_css_on if _so_init else _lbl_css_off)
-        self.canvas.toggle_so_num(_so_init)
+        if hasattr(self, "canvas"):
+            self.canvas.toggle_so_num(_so_init)
         def _on_so_toggle(checked):
             self._btn_show_so.setStyleSheet(_lbl_css_on if checked else _lbl_css_off)
             self.canvas.toggle_so_num(checked)
@@ -4245,7 +4251,8 @@ class GanttTab(QWidget):
         self._btn_show_cust.setFixedHeight(26)
         self._btn_show_cust.setToolTip("Show/hide customer name line in Gantt cards.\nOff = shorter cards.")
         self._btn_show_cust.setStyleSheet(_lbl_css_on if _cust_init else _lbl_css_off)
-        self.canvas.toggle_customer(_cust_init)
+        if hasattr(self, "canvas"):
+            self.canvas.toggle_customer(_cust_init)
         def _on_cust_toggle(checked):
             self._btn_show_cust.setStyleSheet(_lbl_css_on if checked else _lbl_css_off)
             self.canvas.toggle_customer(checked)
