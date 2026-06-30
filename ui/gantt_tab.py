@@ -4800,10 +4800,10 @@ class GanttTab(QWidget):
 
     def run_defer_and_fill(self):
         from PyQt6.QtWidgets import QApplication
+        d0, d1 = self._date_range()
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            result = scheduler.defer_and_fill_pass(
-                self._date_from, self._date_to)
+            result = scheduler.defer_and_fill_pass(d0, d1)
         finally:
             QApplication.restoreOverrideCursor()
         deferred = result.get("deferred", 0)
