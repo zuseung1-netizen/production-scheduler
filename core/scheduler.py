@@ -3138,7 +3138,10 @@ class Scheduler:
 
     def _mps_plan_so(self, so: Dict, day_cap: Dict[Tuple[str, str, str], float],
                      date_from: str, date_to: str, report: Dict):
-        """Place MPS-level plans backward from due_date for one SO (final step only)."""
+        """Place MPS-level plans backward for one SO (all routing steps).
+        Final step fills from due_date backward; each pre-step fills from the
+        earliest day of the next step minus a 1-day rough gap.
+        """
         sku_code = so["sku_code"]
         sku = self.sku_map.get(sku_code)
         if not sku:
@@ -3155,82 +3158,90 @@ class Scheduler:
             report["skipped"] += 1
             return
 
-        # Find final step
-        final_step = next((r for r in routing if r.get("is_final_seq")), routing[-1])
-        allowed_types = [t.strip() for t in
-                         (final_step.get("allowed_room_types") or "").split(",") if t.strip()]
-        process_name = final_step["process_name"]
-
         from data.repositories import AllocationRepo as _AR
         prod_needed = _AR.production_needed(so["so_number"], sku_code, so["line_item"])
         if prod_needed <= 0:
             return
 
-        # Already planned at MPS level for this SO step
-        already = sum(
-            p["qty_planned"]
-            for p in PlanRepo.mps_plans()
-            if p["so_number"] == so["so_number"]
-            and p["sku_code"] == sku_code
-            and p["line_item"] == so["line_item"]
-            and p["process_name"] == process_name
-        )
-        remaining_inner = sku_to_inner(prod_needed, uom) - sku_to_inner(already, uom)
-        if remaining_inner <= 0:
-            return
-
+        n_shifts = max(len(self.shifts), 1)
         due = _date(so["due_date"])
-        d_end = min(due, _date(date_to))
         d_start = _date(date_from)
 
-        # Backward fill from due date
-        day_iter = d_end
-        while day_iter >= d_start and remaining_inner > 0:
-            ds = _ds(day_iter)
-            # Try each allowed room_type (pick one that has capacity)
-            for rt in (allowed_types or [t for _, t, pn in day_cap.keys()
-                                          if pn == process_name]):
-                cap_key = (ds, rt, process_name)
-                cap = day_cap.get(cap_key, 0.0)
-                if cap <= 0:
-                    continue
-                place_inner = min(cap, remaining_inner)
-                place_qty = inner_to_sku(place_inner, uom)
-                if place_qty <= 0:
-                    continue
-                actual_inner = sku_to_inner(place_qty, uom)
-                day_cap[cap_key] = cap - actual_inner
-                remaining_inner -= actual_inner
+        # Steps ordered final→first (reverse seq); plan each from cutoff backward
+        steps = sorted(routing, key=lambda r: int(r.get("process_seq") or 0), reverse=True)
+        cutoff = min(due, _date(date_to))  # final step fills up to due/date_to
+        final_late = False
 
-                PlanRepo.insert({
-                    "entity_type":  so.get("entity_type", "SKU"),
-                    "entity_code":  sku_code,
-                    "so_number":    so["so_number"],
-                    "sku_code":     sku_code,
-                    "line_item":    so["line_item"],
-                    "process_name": process_name,
-                    "process_seq":  final_step["process_seq"],
-                    "is_final_seq": 1,
-                    "room_code":    "__MPS__",
-                    "room_type":    rt,
-                    "shift_no":     0,
-                    "plan_date":    ds,
-                    "qty_planned":  place_qty,
-                    "plan_level":   "MPS",
-                    "memo":         f"[MPS] {rt}",
+        for step in steps:
+            is_final  = bool(step.get("is_final_seq"))
+            process_name = step["process_name"]
+            proc_seq  = int(step.get("process_seq") or 0)
+            min_gap   = int(step.get("min_gap_shifts") or 0)
+            allowed_types = [t.strip() for t in
+                             (step.get("allowed_room_types") or "").split(",") if t.strip()]
+
+            remaining_inner = sku_to_inner(prod_needed, uom)
+            d_end = cutoff
+            day_iter = d_end
+            first_placed: Optional[date] = None
+
+            while day_iter >= d_start and remaining_inner > 0:
+                ds = _ds(day_iter)
+                placed_this_day = False
+                for rt in (allowed_types or
+                           sorted({t for _, t, pn in day_cap.keys() if pn == process_name})):
+                    cap_key = (ds, rt, process_name)
+                    cap = day_cap.get(cap_key, 0.0)
+                    if cap <= 0:
+                        continue
+                    place_inner = min(cap, remaining_inner)
+                    place_qty   = inner_to_sku(place_inner, uom)
+                    if place_qty <= 0:
+                        continue
+                    actual_inner = sku_to_inner(place_qty, uom)
+                    day_cap[cap_key] = cap - actual_inner
+                    remaining_inner  -= actual_inner
+
+                    PlanRepo.insert({
+                        "entity_type":  "SKU",
+                        "entity_code":  sku_code,
+                        "so_number":    so["so_number"],
+                        "sku_code":     sku_code,
+                        "line_item":    so["line_item"],
+                        "process_name": process_name,
+                        "process_seq":  proc_seq,
+                        "is_final_seq": 1 if is_final else 0,
+                        "room_code":    "__MPS__",
+                        "room_type":    rt,
+                        "shift_no":     0,
+                        "plan_date":    ds,
+                        "qty_planned":  place_qty,
+                        "plan_level":   "MPS",
+                        "memo":         f"[MPS] {rt}",
+                    })
+                    report["planned"] += 1
+                    if first_placed is None:
+                        first_placed = day_iter
+                    placed_this_day = True
+                    break  # one room_type per day
+
+                day_iter -= timedelta(days=1)
+
+            if is_final and remaining_inner > sku_to_inner(1, uom):
+                final_late = True
+                report["late"].append({
+                    "so": so["so_number"], "sku": sku_code,
+                    "line": so["line_item"], "due": so["due_date"],
+                    "reason": "Insufficient MPS capacity (final step)"
                 })
-                report["planned"] += 1
-                break  # one room_type per day is enough
-            day_iter -= timedelta(days=1)
 
-        if remaining_inner > sku_to_inner(1, uom):
-            report["late"].append({
-                "so": so["so_number"],
-                "sku": sku_code,
-                "line": so["line_item"],
-                "due": so["due_date"],
-                "reason": "Insufficient MPS capacity"
-            })
+            # Next (earlier) step's cutoff = earliest placed day minus gap
+            # rough gap: ceil(min_gap_shifts / n_shifts) days, minimum 1
+            gap_days = max(1, -(-min_gap // n_shifts))  # ceiling division
+            if first_placed is not None:
+                cutoff = first_placed - timedelta(days=gap_days)
+            else:
+                cutoff = d_end - timedelta(days=gap_days)
 
     def auto_schedule(self, date_from: str, date_to: str,
                       progress_cb=None) -> Dict:
