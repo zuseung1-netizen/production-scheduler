@@ -4787,7 +4787,12 @@ class GanttTab(QWidget):
 
     def refresh(self):
         d0, d1   = self._date_range()
-        plans    = PlanRepo.all(d0, d1)
+        all_plans = PlanRepo.all(d0, d1)
+        # Filter by view mode: MPS view shows only MPS plans; Schedule view hides MPS plans
+        if self._view_mode == "mps":
+            plans = [p for p in all_plans if p.get("plan_level") == "MPS"]
+        else:
+            plans = [p for p in all_plans if p.get("plan_level") != "MPS"]
         sos      = SORepo.all()
         skus     = SKURepo.all()
         shifts   = ShiftRepo.all()
